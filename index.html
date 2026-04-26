@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>کره هوا</title>
+  <link rel="preconnect" href="https://api.open-meteo.com" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div id="app"></div>
+
+  <div id="loader" class="loader">
+    <div class="spinner"></div>
+    <div class="loader-text">در حال بارگذاری کره زمین…</div>
+  </div>
+
+  <div id="hud" class="hud hidden">
+    <div id="zoom-indicator" class="zoom-indicator">
+      <span class="zoom-label">دقت</span>
+      <div class="zoom-bar"><div id="zoom-fill" class="zoom-fill"></div></div>
+      <span id="zoom-level" class="zoom-level">جهانی</span>
+    </div>
+  </div>
+
+  <div id="tooltip" class="tooltip hidden"></div>
+
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+        "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+      }
+    }
+  </script>
+  <script type="module" src="main.js"></script>
+</body>
+</html>
