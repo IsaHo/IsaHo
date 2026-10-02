@@ -1,0 +1,17 @@
+[Unit]
+Description=gspot -> Telegram gif daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Adjust User and paths to your server.
+User=www-data
+WorkingDirectory=/opt/gspot_telegram
+EnvironmentFile=/opt/gspot_telegram/.env
+ExecStart=/opt/gspot_telegram/venv/bin/python /opt/gspot_telegram/gspot_to_telegram.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
