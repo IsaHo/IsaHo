@@ -1,8 +1,12 @@
 # gspot → Telegram
 
 A small daemon that scans a source page for GIFs/videos (`.gif`, `.mp4`,
-`.webm`) and posts any it hasn't seen before to a Telegram chat. It remembers
-what it already sent, so restarts don't re-post.
+`.webm`, `.webp`) and posts any it hasn't seen before to a Telegram chat. It
+remembers what it already sent, so restarts don't re-post.
+
+`.webp` files (what gspotwizard serves) are converted before sending, because
+Telegram can't play animated webp: animated webp → animated GIF, static webp →
+PNG. This needs Pillow (in `requirements.txt`).
 
 ## Setup
 

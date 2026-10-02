@@ -68,7 +68,7 @@ USER_AGENT = os.environ.get(
 # cookie. Copy it from your browser's devtools if the scan comes back empty.
 COOKIE = os.environ.get("COOKIE", "").strip()
 
-MEDIA_EXT_RE = re.compile(r"\.(gif|mp4|webm)(?:[?#]|$)", re.IGNORECASE)
+MEDIA_EXT_RE = re.compile(r"\.(gif|mp4|webm|webp)(?:[?#]|$)", re.IGNORECASE)
 
 logging.basicConfig(
     level=os.environ.get("LOG_LEVEL", "INFO").upper(),
@@ -139,7 +139,7 @@ def extract_media_urls(html: str, base_url: str) -> list[str]:
             add(meta.get("content"))
 
     # 4) Last-resort regex sweep over the raw HTML (catches JSON blobs etc.).
-    for m in re.findall(r"""https?://[^\s"'<>\\]+?\.(?:gif|mp4|webm)""", html, re.IGNORECASE):
+    for m in re.findall(r"""https?://[^\s"'<>\\]+?\.(?:gif|mp4|webm|webp)""", html, re.IGNORECASE):
         candidates.append(m)
 
     # Keep only real media URLs, de-duplicated, order preserved.
@@ -172,6 +172,61 @@ def scan(session: requests.Session) -> list[str]:
             seen_local.add(u)
             ordered.append(u)
     return ordered
+
+
+# --------------------------------------------------------------------------- #
+# WebP conversion (Telegram can't play animated .webp as an animation)
+# --------------------------------------------------------------------------- #
+
+def convert_webp(path: Path) -> tuple[Path, str]:
+    """Convert a .webp file so Telegram can display it.
+
+    Animated webp -> animated GIF (sent as an animation).
+    Static webp   -> PNG (sent as a photo).
+    If Pillow isn't installed, the original is returned and sent as a document.
+    """
+    try:
+        from PIL import Image, ImageSequence
+    except ImportError:
+        log.warning("Pillow not installed; sending webp as-is (no playback). "
+                    "Run: pip install Pillow")
+        return path, "webp"
+
+    try:
+        img = Image.open(path)
+    except Exception as exc:  # not a real image / corrupt download
+        log.warning("cannot open webp %s: %s", path, exc)
+        return path, "webp"
+
+    animated = getattr(img, "is_animated", False) and getattr(img, "n_frames", 1) > 1
+
+    if animated:
+        out = path.with_suffix(".gif")
+        frames, durations = [], []
+        for frame in ImageSequence.Iterator(img):
+            frames.append(frame.convert("RGB"))
+            durations.append(frame.info.get("duration", 80))
+        frames[0].save(
+            out, save_all=True, append_images=frames[1:],
+            duration=durations, loop=0, optimize=True,
+        )
+        # If the GIF came out over the upload cap, shrink it once.
+        if out.stat().st_size > MAX_FILE_MB * 1024 * 1024:
+            w, h = frames[0].size
+            if w > 480:
+                scale = 480 / w
+                small = [f.resize((480, max(1, int(h * scale)))) for f in frames]
+                small[0].save(
+                    out, save_all=True, append_images=small[1:],
+                    duration=durations, loop=0, optimize=True,
+                )
+        path.unlink(missing_ok=True)
+        return out, "gif"
+
+    out = path.with_suffix(".png")
+    img.convert("RGB").save(out, "PNG")
+    path.unlink(missing_ok=True)
+    return out, "png"
 
 
 # --------------------------------------------------------------------------- #
@@ -213,8 +268,12 @@ def send_media(path: Path, ext: str, caption: str) -> bool:
         attempts = [("sendAnimation", "animation")]
     elif ext == "mp4":
         attempts = [("sendVideo", "video"), ("sendAnimation", "animation")]
-    else:  # webm or anything else
+    elif ext in ("png", "jpg", "jpeg"):
+        attempts = [("sendPhoto", "photo")]
+    elif ext == "webm":
         attempts = [("sendVideo", "video")]
+    else:  # unknown / unconverted
+        attempts = []
     attempts.append(("sendDocument", "document"))
 
     for method, field in attempts:
@@ -288,6 +347,8 @@ def run_cycle(session: requests.Session, seen: set[str]) -> None:
             seen.add(url)
             continue
         path, ext = downloaded
+        if ext == "webp":
+            path, ext = convert_webp(path)
         try:
             if send_media(path, ext, caption=url):
                 seen.add(url)
