@@ -68,7 +68,25 @@ USER_AGENT = os.environ.get(
 # cookie. Copy it from your browser's devtools if the scan comes back empty.
 COOKIE = os.environ.get("COOKIE", "").strip()
 
+# --- Pagination -------------------------------------------------------------
+# The daemon walks forward through pages: it sends the new media on the current
+# page, and once a page has nothing new it moves to the next one. It never
+# repeats (the "seen" list is permanent) and it remembers its page position
+# across restarts.
+#
+# If PAGE_URL_TEMPLATE is set (must contain "{page}"), pages are addressed by
+# number, e.g. "https://gspotwizard.com/page/{page}/". Otherwise the scraper
+# auto-detects the "next page" link in the HTML, starting from SOURCE_URLS[0].
+PAGE_URL_TEMPLATE = os.environ.get("PAGE_URL_TEMPLATE", "").strip()
+START_PAGE = int(os.environ.get("START_PAGE", "1"))
+# Max pages to walk forward in a single cycle when they have nothing new
+# (keeps the daemon from hammering the site when far behind).
+MAX_PAGE_ADVANCE = int(os.environ.get("MAX_PAGE_ADVANCE", "3"))
+
 MEDIA_EXT_RE = re.compile(r"\.(gif|mp4|webm|webp)(?:[?#]|$)", re.IGNORECASE)
+
+# Text/attribute hints that mark a "next page" link.
+NEXT_HINTS = ("next", "older", "»", "›", "→", "بعد", "بعدی")
 
 logging.basicConfig(
     level=os.environ.get("LOG_LEVEL", "INFO").upper(),
@@ -83,16 +101,29 @@ TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 # State
 # --------------------------------------------------------------------------- #
 
-def load_state() -> set[str]:
+def load_state() -> dict:
+    """State: {"seen": set[str], "page_num": int, "page_url": str|None}."""
+    state = {"seen": set(), "page_num": START_PAGE, "page_url": None}
     try:
-        return set(json.loads(STATE_FILE.read_text()))
+        raw = json.loads(STATE_FILE.read_text())
     except (FileNotFoundError, ValueError):
-        return set()
+        return state
+    if isinstance(raw, list):  # old format was just a list of seen URLs
+        state["seen"] = set(raw)
+        return state
+    state["seen"] = set(raw.get("seen", []))
+    state["page_num"] = raw.get("page_num", START_PAGE)
+    state["page_url"] = raw.get("page_url")
+    return state
 
 
-def save_state(seen: set[str]) -> None:
+def save_state(state: dict) -> None:
     tmp = STATE_FILE.with_suffix(STATE_FILE.suffix + ".tmp")
-    tmp.write_text(json.dumps(sorted(seen)))
+    tmp.write_text(json.dumps({
+        "seen": sorted(state["seen"]),
+        "page_num": state["page_num"],
+        "page_url": state["page_url"],
+    }))
     tmp.replace(STATE_FILE)  # atomic
 
 
@@ -152,26 +183,56 @@ def extract_media_urls(html: str, base_url: str) -> list[str]:
     return out
 
 
-def scan(session: requests.Session) -> list[str]:
-    found: list[str] = []
-    for page in SOURCE_URLS:
-        try:
-            resp = session.get(page, timeout=30)
-            resp.raise_for_status()
-        except requests.RequestException as exc:
-            log.warning("fetch failed for %s: %s", page, exc)
+def fetch(session: requests.Session, url: str) -> str | None:
+    try:
+        resp = session.get(url, timeout=30)
+        resp.raise_for_status()
+        return resp.text
+    except requests.RequestException as exc:
+        log.warning("fetch failed for %s: %s", url, exc)
+        return None
+
+
+def find_next_page(html: str, base_url: str) -> str | None:
+    """Locate the 'next page' link in a page's HTML."""
+    soup = BeautifulSoup(html, "html.parser")
+
+    # 1) Explicit rel="next" on <a> or <link> (the reliable, standard marker).
+    for tag in soup.find_all(["a", "link"]):
+        rel = tag.get("rel") or []
+        if any(r.lower() == "next" for r in rel) and tag.get("href"):
+            return urljoin(base_url, tag["href"])
+
+    # 2) Anchors whose text / aria-label / class hint at "next".
+    for a in soup.find_all("a"):
+        if not a.get("href"):
             continue
-        urls = extract_media_urls(resp.text, page)
-        log.info("scanned %s -> %d media url(s)", page, len(urls))
-        found.extend(urls)
-    # De-dup across pages, preserve order.
-    seen_local: set[str] = set()
-    ordered: list[str] = []
-    for u in found:
-        if u not in seen_local:
-            seen_local.add(u)
-            ordered.append(u)
-    return ordered
+        hint = " ".join([
+            a.get_text(" ", strip=True).lower(),
+            (a.get("aria-label") or "").lower(),
+            " ".join(a.get("class") or []).lower(),
+        ])
+        if any(h in hint for h in NEXT_HINTS):
+            return urljoin(base_url, a["href"])
+    return None
+
+
+def current_page_url(state: dict) -> str:
+    if PAGE_URL_TEMPLATE:
+        return PAGE_URL_TEMPLATE.format(page=state["page_num"])
+    return state["page_url"] or SOURCE_URLS[0]
+
+
+def advance_page(state: dict, html: str, base_url: str) -> bool:
+    """Move the cursor to the next page. Returns True if it moved."""
+    if PAGE_URL_TEMPLATE:
+        state["page_num"] += 1
+        return True
+    nxt = find_next_page(html, base_url)
+    if nxt and nxt != base_url:
+        state["page_url"] = nxt
+        return True
+    return False
 
 
 # --------------------------------------------------------------------------- #
@@ -330,13 +391,8 @@ def check_config() -> None:
         sys.exit(1)
 
 
-def run_cycle(session: requests.Session, seen: set[str]) -> None:
-    media = scan(session)
-    new = [u for u in media if u not in seen]
-    if not new:
-        log.info("no new media this cycle")
-        return
-    log.info("%d new item(s); sending up to %d", len(new), MAX_PER_CYCLE)
+def send_batch(session: requests.Session, state: dict, new: list[str]) -> None:
+    seen = state["seen"]
     sent = 0
     for url in new:
         if sent >= MAX_PER_CYCLE:
@@ -350,17 +406,44 @@ def run_cycle(session: requests.Session, seen: set[str]) -> None:
         if ext == "webp":
             path, ext = convert_webp(path)
         try:
-            if send_media(path, ext, caption=url):
+            if send_media(path, ext, caption=""):
                 seen.add(url)
                 sent += 1
                 log.info("sent %s", url)
-                save_state(seen)
+                save_state(state)
                 time.sleep(2)  # gentle pacing between messages
             else:
                 log.warning("giving up on %s", url)
         finally:
             path.unlink(missing_ok=True)
-    save_state(seen)
+    save_state(state)
+
+
+def run_cycle(session: requests.Session, state: dict) -> None:
+    """Scan the current page; send new media, or walk to the next page."""
+    advances = 0
+    while True:
+        url = current_page_url(state)
+        html = fetch(session, url)
+        if html is None:
+            return  # network hiccup; retry next cycle
+        media = extract_media_urls(html, url)
+        new = [u for u in media if u not in state["seen"]]
+        log.info("page %s -> %d media, %d new", url, len(media), len(new))
+
+        if new:
+            send_batch(session, state, new)
+            return
+
+        # Nothing new on this page -> advance to the next one.
+        if advances >= MAX_PAGE_ADVANCE:
+            log.info("walked %d empty page(s) this cycle; resting", advances)
+            return
+        if not advance_page(state, html, url):
+            log.info("no next page found at %s; reached the end", url)
+            return
+        advances += 1
+        save_state(state)
 
 
 def main() -> None:
@@ -369,15 +452,15 @@ def main() -> None:
     signal.signal(signal.SIGTERM, _stop)
 
     session = make_session()
-    seen = load_state()
+    state = load_state()
     log.info(
-        "starting daemon: %d source(s), interval %ss, state has %d seen",
-        len(SOURCE_URLS), POLL_INTERVAL, len(seen),
+        "starting daemon: interval %ss, %d already seen, starting at %s",
+        POLL_INTERVAL, len(state["seen"]), current_page_url(state),
     )
 
     while _running:
         try:
-            run_cycle(session, seen)
+            run_cycle(session, state)
         except Exception:  # keep the daemon alive on any unexpected error
             log.exception("cycle error")
         # Sleep in short slices so signals are handled promptly.

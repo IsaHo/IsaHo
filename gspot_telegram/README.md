@@ -8,6 +8,25 @@ remembers what it already sent, so restarts don't re-post.
 Telegram can't play animated webp: animated webp → animated GIF, static webp →
 PNG. This needs Pillow (in `requirements.txt`).
 
+## Pagination
+
+The daemon walks forward through the site's pages: it sends the new media on the
+current page, and once a page has nothing new left it moves to the next page.
+Already-sent items (`sent_state.json`) are never resent, and the current page
+position is remembered across restarts.
+
+By default it auto-detects the "next page" link in the HTML. If a scan logs
+`no next page found … reached the end` even though more pages exist, the site's
+pagination isn't a plain link — set a numbered template in `.env` instead:
+
+```
+PAGE_URL_TEMPLATE=https://gspotwizard.com/page/{page}/
+START_PAGE=1
+```
+
+To start the whole walk over from the beginning, stop the service and delete
+`sent_state.json`.
+
 ## Setup
 
 ```bash
