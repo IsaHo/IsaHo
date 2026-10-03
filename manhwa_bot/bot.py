@@ -206,9 +206,8 @@ async def send_images(context, chat_id, items, mode: str) -> int:
             try:
                 media = []
                 for data, fn in batch:
-                    f = InputFile(io.BytesIO(data), filename=fn)
-                    media.append(InputMediaPhoto(media=f) if mode == "photo"
-                                 else InputMediaDocument(media=f))
+                    media.append(InputMediaPhoto(media=data, filename=fn) if mode == "photo"
+                                 else InputMediaDocument(media=data, filename=fn))
                 await _safe(context.bot.send_media_group, chat_id, media=media)
                 ok, sent = True, sent + len(batch)
             except Exception as e:
