@@ -4,103 +4,127 @@
 روی هر ویدیو دکمه‌ی **«⬇️ دانلود»** بزنی، همان لحظه دانلود و برایت فرستاده می‌شود و
 **بلافاصله از روی سرور پاک می‌شود** — پس رم و هارد سرور پر نمی‌شود.
 
-- دانلود تکه‌تکه روی دیسک انجام می‌شود (نه داخل رم).
-- همیشه فقط **یک فایل همزمان** روی دیسک است و بعد از ارسال در `finally` حذف می‌شود.
-- آپلود با **Pyrogram (MTProto)** انجام می‌شود، پس تا **۲ گیگابایت** را هم می‌فرستد
-  (محدودیت ۵۰ مگابایتیِ Bot API معمولی را ندارد).
-- دانلود با **yt-dlp** است، پس هم لینک مستقیم `mp4` و هم استریم `m3u8/HLS` را می‌گیرد.
+## دو نسخه دارد
+
+| نسخه | فایل | چه چیزی لازم دارد | محدودیت حجم |
+|------|------|-------------------|-------------|
+| **پیش‌فرض** (ساده) | `bot.py` | فقط `BOT_TOKEN` | تا ~۴۸ مگابایت؛ فایل بزرگ‌تر → بات فقط **لینک** را می‌فرستد |
+| **۲ گیگی** (اختیاری) | `bot_2gb.py` | `BOT_TOKEN` + `API_ID` + `API_HASH` | تا ~۲ گیگابایت واقعاً فایل را می‌فرستد |
+
+> اگر می‌خواهی فایل‌های بزرگ هم مثل یک ویدیوی واقعی داخل تلگرام بیایند، سراغ نسخه‌ی ۲ گیگی برو
+> (پایین همین صفحه توضیح داده شده). برای شروع، نسخه‌ی پیش‌فرض کافی است.
 
 ---
 
 ## پیش‌نیازها
 
-- پایتون ۳.۸ یا بالاتر
-- `ffmpeg` (برای ادغام استریم‌های m3u8 لازم است)
-
 ```bash
-# اوبونتو / دبیان
-sudo apt update && sudo apt install -y python3 python3-venv python3-pip ffmpeg
+sudo apt update
+sudo apt install -y git python3 python3-venv ffmpeg
 ```
 
-## نصب
+## نصب (نسخه‌ی پیش‌فرض)
 
 ```bash
-# فایل‌ها را روی سرور بگذار، بعد:
-cd /opt/soolakhi-bot          # یا هر مسیری که فایل‌ها را گذاشتی
+sudo git clone -b soolakhi-bot https://github.com/IsaHo/IsaHo.git /opt/isaho-src
+sudo mv /opt/isaho-src/soolakhi-bot /opt/soolakhi-bot
+sudo rm -rf /opt/isaho-src
+cd /opt/soolakhi-bot
+
 python3 -m venv .venv
 source .venv/bin/activate
+pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
 ## تنظیمات
 
-۱) یک کپی از نمونه بساز:
+اگر فایل `.env` آماده را گرفته‌ای، همان را در `/opt/soolakhi-bot/.env` بگذار. وگرنه:
 
 ```bash
 cp .env.example .env
-nano .env
+nano .env     # BOT_TOKEN و ADMIN_IDS را پر کن
 ```
 
-۲) این مقدارها را پر کن:
+- `BOT_TOKEN` از **@BotFather**
+- `ADMIN_IDS` آیدی عددی خودت از **@userinfobot**
 
-| مقدار | از کجا |
-|-------|--------|
-| `API_ID` و `API_HASH` | از <https://my.telegram.org> → بخش **API development tools** |
-| `BOT_TOKEN` | از ربات **@BotFather** یک بات بساز و توکنش را بگیر |
-| `ADMIN_IDS` | آیدی عددی خودت؛ از **@userinfobot** بگیر (تا فقط خودت بتوانی کار کنی) |
+> ⚠️ بعدش حتماً یک‌بار برو سراغ **باتِ خودت** و دکمه‌ی **Start** را بزن؛ تلگرام اجازه نمی‌دهد
+> بات به کسی که اول خودش شروع نکرده پیام بفرستد.
 
-## اجرای تستی اسکرپر (مهم)
-
-چون ساختار HTML هر سایت فرق دارد، اول روی سرورِ خودت که به سایت دسترسی دارد این را اجرا کن:
+## تست اسکرپر (مهم)
 
 ```bash
 source .venv/bin/activate
 python scraper.py --page 1
 ```
 
-- اگر لیستِ **عنوان + لینک + عکس** درست چاپ شد → عالی، برو سراغ اجرای بات.
-- اگر چیزی پیدا نشد یا عنوان/عکس‌ها غلط بود → در فایل `.env` این سه مقدار را تنظیم کن و دوباره تست کن:
-  - `ITEM_SELECTOR` — سلکتورِ باکسِ هر ویدیو در لیست (مثلاً `article` یا `.post` یا `.item`).
-  - `TITLE_SELECTOR` — لینکِ عنوانِ داخل هر باکس.
-  - `THUMB_SELECTOR` — عکسِ داخل هر باکس (معمولاً `img`).
-  - اگر صفحه‌بندیِ سایت فرق دارد، `LISTING_URL_TEMPLATE` را عوض کن
-    (مثلاً `https://www.soolakhi.com/?paged={page}`).
+اگر لیستِ **عنوان + لینک + عکس** درست چاپ شد، عالی. اگر نه، در `.env` این سه مقدار را تنظیم کن و
+دوباره تست کن: `ITEM_SELECTOR` / `TITLE_SELECTOR` / `THUMB_SELECTOR`
+(و در صورت نیاز `LISTING_URL_TEMPLATE`).
 
-> راهنمای پیداکردن سلکتور: در مرورگر، روی یک ویدیو راست‌کلیک → Inspect، و ببین هر آیتم داخل چه تگ/کلاسی است.
-
-## اجرای بات
+## اجرای تستی
 
 ```bash
 source .venv/bin/activate
 python bot.py
 ```
 
-بعد در تلگرام برو سراغ باتِ خودت و بزن:
-
-- `/scan` → اسکن صفحه‌ی اول
-- `/scan 3` → اسکن صفحه‌ی سوم
-- زیر هر ویدیو، دکمه‌ی **⬇️ دانلود** را بزن.
+در تلگرام برو سراغ باتت و بزن `/scan`. برای قطع: `Ctrl+C`.
 
 ## اجرای دائمی (systemd)
 
-برای اینکه بات همیشه روشن بماند، فایل `soolakhi-bot.service` را ببین؛ توضیح نصب بالای همان فایل نوشته شده.
+```bash
+sudo cp /opt/soolakhi-bot/soolakhi-bot.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now soolakhi-bot
+sudo systemctl status soolakhi-bot        # باید active (running) باشد
+journalctl -u soolakhi-bot -f             # دیدن لاگ‌ها
+```
+
+دستورهای مفید:
+
+```bash
+sudo systemctl restart soolakhi-bot       # بعد از تغییر .env
+sudo systemctl stop soolakhi-bot          # خاموش موقت
+cd /opt/soolakhi-bot && sudo git pull && sudo systemctl restart soolakhi-bot   # آپدیت
+```
+
+---
+
+## نسخه‌ی ۲ گیگی (اختیاری — برای فایل‌های بزرگ)
+
+۱) `API_ID` و `API_HASH` را از <https://my.telegram.org> بگیر
+(**API development tools → Create new application**) و در `.env` پر کن.
+
+۲) کتابخانه‌های اضافه را نصب کن:
+
+```bash
+source .venv/bin/activate
+pip install -r requirements.txt -r requirements-2gb.txt
+```
+
+۳) به‌جای `bot.py`، این را اجرا کن:
+
+```bash
+python bot_2gb.py
+```
+
+برای systemd هم کافی است در فایل سرویس، `bot.py` را به `bot_2gb.py` تغییر دهی.
 
 ---
 
 ## تنظیم حجم/کیفیت
 
-اگر فایل‌ها بزرگ‌اند یا به سقف ۲ گیگ می‌خورند، در `.env` مقدار `YTDLP_FORMAT` را محدود کن:
+برای کم‌کردن حجم ویدیوها، در `.env`:
 
 ```
 YTDLP_FORMAT=best[height<=720][ext=mp4]/best[height<=720]/best
 ```
 
-و `MAX_FILESIZE_MB` سقفِ حجمِ هر فایل است (پیش‌فرض ۱۹۵۰).
+## اگر سایت نیاز به ورود دارد
 
-## اگر سایت نیاز به ورود (لاگین) دارد
-
-کوکی‌ها را از مرورگر به فرمت Netscape اکسپورت کن (مثلاً با افزونه‌ی «Get cookies.txt»)،
-فایل را روی سرور بگذار و مسیرش را در `.env` بده:
+کوکی‌ها را به فرمت Netscape اکسپورت کن و مسیرش را بده:
 
 ```
 COOKIES_FILE=/opt/soolakhi-bot/cookies.txt
@@ -110,8 +134,7 @@ COOKIES_FILE=/opt/soolakhi-bot/cookies.txt
 
 ## چند نکته‌ی مهم ⚠️
 
-- این ابزار برای **استفاده‌ی شخصی** و محتوایی است که اجازه/حق دانلودش را داری. رعایت
-  قوانین کپی‌رایت، شرایط استفاده‌ی سایت (ToS/robots.txt) و قوانین تلگرام بر عهده‌ی خودت است.
+- این ابزار برای **استفاده‌ی شخصی** و محتوایی است که حق دانلودش را داری. رعایت کپی‌رایت،
+  شرایط استفاده‌ی سایت و قوانین تلگرام بر عهده‌ی خودت است.
 - `ADMIN_IDS` را حتماً پر کن تا بات عمومی نشود.
-- فایل `.env` و پوشه‌ی `data/` را جایی عمومی (مثل گیت‌هاب) آپلود نکن؛ توکن داخلشان است
-  (در `.gitignore` گذاشته شده).
+- فایل `.env` توکن دارد؛ جایی عمومی نگذارش (در `.gitignore` هست).

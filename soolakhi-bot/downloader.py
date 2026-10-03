@@ -21,8 +21,15 @@ class TooLarge(DownloadError):
     pass
 
 
-def download(url, workdir):
-    """Download `url` into `workdir`. Returns metadata incl. the local path."""
+def download(url, workdir, max_bytes=None):
+    """Download `url` into `workdir`. Returns metadata incl. the local path.
+
+    If `max_bytes` is set and the media is bigger, raises TooLarge instead of
+    downloading it.
+    """
+    if max_bytes is None:
+        max_bytes = config.MAX_FILESIZE_MB * 1024 * 1024
+
     ydl_opts = {
         "outtmpl": os.path.join(workdir, "%(title).70s.%(ext)s"),
         "format": config.YTDLP_FORMAT,
@@ -31,7 +38,7 @@ def download(url, workdir):
         "quiet": True,
         "no_warnings": True,
         "restrictfilenames": True,
-        "max_filesize": config.MAX_FILESIZE_MB * 1024 * 1024,
+        "max_filesize": max_bytes,
         "concurrent_fragment_downloads": 4,
         "retries": 5,
         "fragment_retries": 5,

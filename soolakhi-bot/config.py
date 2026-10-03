@@ -15,12 +15,16 @@ def _int(name, default):
 
 
 # --- Telegram ---
-API_ID = _int("API_ID", 0)
-API_HASH = os.getenv("API_HASH", "").strip()
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 ADMIN_IDS = {
     int(x) for x in os.getenv("ADMIN_IDS", "").replace(" ", "").split(",") if x.strip().isdigit()
 }
+# Only needed for the optional 2 GB version (bot_2gb.py) — leave empty otherwise.
+API_ID = _int("API_ID", 0)
+API_HASH = os.getenv("API_HASH", "").strip()
+
+# Telegram Bot API cap for sending files with a plain bot token (~50 MB).
+SEND_LIMIT_MB = _int("SEND_LIMIT_MB", 48)
 
 # --- Site ---
 BASE_URL = os.getenv("BASE_URL", "https://www.soolakhi.com/").strip()
@@ -48,26 +52,26 @@ USER_AGENT = os.getenv(
 )
 REQUEST_TIMEOUT = _int("REQUEST_TIMEOUT", 25)
 
-# Session file + sqlite cache live in ./data so they survive restarts.
 DATA_DIR = os.path.join(HERE, "data")
 os.makedirs(DATA_DIR, exist_ok=True)
 SESSION_DIR = DATA_DIR
 DB_PATH = os.path.join(DATA_DIR, "videos.sqlite3")
 
-# Temp area for in-flight downloads. Each download gets its own subfolder and
-# is deleted right after the upload, so only one file exists on disk at a time.
+# Temp area for in-flight downloads. Each download gets its own subfolder and is
+# deleted right after the upload, so only one file exists on disk at a time.
 DOWNLOAD_DIR = os.path.join(DATA_DIR, "tmp")
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
 
-def validate():
+def validate(need_api=False):
     missing = []
-    if not API_ID:
-        missing.append("API_ID")
-    if not API_HASH:
-        missing.append("API_HASH")
     if not BOT_TOKEN:
         missing.append("BOT_TOKEN")
+    if need_api:
+        if not API_ID:
+            missing.append("API_ID")
+        if not API_HASH:
+            missing.append("API_HASH")
     if missing:
         raise SystemExit(
             "تنظیمات ناقص است؛ این مقدارها را در فایل .env پر کن: " + ", ".join(missing)

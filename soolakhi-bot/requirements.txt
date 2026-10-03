@@ -1,5 +1,5 @@
-pyrogram==2.0.106
-TgCrypto==1.2.5
+# نسخه‌ی پیش‌فرض — فقط با توکن بات کار می‌کند (بدون api_id/api_hash)
+python-telegram-bot>=21.0,<22.0
 yt-dlp>=2024.8.6
 requests>=2.31.0
 beautifulsoup4>=4.12.0

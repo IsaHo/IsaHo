@@ -1,0 +1,4 @@
+# فقط برای نسخه‌ی ۲ گیگی (bot_2gb.py) لازم است — نیاز به api_id/api_hash دارد.
+# نصب:  pip install -r requirements.txt -r requirements-2gb.txt
+pyrogram==2.0.106
+TgCrypto==1.2.5
