@@ -83,15 +83,16 @@ def authorized(update: Update) -> bool:
 
 # ----------------------------- UI helpers -----------------------------
 
-def chapters_keyboard(page: int, total: int) -> InlineKeyboardMarkup:
+def chapters_keyboard(chapters: list, page: int) -> InlineKeyboardMarkup:
+    total = len(chapters)
     rows: list[list[InlineKeyboardButton]] = []
-    rows.append([InlineKeyboardButton("⏬ دانلود همه از قسمت ۱", callback_data="tail:0")])
+    rows.append([InlineKeyboardButton("⏬ دانلود همه از اولین قسمت", callback_data="tail:0")])
 
     start = page * PER_PAGE
     end = min(start + PER_PAGE, total)
     row: list[InlineKeyboardButton] = []
     for i in range(start, end):
-        row.append(InlineKeyboardButton(f"قسمت {i + 1}", callback_data=f"ch:{i}"))
+        row.append(InlineKeyboardButton(chapters[i].label, callback_data=f"ch:{i}"))
         if len(row) == 2:
             rows.append(row)
             row = []
@@ -178,7 +179,7 @@ async def deliver_chapter(context, chat_id, chapter, mode: str) -> int:
     await context.bot.send_chat_action(chat_id, ChatAction.UPLOAD_PHOTO)
     img_urls = await asyncio.to_thread(scraper.get_images, chapter.url)
     if not img_urls:
-        await context.bot.send_message(chat_id, f"⚠️ برای «{chapter.title}» صفحه‌ای پیدا نشد.")
+        await context.bot.send_message(chat_id, f"⚠️ برای {chapter.label} صفحه‌ای پیدا نشد.")
         return 0
 
     items: list[tuple[bytes, str]] = []
@@ -191,7 +192,7 @@ async def deliver_chapter(context, chat_id, chapter, mode: str) -> int:
             log.warning("دانلود عکس ناموفق %s: %s", u, e)
 
     if not items:
-        await context.bot.send_message(chat_id, f"⚠️ دانلود صفحه‌های «{chapter.title}» ناموفق بود.")
+        await context.bot.send_message(chat_id, f"⚠️ دانلود صفحه‌های {chapter.label} ناموفق بود.")
         return 0
 
     await send_images(context, chat_id, items, mode)
@@ -260,7 +261,7 @@ async def on_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["page"] = 0
     await msg.edit_text(
         f"✅ {len(chapters)} قسمت پیدا شد.\nیکی رو انتخاب کن 👇",
-        reply_markup=chapters_keyboard(0, len(chapters)),
+        reply_markup=chapters_keyboard(chapters, 0),
     )
 
 
@@ -288,7 +289,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             await q.edit_message_text(
                 f"✅ {total} قسمت.\nیکی رو انتخاب کن 👇",
-                reply_markup=chapters_keyboard(page, total),
+                reply_markup=chapters_keyboard(chapters, page),
             )
         except BadRequest:
             pass
@@ -299,13 +300,13 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not (0 <= idx < total):
             return
         ch = chapters[idx]
-        await context.bot.send_message(q.message.chat_id, f"📥 در حال ارسال «{ch.title}» ...")
+        await context.bot.send_message(q.message.chat_id, f"📥 در حال ارسال {ch.label} ...")
         try:
             n = await deliver_chapter(context, q.message.chat_id, ch, mode)
             if n:
                 await context.bot.send_message(
                     q.message.chat_id,
-                    f"✅ «{ch.title}» ({n} صفحه) ارسال شد.",
+                    f"✅ {ch.label} ({n} صفحه) ارسال شد.",
                     reply_markup=after_chapter_keyboard(idx, total),
                 )
         except Exception as e:
@@ -334,7 +335,7 @@ async def batch_download(context, chat_id, start: int, mode: str):
             await context.bot.send_message(chat_id, "⏹️ متوقف شد.")
             return
         ch = chapters[idx]
-        await context.bot.send_message(chat_id, f"— قسمت {idx + 1}/{total}: {ch.title}")
+        await context.bot.send_message(chat_id, f"— {ch.label} ({idx + 1}/{total})")
         try:
             await deliver_chapter(context, chat_id, ch, mode)
         except Exception as e:
