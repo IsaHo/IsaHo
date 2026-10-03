@@ -27,7 +27,13 @@ import threading
 import time
 from datetime import datetime
 
-from telegram import KeyboardButton, ReplyKeyboardMarkup, Update
+from telegram import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardMarkup,
+    Update,
+)
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -68,7 +74,7 @@ DATA_DIR = os.path.join(HERE, "data")
 CATALOG_FILE = os.path.join(DATA_DIR, "catalog.json")
 FOLLOWS_FILE = os.path.join(DATA_DIR, "follows.json")
 CATALOG_TTL = 6 * 3600
-CATALOG_VERSION = 2               # با تغییر روش استخراج اسم، کش قدیمی باطل می‌شود
+CATALOG_VERSION = 3               # با تغییر روش استخراج اسم، کش قدیمی باطل می‌شود
 UPDATE_INTERVAL = 2 * 3600        # هر چند ثانیه سایت برای بروزرسانی چک شود
 BROWSE_PER = 16
 LINKS_PER_MSG = 40
@@ -289,19 +295,23 @@ async def open_series(context, chat_id, ud, any_url, status_msg=None):
     follow_story(ud["uid"], series.url, series.title, len(series.chapters))
 
     first, last = series.chapters[0].label, series.chapters[-1].label
-    text = (f"✅ «{series.title}»\n"
+    info = (f"✅ «{series.title}»\n"
             f"{len(series.chapters)} قسمت ({first} تا {last}).\n"
-            f"🔗 لینک داستان:\n{series.url}\n\n"
-            f"👈 شمارهٔ قسمت رو بفرست تا لینکش رو بدم،\n"
-            f"یا «🔗 لینک همهٔ قسمت‌ها» رو بزن.")
+            f"🔗 {series.url}")
     if prev.get("last_num"):
-        text += f"\n📖 آخرین‌بار تا قسمت {prev['last_num']} رفته بودی."
+        info += f"\n📖 آخرین‌بار تا قسمت {prev['last_num']} رفته بودی."
     if status_msg:
         try:
             await status_msg.delete()
         except Exception:
             pass
-    await context.bot.send_message(chat_id, text, reply_markup=main_kb(), disable_web_page_preview=True)
+    await context.bot.send_message(
+        chat_id, info,
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🌐 باز کردن صفحهٔ داستان", url=series.url)]]),
+        disable_web_page_preview=True)
+    await context.bot.send_message(
+        chat_id, "👈 شمارهٔ قسمت رو بفرست تا لینک دکمه‌ایش رو بدم، یا «🔗 لینک همهٔ قسمت‌ها» رو بزن.",
+        reply_markup=main_kb())
     return True
 
 
@@ -496,7 +506,8 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         follow_story(ud["uid"], ud["series_url"], ud["title"], len(chapters), last_num=int(ch.num) if ch.num == int(ch.num) else ch.num)
         await update.message.reply_text(
             f"🔗 {ch.label} — «{ud['title']}»\n{ch.url}",
-            reply_markup=main_kb(), disable_web_page_preview=True)
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🌐 باز کردن در مرورگر", url=ch.url)]]),
+            disable_web_page_preview=True)
         return
 
     # هر متن دیگر = جستجو

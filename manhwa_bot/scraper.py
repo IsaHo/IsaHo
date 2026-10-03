@@ -61,16 +61,14 @@ _BADGE_RE = re.compile(r"(تازه|شروع خواندن|ادامه(?: مطلب)
 
 
 def _best_title(texts) -> str:
-    """از میان متن‌های یک کارت، اسم واقعی داستان را درمی‌آورد (برچسب‌هایی مثل «تازه» حذف می‌شوند)."""
-    best = ""
+    """اسم واقعی داستان = اولین متنِ معتبرِ کارت (نه برچسب، نه «قسمت ...»، نه «کاور ...»)."""
     for t in texts:
         c = " ".join(_BADGE_RE.sub(" ", t).split()).strip(" |-–—:")
-        # حذف کاندیدهای بی‌ارزش (خالی، فقط عدد/علامت)
-        if not c or re.fullmatch(r"[\d۰-۹,،.\s/|–—-]+", c):
+        c = re.sub(r"^کاور\s+", "", c).strip()
+        if not c or c.startswith("قسمت") or re.fullmatch(r"[\d۰-۹,،.\s/|–—-]+", c):
             continue
-        if len(c) > len(best):
-            best = c
-    return best
+        return c
+    return ""
 
 
 def _page_no(fname: str) -> int:
@@ -210,7 +208,7 @@ class Scraper:
     def get_catalog(self, max_pages: int = 60) -> list[dict]:
         """فهرست همهٔ داستان‌های سایت را با پیمایش صفحه‌های اصلی جمع می‌کند.
         هر آیتم: {'slug','title','url'}."""
-        cand: dict[str, set] = {}
+        cand: dict[str, list] = {}
         empty_streak = 0
         for pg in range(1, max_pages + 1):
             url = f"{SITE}/" if pg == 1 else f"{SITE}/?page={pg}"
@@ -224,16 +222,16 @@ class Scraper:
                 href = self._unwrap((a.get("href") or "").strip())
                 parts = urlparse(urljoin(url, href)).path.strip("/").split("/")
                 if len(parts) == 2 and parts[0] == "series":
-                    texts = cand.setdefault(parts[1], set())
+                    texts = cand.setdefault(parts[1], [])
                     t = " ".join(a.get_text(strip=True).split())
                     if t:
-                        texts.add(t)
+                        texts.append(t)
                     img = a.find("img")
                     if img:
                         for att in ("alt", "title"):
                             v = " ".join((img.get(att) or "").split())
                             if v:
-                                texts.add(v)
+                                texts.append(v)
             if len(cand) == before:
                 empty_streak += 1
                 if empty_streak >= 2:
