@@ -28,6 +28,7 @@ import logging
 import os
 import re
 import threading
+import time
 from datetime import datetime
 
 from telegram import (
@@ -84,12 +85,19 @@ SLEEP_BETWEEN_DOWNLOADS = 0.15
 DEFAULT_MODE = "pdf"
 DATA_DIR = os.path.join(HERE, "data")
 PROGRESS_FILE = os.path.join(DATA_DIR, "progress.json")
+CATALOG_FILE = os.path.join(DATA_DIR, "catalog.json")
+CATALOG_TTL = 12 * 3600
+BROWSE_PER = 16
 URL_RE = re.compile(r"https?://[^\s]+")
 
 BTN_RESUME = "➡️ ادامه"
 BTN_ALL = "⏬ همه از اول"
 BTN_STOP = "⏹ توقف"
 BTN_MINE = "📖 داستان‌های من"
+BTN_SEARCH = "🔎 جستجو"
+BTN_ALLSTORIES = "📚 همهٔ داستان‌ها"
+BTN_NEXT = "صفحهٔ بعد ▶️"
+BTN_PREV = "◀️ صفحهٔ قبل"
 BTN_BACK = "⬅️ بازگشت"
 MODE_LABELS = {"pdf": "📄 حالت: پی‌دی‌اف", "photo": "🖼 حالت: عکس", "document": "📁 حالت: فایل"}
 MODE_CYCLE = {"pdf": "photo", "photo": "document", "document": "pdf"}
@@ -151,15 +159,70 @@ def list_progress(uid):
     return items
 
 
+# ----------------------------- catalog -----------------------------
+
+_clock = threading.Lock()
+
+
+def _load_catalog_cache():
+    try:
+        with open(CATALOG_FILE, encoding="utf-8") as f:
+            d = json.load(f)
+        if d.get("items") and time.time() - d.get("ts", 0) < CATALOG_TTL:
+            return d["items"]
+    except Exception:
+        pass
+    return None
+
+
+def _save_catalog_cache(items):
+    os.makedirs(DATA_DIR, exist_ok=True)
+    tmp = CATALOG_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump({"ts": time.time(), "items": items}, f, ensure_ascii=False)
+    os.replace(tmp, CATALOG_FILE)
+
+
+async def ensure_catalog(context, chat_id, force=False):
+    if not force:
+        cached = _load_catalog_cache()
+        if cached:
+            return cached
+    msg = await context.bot.send_message(
+        chat_id, "⏳ در حال گرفتن فهرست همهٔ داستان‌های سایت... (یک‌بار، کمی طول می‌کشه)")
+    items = await asyncio.to_thread(scraper.get_catalog)
+    if items:
+        with _clock:
+            _save_catalog_cache(items)
+    try:
+        await msg.delete()
+    except Exception:
+        pass
+    return items or _load_catalog_cache() or []
+
+
+def search_catalog(items, q):
+    q = q.strip().lower()
+    starts, contains = [], []
+    for it in items:
+        t = it["title"].lower()
+        if t.startswith(q) or it["slug"].lower().startswith(q):
+            starts.append(it)
+        elif q in t or q in it["slug"].lower():
+            contains.append(it)
+    return starts + contains
+
+
 # ----------------------------- keyboards -----------------------------
 
 def main_kb(mode: str) -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
-        [[BTN_RESUME],
+        [[BTN_SEARCH, BTN_ALLSTORIES],
+         [BTN_RESUME],
          [BTN_ALL, BTN_STOP],
          [BTN_MINE, MODE_LABELS.get(mode, MODE_LABELS[DEFAULT_MODE])]],
         resize_keyboard=True, is_persistent=True,
-        input_field_placeholder="شمارهٔ قسمت یا لینک رو بفرست",
+        input_field_placeholder="اسم داستان، شمارهٔ قسمت، یا لینک رو بفرست",
     )
 
 
@@ -396,6 +459,52 @@ async def do_resume(context, chat_id, ud, mode):
     await send_chapter_idx(context, chat_id, ud, nxt, mode)
 
 
+def _uniq_label(base, pick_map, slug=""):
+    label = base[:55] or slug
+    while label in pick_map:
+        label = f"{label} ·"
+    return label
+
+
+async def show_picker(context, chat_id, ud, items, header):
+    """لیست داستان‌ها را به صورت کیبورد پایین نشان می‌دهد؛ تپ = باز کردن."""
+    ud["pick_map"] = {}
+    titles = []
+    for it in items[:60]:
+        label = _uniq_label(it["title"], ud["pick_map"], it["slug"])
+        ud["pick_map"][label] = it["url"]
+        titles.append(label)
+    ud["await_pick"] = True
+    await context.bot.send_message(chat_id, header, reply_markup=mine_kb(titles))
+
+
+async def show_browse(context, chat_id, ud):
+    items = ud.get("browse") or []
+    total = len(items)
+    pages = max(1, (total + BROWSE_PER - 1) // BROWSE_PER)
+    pg = max(0, min(ud.get("bpage", 0), pages - 1))
+    ud["bpage"] = pg
+    chunk = items[pg * BROWSE_PER:(pg + 1) * BROWSE_PER]
+    ud["pick_map"] = {}
+    rows = []
+    for it in chunk:
+        label = _uniq_label(it["title"], ud["pick_map"], it["slug"])
+        ud["pick_map"][label] = it["url"]
+        rows.append([KeyboardButton(label)])
+    nav = []
+    if pg > 0:
+        nav.append(KeyboardButton(BTN_PREV))
+    nav.append(KeyboardButton(f"{pg+1}/{pages}"))
+    if pg < pages - 1:
+        nav.append(KeyboardButton(BTN_NEXT))
+    rows.append(nav)
+    rows.append([KeyboardButton(BTN_BACK)])
+    ud["await_pick"] = True
+    await context.bot.send_message(
+        chat_id, f"📚 همهٔ داستان‌ها ({total}) — صفحهٔ {pg+1}/{pages}\nیکی رو بزن، یا اسم داستان رو سرچ کن.",
+        reply_markup=ReplyKeyboardMarkup(rows, resize_keyboard=True, is_persistent=True))
+
+
 async def show_mine(context, chat_id, ud):
     items = list_progress(ud["uid"])
     mode = ud.get("mode", DEFAULT_MODE)
@@ -422,12 +531,13 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     mode = context.user_data.get("mode", DEFAULT_MODE)
     await update.message.reply_text(
         "سلام! 👋\n\n"
-        "لینک سری یا یکی از قسمت‌ها رو بفرست.\n"
-        "نمونه: https://sarrast.com/series/secret-class\n\n"
+        "• 🔎 اسم داستان رو بفرست تا توی کل سایت سرچ کنم.\n"
+        "• 📚 «همهٔ داستان‌ها» رو بزن تا کل فهرست سایت رو مرور کنی.\n"
+        "• لینک سری/قسمت هم مستقیم کار می‌کنه.\n"
         "• برای یه قسمت مشخص: شمارهٔ قسمت رو بفرست (مثلاً 34).\n"
-        "• حالت پیش‌فرض «📄 پی‌دی‌اف»ه: همهٔ صفحه‌های قسمت در یک فایل، بزرگ و باکیفیت.\n"
-        "• با دکمهٔ «حالت» می‌تونی بین پی‌دی‌اف / عکس / فایل سوییچ کنی.\n"
-        "• ربات یادش می‌مونه هر داستان رو تا کجا خوندی.",
+        "• حالت پیش‌فرض «📄 پی‌دی‌اف»: همهٔ صفحه‌های قسمت در یک فایل، فارسی و باکیفیت.\n"
+        "• هر قسمت، لینک مستقیمش هم فرستاده می‌شه.\n"
+        "• ربات یادش می‌مونه هر داستان رو تا کجا خوندی («➡️ ادامه» یا «📖 داستان‌های من»).",
         reply_markup=main_kb(mode), disable_web_page_preview=True,
     )
 
@@ -490,6 +600,24 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text == BTN_MINE:
         await show_mine(context, chat_id, ud)
         return
+    if text == BTN_SEARCH:
+        await update.message.reply_text("🔎 اسم داستان (یا بخشی ازش) رو بفرست.", reply_markup=main_kb(mode))
+        return
+    if text == BTN_ALLSTORIES:
+        items = await ensure_catalog(context, chat_id)
+        if not items:
+            await update.message.reply_text("نشد فهرست رو بگیرم، دوباره امتحان کن.", reply_markup=main_kb(mode))
+            return
+        ud["browse"], ud["bpage"] = items, 0
+        await show_browse(context, chat_id, ud)
+        return
+    if text in (BTN_NEXT, BTN_PREV):
+        if ud.get("browse"):
+            ud["bpage"] = ud.get("bpage", 0) + (1 if text == BTN_NEXT else -1)
+            await show_browse(context, chat_id, ud)
+        return
+    if re.fullmatch(r"\d+/\d+", text):   # دکمهٔ نشانگر صفحه
+        return
     if text == BTN_BACK:
         ud["await_pick"] = False
         await update.message.reply_text("باشه.", reply_markup=main_kb(mode))
@@ -523,9 +651,15 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await send_chapter_idx(context, chat_id, ud, idx, mode)
         return
 
-    await update.message.reply_text(
-        "متوجه نشدم. یه لینک بفرست، یا شمارهٔ قسمت رو بزن، یا از دکمه‌های پایین استفاده کن.",
-        reply_markup=main_kb(mode))
+    # هر متن دیگر = جستجو در کاتالوگ سایت
+    items = await ensure_catalog(context, chat_id)
+    res = search_catalog(items, text) if items else []
+    if not res:
+        await update.message.reply_text(
+            f"🔎 «{text}» چیزی پیدا نشد. اسم دیگه‌ای امتحان کن یا 📚 همهٔ داستان‌ها رو بزن.",
+            reply_markup=main_kb(mode))
+        return
+    await show_picker(context, chat_id, ud, res, f"🔎 {len(res)} نتیجه برای «{text}». یکی رو انتخاب کن:")
 
 
 async def batch_download(context, chat_id, ud, start, mode):

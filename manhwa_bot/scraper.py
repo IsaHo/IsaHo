@@ -33,6 +33,7 @@ DEFAULT_HEADERS = {
     "Accept-Language": "en-US,en;q=0.9,fa;q=0.8",
 }
 
+SITE = "https://sarrast.com"
 IMG_ATTRS = ["data-src", "data-lazy-src", "data-original", "src"]
 MAX_PAGE_NO = 2000  # شماره‌ی صفحه‌ی بزرگ‌تر از این = آشغال (بنر ادامه دارد)
 
@@ -187,6 +188,39 @@ class Scraper:
 
     def get_chapters(self, any_url: str) -> list[Chapter]:
         return self.get_series(any_url).chapters
+
+    # ---------- catalog ----------
+
+    def get_catalog(self, max_pages: int = 60) -> list[dict]:
+        """فهرست همهٔ داستان‌های سایت را با پیمایش صفحه‌های اصلی جمع می‌کند.
+        هر آیتم: {'slug','title','url'}."""
+        out: dict[str, str] = {}
+        empty_streak = 0
+        for pg in range(1, max_pages + 1):
+            url = f"{SITE}/" if pg == 1 else f"{SITE}/?page={pg}"
+            try:
+                html = self.get(url).text
+            except Exception:
+                break
+            soup = BeautifulSoup(html, "html.parser")
+            before = len(out)
+            for a in soup.find_all("a"):
+                href = self._unwrap((a.get("href") or "").strip())
+                parts = urlparse(urljoin(url, href)).path.strip("/").split("/")
+                if len(parts) == 2 and parts[0] == "series":
+                    slug = parts[1]
+                    t = " ".join(a.get_text(strip=True).split())
+                    out.setdefault(slug, "")
+                    if t and t not in ("شروع خواندن", "ادامه") and not out[slug]:
+                        out[slug] = t
+            if len(out) == before:
+                empty_streak += 1
+                if empty_streak >= 2:
+                    break
+            else:
+                empty_streak = 0
+        return [{"slug": s, "title": t or s, "url": f"{SITE}/series/{s}"}
+                for s, t in sorted(out.items(), key=lambda kv: kv[1] or kv[0])]
 
     # ---------- images ----------
 
