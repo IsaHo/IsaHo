@@ -508,11 +508,13 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("اول یه لینک داستان بفرست.", reply_markup=main_kb(mode))
             return
         want = float(mnum.group(1))
-        idx = next((i for i, c in enumerate(ud["chapters"]) if c.num == want), None)
+        chapters = ud["chapters"]
+        idx = next((i for i, c in enumerate(chapters) if c.num == want), None)
+        if idx is None and want == int(want) and 1 <= int(want) <= len(chapters):
+            idx = int(want) - 1  # شمارهٔ دقیق نبود؛ قسمتِ n‌ام فهرست
         if idx is None:
-            last = ud["chapters"][-1].num
             await update.message.reply_text(
-                f"قسمت {int(want) if want==int(want) else want} پیدا نشد (تا {int(last)}).",
+                f"قسمت {int(want) if want==int(want) else want} پیدا نشد (۱ تا {len(chapters)}).",
                 reply_markup=main_kb(mode))
             return
         await send_chapter_idx(context, chat_id, ud, idx, mode)

@@ -56,6 +56,18 @@ def extract_num(slug: str) -> float:
     return float(m.group(1)) if m else 0.0
 
 
+def _page_no(fname: str) -> int:
+    """شمارهٔ صفحه را از نام فایل درمی‌آورد، برای هر سه حالت:
+    '1-f37fa' -> 1 (عدد اول) ، '0' / '001' -> 0 ، '3532_Q2.._0' -> 0 (عدد آخر)."""
+    m = re.match(r"^(\d+)-[0-9A-Za-z]+$", fname)   # <page>-<token>
+    if m:
+        return int(m.group(1))
+    if fname.isdigit():
+        return int(fname)
+    m = re.search(r"(\d+)$", fname)
+    return int(m.group(1)) if m else -1
+
+
 @dataclass
 class Chapter:
     num: float
@@ -201,15 +213,13 @@ class Scraper:
             if src and src.lower().startswith("http"):
                 raw.append(src)
 
-        # نام فایل هر دو حالت را پوشش می‌دهد:  0.webp  و هم  3532_Q2..._0.jpg
         file_re = re.compile(r"/([^/]+)\.(?:jpe?g|png|webp|gif)(?:$|\?)", re.I)
         cand: list[tuple[int, str]] = []
         for u in raw:
             m = file_re.search(u)
             if not m:
                 continue
-            mnum = re.search(r"(\d+)$", m.group(1))   # شماره‌ی صفحه = عدد انتهای نام فایل
-            cand.append((int(mnum.group(1)) if mnum else -1, u))
+            cand.append((_page_no(m.group(1)), u))
 
         # محدود به پوشه‌ی همین قسمت، در غیر این صورت هر عکسِ واقعیِ سایت
         in_slug = [c for c in cand if f"/{slug}/" in c[1]]
@@ -219,7 +229,33 @@ class Scraper:
         base.sort(key=lambda c: c[0])
 
         seen = set()
-        return [u for _, u in base if not (u in seen or seen.add(u))]
+        urls = [u for _, u in base if not (u in seen or seen.add(u))]
+
+        # اگر نسخهٔ فارسیِ ترجمه‌شده جدا وجود داشته باشد، همان را برگردان
+        return self._prefer_translated(urls, html, slug)
+
+    @staticmethod
+    def _prefer_translated(urls: list[str], html: str, slug: str) -> list[str]:
+        """سایت دو ست عکس دارد: src ثابت = نسخهٔ اصلی/انگلیسی، و توکن دیگر = فارسی.
+        نام فایل به شکل <page>-<token>.<ext> است؛ توکنِ غیرِ src را (فارسی) جایگزین می‌کنیم."""
+        tok_re = re.compile(r"/(\d+)-([0-9A-Za-z_]+)\.(?:jpe?g|png|webp|gif)\b", re.I)
+        static_tokens = {m.group(2) for u in urls if (m := tok_re.search(u))}
+        if not static_tokens:
+            return urls  # این قسمت توکن زبانِ جدا ندارد
+        all_tokens = set(re.findall(
+            rf"/{re.escape(slug)}/\d+-([0-9A-Za-z_]+)\.(?:jpe?g|png|webp|gif)", html, re.I))
+        persian = [t for t in all_tokens if t not in static_tokens]
+        if not persian:
+            return urls
+        pt = persian[0]
+        out = []
+        for u in urls:
+            m = tok_re.search(u)
+            if m and m.group(2) in static_tokens:
+                out.append(u[:m.start(2)] + pt + u[m.end(2):])
+            else:
+                out.append(u)
+        return out
 
     def download_image(self, img_url: str, referer: str) -> tuple[bytes, str]:
         r = self.get(img_url, headers={"Referer": referer})
