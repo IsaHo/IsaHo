@@ -201,21 +201,25 @@ class Scraper:
             if src and src.lower().startswith("http"):
                 raw.append(src)
 
-        pat_slug = re.compile(rf"/{re.escape(slug)}/(\d+)\.(?:jpe?g|png|webp|gif)(?:$|\?)", re.I)
-        pat_any = re.compile(r"/public/img/series/.+/(\d+)\.(?:jpe?g|png|webp|gif)(?:$|\?)", re.I)
-
-        pages: list[tuple[int, str]] = []
+        # نام فایل هر دو حالت را پوشش می‌دهد:  0.webp  و هم  3532_Q2..._0.jpg
+        file_re = re.compile(r"/([^/]+)\.(?:jpe?g|png|webp|gif)(?:$|\?)", re.I)
+        cand: list[tuple[int, str]] = []
         for u in raw:
-            m = pat_slug.search(u) or pat_any.search(u)
+            m = file_re.search(u)
             if not m:
                 continue
-            n = int(m.group(1))
-            if 0 <= n <= MAX_PAGE_NO:        # آشغال‌های با شماره‌ی غیرعادی را رد کن
-                pages.append((n, u))
+            mnum = re.search(r"(\d+)$", m.group(1))   # شماره‌ی صفحه = عدد انتهای نام فایل
+            cand.append((int(mnum.group(1)) if mnum else -1, u))
 
-        pages.sort(key=lambda x: x[0])
+        # محدود به پوشه‌ی همین قسمت، در غیر این صورت هر عکسِ واقعیِ سایت
+        in_slug = [c for c in cand if f"/{slug}/" in c[1]]
+        base = in_slug or [c for c in cand if "/public/img/series" in c[1].lower()] or cand
+        # فقط صفحه‌های واقعی؛ شماره‌ی غیرعادی (بنر «ادامه دارد» مثل 9999...) حذف می‌شود
+        base = [c for c in base if 0 <= c[0] <= MAX_PAGE_NO]
+        base.sort(key=lambda c: c[0])
+
         seen = set()
-        return [u for _, u in pages if not (u in seen or seen.add(u))]
+        return [u for _, u in base if not (u in seen or seen.add(u))]
 
     def download_image(self, img_url: str, referer: str) -> tuple[bytes, str]:
         r = self.get(img_url, headers={"Referer": referer})

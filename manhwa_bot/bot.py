@@ -1,15 +1,19 @@
 """
 bot.py — ربات تلگرام دانلود مانهوا از sarrast.com
 
-کنترل با کیبورد ثابتِ پایین صفحه (همیشه در دسترس، شناور نیست):
-  ➡️ ادامه            = قسمت بعدی داستان فعلی (از جایی که موندی)
-  ⏬ همه از اول        = دانلود کل قسمت‌ها از اول
+کنترل با کیبورد ثابتِ پایین صفحه:
+  ➡️ ادامه            = قسمت بعدی (از جایی که موندی)
+  ⏬ همه از اول        = دانلود کل قسمت‌ها
   ⏹ توقف              = توقف دانلود دسته‌ای
   📖 داستان‌های من     = لیست داستان‌ها + ادامه
-  🖼 حالت: عکس/فایل    = تغییر کیفیت (فایل = اندازهٔ اصلی، قابل بزرگ‌نمایی)
+  حالت                = بین «پی‌دی‌اف / عکس / فایل» سوییچ می‌کند
 
-انتخاب قسمت مشخص: کافیست شمارهٔ قسمت را بفرستی (مثلاً 34).
-لینک سری/قسمت را هم که بفرستی، لیست و اطلاعات داستان می‌آید.
+حالت‌ها:
+  📄 پی‌دی‌اف  : همهٔ صفحه‌های یک قسمت در یک فایل PDF (بزرگ، باکیفیت، تکی نیست) ← پیشنهادی
+  🖼 عکس      : آلبوم عکس (سبک، ولی تلگرام فشرده می‌کند)
+  📁 فایل     : هر صفحه به‌صورت فایل جدا با اندازهٔ اصلی
+
+انتخاب قسمت مشخص: شمارهٔ قسمت را بفرست (مثلاً 34).
 
 اجرا:  python bot.py   (توکن از .env)
 """
@@ -72,20 +76,27 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
 ALLOWED_IDS = {int(x) for x in re.findall(r"\d+", os.environ.get("ALLOWED_IDS", ""))}
 
 GROUP_SIZE = 10
+PDF_PAGES = 30                 # حداکثر صفحه در هر فایل PDF (برای ماندن زیر محدودیت ۵۰ مگ تلگرام)
 SLEEP_BETWEEN_GROUPS = 1.0
 SLEEP_BETWEEN_DOWNLOADS = 0.15
+DEFAULT_MODE = "pdf"
 DATA_DIR = os.path.join(HERE, "data")
 PROGRESS_FILE = os.path.join(DATA_DIR, "progress.json")
 URL_RE = re.compile(r"https?://[^\s]+")
 
-# دکمه‌های کیبورد پایین
 BTN_RESUME = "➡️ ادامه"
 BTN_ALL = "⏬ همه از اول"
 BTN_STOP = "⏹ توقف"
 BTN_MINE = "📖 داستان‌های من"
-BTN_MODE_PHOTO = "🖼 حالت: عکس"
-BTN_MODE_DOC = "🖼 حالت: فایل"
 BTN_BACK = "⬅️ بازگشت"
+MODE_LABELS = {"pdf": "📄 حالت: پی‌دی‌اف", "photo": "🖼 حالت: عکس", "document": "📁 حالت: فایل"}
+MODE_CYCLE = {"pdf": "photo", "photo": "document", "document": "pdf"}
+LABEL_TO_MODE = {v: k for k, v in MODE_LABELS.items()}
+MODE_HUMAN = {
+    "pdf": "پی‌دی‌اف (همهٔ صفحه‌ها در یک فایل، بزرگ و باکیفیت)",
+    "photo": "عکس (آلبوم، سبک ولی فشرده)",
+    "document": "فایل (هر صفحه جدا، اندازهٔ اصلی)",
+}
 
 scraper = Scraper()
 
@@ -141,11 +152,10 @@ def list_progress(uid):
 # ----------------------------- keyboards -----------------------------
 
 def main_kb(mode: str) -> ReplyKeyboardMarkup:
-    mode_btn = BTN_MODE_PHOTO if mode == "photo" else BTN_MODE_DOC
     return ReplyKeyboardMarkup(
         [[BTN_RESUME],
          [BTN_ALL, BTN_STOP],
-         [BTN_MINE, mode_btn]],
+         [BTN_MINE, MODE_LABELS.get(mode, MODE_LABELS[DEFAULT_MODE])]],
         resize_keyboard=True, is_persistent=True,
         input_field_placeholder="شمارهٔ قسمت یا لینک رو بفرست",
     )
@@ -212,6 +222,52 @@ async def send_images(context, chat_id, items, mode: str) -> int:
     return sent
 
 
+def build_pdf(blobs: list[bytes]) -> bytes:
+    """ساخت یک PDF از لیست بایت‌های عکس (با حفظ کیفیت/ابعاد اصلی)."""
+    from PIL import Image
+    imgs = []
+    for b in blobs:
+        try:
+            im = Image.open(io.BytesIO(b))
+            im.load()
+            if im.mode in ("RGBA", "LA", "P", "PA"):
+                im = im.convert("RGBA")
+                bg = Image.new("RGB", im.size, (255, 255, 255))
+                bg.paste(im, mask=im.split()[3])
+                im = bg
+            elif im.mode != "RGB":
+                im = im.convert("RGB")
+            imgs.append(im)
+        except Exception as e:
+            log.warning("صفحه در PDF رد شد: %s", e)
+    if not imgs:
+        return b""
+    out = io.BytesIO()
+    imgs[0].save(out, format="PDF", save_all=True, append_images=imgs[1:], quality=90)
+    return out.getvalue()
+
+
+async def send_as_pdf(context, chat_id, chapter, blobs: list[bytes]) -> int:
+    n_int = int(chapter.num) if chapter.num == int(chapter.num) else chapter.num
+    parts = [blobs[i:i + PDF_PAGES] for i in range(0, len(blobs), PDF_PAGES)]
+    sent = 0
+    for pi, part in enumerate(parts, 1):
+        await context.bot.send_chat_action(chat_id, ChatAction.UPLOAD_DOCUMENT)
+        pdf = await asyncio.to_thread(build_pdf, part)
+        if not pdf:
+            continue
+        cap = chapter.label + (f" — بخش {pi}/{len(parts)}" if len(parts) > 1 else "")
+        fn = f"chapter_{n_int}" + (f"_p{pi}" if len(parts) > 1 else "") + ".pdf"
+        try:
+            await _safe(context.bot.send_document, chat_id,
+                        document=InputFile(io.BytesIO(pdf), filename=fn), caption=cap)
+            sent += len(part)
+        except Exception as e:
+            log.warning("ارسال PDF ناموفق: %s", e)
+        await asyncio.sleep(SLEEP_BETWEEN_GROUPS)
+    return sent
+
+
 async def deliver_chapter(context, chat_id, chapter, mode: str) -> int:
     await context.bot.send_chat_action(chat_id, ChatAction.UPLOAD_PHOTO)
     img_urls = await asyncio.to_thread(scraper.get_images, chapter.url)
@@ -224,33 +280,35 @@ async def deliver_chapter(context, chat_id, chapter, mode: str) -> int:
         return m.group(1).lower() if m else "jpg"
 
     n_int = int(chapter.num) if chapter.num == int(chapter.num) else chapter.num
-    items = []
+    blobs = []
     for idx, u in enumerate(img_urls, 1):
         try:
             data, _ = await asyncio.to_thread(scraper.download_image, u, chapter.url)
-            items.append((data, f"{n_int}_{idx:03d}.{ext_of(u)}"))
+            blobs.append((data, f"{n_int}_{idx:03d}.{ext_of(u)}"))
         except Exception as e:
             log.warning("دانلود ناموفق %s: %s", u, e)
         await asyncio.sleep(SLEEP_BETWEEN_DOWNLOADS)
 
-    if not items:
+    if not blobs:
         await context.bot.send_message(chat_id, f"⚠️ دانلود صفحه‌های {chapter.label} ناموفق بود.")
         return 0
-    return await send_images(context, chat_id, items, mode)
+
+    if mode == "pdf":
+        return await send_as_pdf(context, chat_id, chapter, [b for b, _ in blobs])
+    return await send_images(context, chat_id, blobs, mode)
 
 
 async def send_chapter_idx(context, chat_id, ud, idx, mode) -> int:
     chapters = ud["chapters"]
     ch = chapters[idx]
-    await context.bot.send_message(chat_id, f"📥 در حال ارسال {ch.label} ...")
+    await context.bot.send_message(chat_id, f"📥 در حال آماده‌سازی {ch.label} ...")
     n = await deliver_chapter(context, chat_id, ch, mode)
     if n:
         ud["last_idx"] = idx
         set_progress(ud["uid"], ud["series_url"], ud["title"], ch.num, ch.label, len(chapters))
         nxt = "برای بعدی ➡️ ادامه بزن یا شمارهٔ قسمت رو بفرست." if idx + 1 < len(chapters) else "🎉 این آخرین قسمت بود."
         await context.bot.send_message(
-            chat_id, f"✅ {ch.label} ({n} صفحه) ارسال شد.\n{nxt}",
-            reply_markup=main_kb(mode))
+            chat_id, f"✅ {ch.label} ({n} صفحه) ارسال شد.\n{nxt}", reply_markup=main_kb(mode))
     return n
 
 
@@ -261,23 +319,17 @@ async def open_series(context, chat_id, ud, any_url, status_msg=None):
         series = await asyncio.to_thread(scraper.get_series, any_url)
     except Exception as e:
         txt = f"❌ خطا در خواندن سایت:\n{e}"
-        if status_msg:
-            await status_msg.edit_text(txt)
-        else:
-            await context.bot.send_message(chat_id, txt)
+        await (status_msg.edit_text(txt) if status_msg else context.bot.send_message(chat_id, txt))
         return False
     if not series.chapters:
         txt = "❌ هیچ قسمتی پیدا نشد. لینک یا ساختار سایت رو چک کن."
-        if status_msg:
-            await status_msg.edit_text(txt)
-        else:
-            await context.bot.send_message(chat_id, txt)
+        await (status_msg.edit_text(txt) if status_msg else context.bot.send_message(chat_id, txt))
         return False
 
     ud.update({"chapters": series.chapters, "series_url": series.url,
                "title": series.title, "await_pick": False})
     prog = get_progress(ud["uid"], series.url)
-    mode = ud.get("mode", "photo")
+    mode = ud.get("mode", DEFAULT_MODE)
     first, last = series.chapters[0].label, series.chapters[-1].label
     text = (f"✅ «{series.title}»\n"
             f"{len(series.chapters)} قسمت ({first} تا {last}).\n"
@@ -300,10 +352,7 @@ async def do_resume(context, chat_id, ud, mode):
         return
     prog = get_progress(ud["uid"], ud["series_url"])
     chapters = ud["chapters"]
-    if prog:
-        nxt = next((i for i, c in enumerate(chapters) if c.num > prog["num"]), None)
-    else:
-        nxt = 0  # هنوز چیزی نخونده؛ از اول
+    nxt = next((i for i, c in enumerate(chapters) if c.num > prog["num"]), None) if prog else 0
     if nxt is None:
         await context.bot.send_message(chat_id, "🎉 به آخرین قسمت رسیدی!", reply_markup=main_kb(mode))
         return
@@ -312,20 +361,18 @@ async def do_resume(context, chat_id, ud, mode):
 
 async def show_mine(context, chat_id, ud):
     items = list_progress(ud["uid"])
-    mode = ud.get("mode", "photo")
+    mode = ud.get("mode", DEFAULT_MODE)
     if not items:
         await context.bot.send_message(chat_id, "📖 هنوز داستانی نخوندی. یه لینک بفرست.",
                                         reply_markup=main_kb(mode))
         return
-    ud["pick_map"] = {}
-    titles = []
+    ud["pick_map"], titles = {}, []
     for u, info in items:
         label = f"{info['title']} — {info['label']}"
         ud["pick_map"][label] = u
         titles.append(label)
     ud["await_pick"] = True
-    await context.bot.send_message(
-        chat_id, "📖 یکی رو انتخاب کن تا ادامه بدی:", reply_markup=mine_kb(titles))
+    await context.bot.send_message(chat_id, "📖 یکی رو انتخاب کن تا ادامه بدی:", reply_markup=mine_kb(titles))
 
 
 # ----------------------------- handlers -----------------------------
@@ -335,14 +382,14 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⛔ این ربات خصوصی است.")
         return
     context.user_data["uid"] = update.effective_user.id
-    mode = context.user_data.get("mode", "photo")
+    mode = context.user_data.get("mode", DEFAULT_MODE)
     await update.message.reply_text(
         "سلام! 👋\n\n"
         "لینک سری یا یکی از قسمت‌ها رو بفرست.\n"
         "نمونه: https://sarrast.com/series/secret-class\n\n"
         "• برای یه قسمت مشخص: شمارهٔ قسمت رو بفرست (مثلاً 34).\n"
-        "• دکمه‌های پایین صفحه همیشه در دسترسن.\n"
-        "• «🖼 حالت: فایل» عکس رو با اندازهٔ اصلی و قابل بزرگ‌نمایی می‌فرسته.\n"
+        "• حالت پیش‌فرض «📄 پی‌دی‌اف»ه: همهٔ صفحه‌های قسمت در یک فایل، بزرگ و باکیفیت.\n"
+        "• با دکمهٔ «حالت» می‌تونی بین پی‌دی‌اف / عکس / فایل سوییچ کنی.\n"
         "• ربات یادش می‌مونه هر داستان رو تا کجا خوندی.",
         reply_markup=main_kb(mode), disable_web_page_preview=True,
     )
@@ -352,17 +399,18 @@ async def cmd_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not authorized(update):
         return
     arg = (context.args[0].lower() if context.args else "")
-    if arg in ("photo", "document"):
+    if arg in MODE_LABELS:
         context.user_data["mode"] = arg
-    mode = context.user_data.get("mode", "photo")
-    await update.message.reply_text(f"حالت ارسال: {mode}", reply_markup=main_kb(mode))
+    mode = context.user_data.get("mode", DEFAULT_MODE)
+    await update.message.reply_text(f"حالت ارسال: {MODE_HUMAN[mode]}", reply_markup=main_kb(mode))
 
 
 async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not authorized(update):
         return
     context.user_data["cancel"] = True
-    await update.message.reply_text("⏹️ توقف ثبت شد.", reply_markup=main_kb(context.user_data.get("mode", "photo")))
+    await update.message.reply_text("⏹️ توقف ثبت شد.",
+                                    reply_markup=main_kb(context.user_data.get("mode", DEFAULT_MODE)))
 
 
 async def cmd_me(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -380,16 +428,14 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ud["uid"] = update.effective_user.id
     chat_id = update.effective_chat.id
     text = (update.message.text or "").strip()
-    mode = ud.get("mode", "photo")
+    mode = ud.get("mode", DEFAULT_MODE)
 
-    # 1) لینک
     m = URL_RE.search(text)
     if m:
         msg = await update.message.reply_text("⏳ در حال خواندن...")
         await open_series(context, chat_id, ud, m.group(0), status_msg=msg)
         return
 
-    # 2) دکمه‌های کیبورد
     if text == BTN_ALL:
         if not ud.get("chapters"):
             await update.message.reply_text("اول یه لینک بفرست.", reply_markup=main_kb(mode))
@@ -411,20 +457,17 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ud["await_pick"] = False
         await update.message.reply_text("باشه.", reply_markup=main_kb(mode))
         return
-    if text.startswith("🖼 حالت"):
-        ud["mode"] = "document" if mode == "photo" else "photo"
+    if text in LABEL_TO_MODE:
+        ud["mode"] = MODE_CYCLE[LABEL_TO_MODE[text]]
         mode = ud["mode"]
-        human = "فایل (اندازهٔ اصلی، قابل بزرگ‌نمایی)" if mode == "document" else "عکس (فشرده، سبک‌تر)"
-        await update.message.reply_text(f"✅ حالت: {human}", reply_markup=main_kb(mode))
+        await update.message.reply_text(f"✅ حالت: {MODE_HUMAN[mode]}", reply_markup=main_kb(mode))
         return
 
-    # 3) انتخاب داستان از لیست «داستان‌های من»
     if ud.get("await_pick") and text in (ud.get("pick_map") or {}):
         await update.message.reply_text("⏳ در حال باز کردن...")
         await open_series(context, chat_id, ud, ud["pick_map"][text])
         return
 
-    # 4) شمارهٔ قسمت
     mnum = re.fullmatch(r"(?:قسمت\s*)?(\d+(?:\.\d+)?)", text)
     if mnum:
         if not ud.get("chapters"):
@@ -435,7 +478,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if idx is None:
             last = ud["chapters"][-1].num
             await update.message.reply_text(
-                f"قسمت {int(want) if want==int(want) else want} پیدا نشد (۱ تا {int(last)}).",
+                f"قسمت {int(want) if want==int(want) else want} پیدا نشد (تا {int(last)}).",
                 reply_markup=main_kb(mode))
             return
         await send_chapter_idx(context, chat_id, ud, idx, mode)
