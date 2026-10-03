@@ -2,5 +2,3 @@ python-telegram-bot>=21.0
 requests>=2.31
 beautifulsoup4>=4.12
 cloudscraper>=1.2.71
-Pillow>=10.0
-img2pdf>=0.5

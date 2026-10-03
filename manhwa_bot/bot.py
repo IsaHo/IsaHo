@@ -1,19 +1,17 @@
 """
-bot.py — ربات تلگرام دانلود مانهوا از sarrast.com
+bot.py — ربات لینک‌دهی و اطلاع‌رسانی بروزرسانی sarrast.com
 
-کنترل با کیبورد ثابتِ پایین صفحه:
-  ➡️ ادامه            = قسمت بعدی (از جایی که موندی)
-  ⏬ همه از اول        = دانلود کل قسمت‌ها
-  ⏹ توقف              = توقف دانلود دسته‌ای
-  📖 داستان‌های من     = لیست داستان‌ها + ادامه
-  حالت                = بین «پی‌دی‌اف / عکس / فایل» سوییچ می‌کند
+این ربات دانلود نمی‌کند (نه عکس، نه PDF) تا رم اشغال نشود. فقط:
+  • کل سایت را می‌خواند و کش می‌کند.
+  • دوره‌ای چک می‌کند و داستان‌های جدید / قسمت‌های جدید را خبر می‌دهد.
+  • برای هر داستان/قسمت، لینک تمیز (بدون ouo.io) می‌فرستد.
 
-حالت‌ها:
-  📄 پی‌دی‌اف  : همهٔ صفحه‌های یک قسمت در یک فایل PDF (بزرگ، باکیفیت، تکی نیست) ← پیشنهادی
-  🖼 عکس      : آلبوم عکس (سبک، ولی تلگرام فشرده می‌کند)
-  📁 فایل     : هر صفحه به‌صورت فایل جدا با اندازهٔ اصلی
-
-انتخاب قسمت مشخص: شمارهٔ قسمت را بفرست (مثلاً 34).
+کیبورد پایین:
+  🔎 جستجو            = اسم داستان رو بفرست تا سرچ کنم
+  📚 همهٔ داستان‌ها     = مرور کل فهرست سایت
+  🔗 لینک همهٔ قسمت‌ها  = همهٔ لینک‌های داستانِ بازشده
+  🆕 بروزرسانی‌ها       = چک کردن تغییرات سایت همین حالا
+  📖 دنبال‌شده‌ها       = داستان‌هایی که باز کردی + ادامه
 
 اجرا:  python bot.py   (توکن از .env)
 """
@@ -21,8 +19,6 @@ bot.py — ربات تلگرام دانلود مانهوا از sarrast.com
 from __future__ import annotations
 
 import asyncio
-import gc
-import io
 import json
 import logging
 import os
@@ -31,16 +27,7 @@ import threading
 import time
 from datetime import datetime
 
-from telegram import (
-    InputFile,
-    InputMediaDocument,
-    InputMediaPhoto,
-    KeyboardButton,
-    ReplyKeyboardMarkup,
-    Update,
-)
-from telegram.constants import ChatAction
-from telegram.error import BadRequest, RetryAfter, TimedOut
+from telegram import KeyboardButton, ReplyKeyboardMarkup, Update
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -77,38 +64,26 @@ _load_env(os.path.join(HERE, ".env"))
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
 ALLOWED_IDS = {int(x) for x in re.findall(r"\d+", os.environ.get("ALLOWED_IDS", ""))}
 
-GROUP_SIZE = 10
-PDF_PAGES = 30                 # حداکثر صفحه در هر فایل PDF (برای ماندن زیر محدودیت ۵۰ مگ تلگرام)
-MAX_IMG_WIDTH = 1600           # عکس پهن‌تر از این کوچک می‌شود (کم‌کردن رم و حجم)
-SLEEP_BETWEEN_GROUPS = 1.0
-SLEEP_BETWEEN_DOWNLOADS = 0.15
-DEFAULT_MODE = "pdf"
 DATA_DIR = os.path.join(HERE, "data")
-PROGRESS_FILE = os.path.join(DATA_DIR, "progress.json")
 CATALOG_FILE = os.path.join(DATA_DIR, "catalog.json")
-CATALOG_TTL = 12 * 3600
+FOLLOWS_FILE = os.path.join(DATA_DIR, "follows.json")
+CATALOG_TTL = 6 * 3600
+UPDATE_INTERVAL = 2 * 3600        # هر چند ثانیه سایت برای بروزرسانی چک شود
 BROWSE_PER = 16
+LINKS_PER_MSG = 40
 URL_RE = re.compile(r"https?://[^\s]+")
 
-BTN_RESUME = "➡️ ادامه"
-BTN_ALL = "⏬ همه از اول"
-BTN_STOP = "⏹ توقف"
-BTN_MINE = "📖 داستان‌های من"
 BTN_SEARCH = "🔎 جستجو"
 BTN_ALLSTORIES = "📚 همهٔ داستان‌ها"
+BTN_ALLLINKS = "🔗 لینک همهٔ قسمت‌ها"
+BTN_UPDATES = "🆕 بروزرسانی‌ها"
+BTN_FOLLOWS = "📖 دنبال‌شده‌ها"
 BTN_NEXT = "صفحهٔ بعد ▶️"
 BTN_PREV = "◀️ صفحهٔ قبل"
 BTN_BACK = "⬅️ بازگشت"
-MODE_LABELS = {"pdf": "📄 حالت: پی‌دی‌اف", "photo": "🖼 حالت: عکس", "document": "📁 حالت: فایل"}
-MODE_CYCLE = {"pdf": "photo", "photo": "document", "document": "pdf"}
-LABEL_TO_MODE = {v: k for k, v in MODE_LABELS.items()}
-MODE_HUMAN = {
-    "pdf": "پی‌دی‌اف (همهٔ صفحه‌ها در یک فایل، بزرگ و باکیفیت)",
-    "photo": "عکس (آلبوم، سبک ولی فشرده)",
-    "document": "فایل (هر صفحه جدا، اندازهٔ اصلی)",
-}
 
 scraper = Scraper()
+_lock = threading.Lock()
 
 
 def authorized(update: Update) -> bool:
@@ -118,87 +93,85 @@ def authorized(update: Update) -> bool:
     return bool(u and u.id in ALLOWED_IDS)
 
 
-# ----------------------------- progress store -----------------------------
+# ----------------------------- json stores -----------------------------
 
-_plock = threading.Lock()
-
-
-def _load_all() -> dict:
+def _read(path):
     try:
-        with open(PROGRESS_FILE, encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             return json.load(f)
     except Exception:
-        return {}
+        return None
 
 
-def _save_all(d: dict) -> None:
+def _write(path, data):
     os.makedirs(DATA_DIR, exist_ok=True)
-    tmp = PROGRESS_FILE + ".tmp"
+    tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(d, f, ensure_ascii=False, indent=1)
-    os.replace(tmp, PROGRESS_FILE)
+        json.dump(data, f, ensure_ascii=False)
+    os.replace(tmp, path)
 
 
-def set_progress(uid, s_url, title, num, label, total) -> None:
-    with _plock:
-        d = _load_all()
-        d.setdefault(str(uid), {})[s_url] = {
-            "title": title, "num": num, "label": label, "total": total,
+# catalog: {"ts":..., "items":[{slug,title,url}, ...]}
+def load_catalog_items():
+    d = _read(CATALOG_FILE) or {}
+    return d.get("items") or []
+
+
+def catalog_fresh():
+    d = _read(CATALOG_FILE) or {}
+    return bool(d.get("items")) and (time.time() - d.get("ts", 0) < CATALOG_TTL)
+
+
+def save_catalog(items):
+    with _lock:
+        _write(CATALOG_FILE, {"ts": time.time(), "items": items})
+
+
+# follows: {uid: {series_url: {title, count, last_num, ts}}}
+def load_follows():
+    return _read(FOLLOWS_FILE) or {}
+
+
+def save_follows(d):
+    with _lock:
+        _write(FOLLOWS_FILE, d)
+
+
+def follow_story(uid, url, title, count, last_num=None):
+    with _lock:
+        d = _read(FOLLOWS_FILE) or {}
+        u = d.setdefault(str(uid), {})
+        cur = u.get(url, {})
+        u[url] = {
+            "title": title,
+            "count": count,
+            "last_num": last_num if last_num is not None else cur.get("last_num"),
             "ts": datetime.now().isoformat(timespec="seconds"),
         }
-        _save_all(d)
+        _write(FOLLOWS_FILE, d)
 
 
-def get_progress(uid, s_url):
-    return _load_all().get(str(uid), {}).get(s_url)
-
-
-def list_progress(uid):
-    items = list(_load_all().get(str(uid), {}).items())
+def list_follows(uid):
+    items = list((_read(FOLLOWS_FILE) or {}).get(str(uid), {}).items())
     items.sort(key=lambda kv: kv[1].get("ts", ""), reverse=True)
     return items
 
 
-# ----------------------------- catalog -----------------------------
+# ----------------------------- catalog / search -----------------------------
 
-_clock = threading.Lock()
-
-
-def _load_catalog_cache():
-    try:
-        with open(CATALOG_FILE, encoding="utf-8") as f:
-            d = json.load(f)
-        if d.get("items") and time.time() - d.get("ts", 0) < CATALOG_TTL:
-            return d["items"]
-    except Exception:
-        pass
-    return None
-
-
-def _save_catalog_cache(items):
-    os.makedirs(DATA_DIR, exist_ok=True)
-    tmp = CATALOG_FILE + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump({"ts": time.time(), "items": items}, f, ensure_ascii=False)
-    os.replace(tmp, CATALOG_FILE)
-
-
-async def ensure_catalog(context, chat_id, force=False):
-    if not force:
-        cached = _load_catalog_cache()
-        if cached:
-            return cached
+async def ensure_catalog(context, chat_id):
+    if catalog_fresh():
+        return load_catalog_items()
     msg = await context.bot.send_message(
         chat_id, "⏳ در حال گرفتن فهرست همهٔ داستان‌های سایت... (یک‌بار، کمی طول می‌کشه)")
     items = await asyncio.to_thread(scraper.get_catalog)
     if items:
-        with _clock:
-            _save_catalog_cache(items)
+        save_catalog(items)
     try:
         await msg.delete()
     except Exception:
         pass
-    return items or _load_catalog_cache() or []
+    return items or load_catalog_items()
 
 
 def search_catalog(items, q):
@@ -215,267 +188,34 @@ def search_catalog(items, q):
 
 # ----------------------------- keyboards -----------------------------
 
-def main_kb(mode: str) -> ReplyKeyboardMarkup:
+def main_kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         [[BTN_SEARCH, BTN_ALLSTORIES],
-         [BTN_RESUME],
-         [BTN_ALL, BTN_STOP],
-         [BTN_MINE, MODE_LABELS.get(mode, MODE_LABELS[DEFAULT_MODE])]],
+         [BTN_ALLLINKS],
+         [BTN_UPDATES, BTN_FOLLOWS]],
         resize_keyboard=True, is_persistent=True,
         input_field_placeholder="اسم داستان، شمارهٔ قسمت، یا لینک رو بفرست",
     )
 
 
-def mine_kb(titles: list[str]) -> ReplyKeyboardMarkup:
-    rows = [[KeyboardButton(t)] for t in titles] + [[KeyboardButton(BTN_BACK)]]
-    return ReplyKeyboardMarkup(rows, resize_keyboard=True, is_persistent=True)
-
-
-# ----------------------------- sending -----------------------------
-
-async def _safe(fn, *a, **kw):
-    for _ in range(5):
-        try:
-            return await fn(*a, **kw)
-        except RetryAfter as e:
-            await asyncio.sleep(e.retry_after + 1)
-        except TimedOut:
-            await asyncio.sleep(3)
-    return await fn(*a, **kw)
-
-
-async def _send_one(context, chat_id, data: bytes, fn: str, mode: str) -> bool:
-    try:
-        if mode == "photo":
-            try:
-                await _safe(context.bot.send_photo, chat_id,
-                            photo=InputFile(io.BytesIO(data), filename=fn))
-                return True
-            except BadRequest:
-                pass
-        await _safe(context.bot.send_document, chat_id,
-                    document=InputFile(io.BytesIO(data), filename=fn))
-        return True
-    except Exception as e:
-        log.warning("ارسال ناموفق %s: %s", fn, e)
-        return False
-
-
-async def send_images(context, chat_id, items, mode: str) -> int:
-    sent, i, n = 0, 0, len(items)
-    while i < n:
-        batch = items[i:i + GROUP_SIZE]
-        i += GROUP_SIZE
-        ok = False
-        if len(batch) >= 2:
-            try:
-                media = []
-                for data, fn in batch:
-                    media.append(InputMediaPhoto(media=data, filename=fn) if mode == "photo"
-                                 else InputMediaDocument(media=data, filename=fn))
-                await _safe(context.bot.send_media_group, chat_id, media=media)
-                ok, sent = True, sent + len(batch)
-            except Exception as e:
-                log.warning("آلبوم ناموفق، تک‌به‌تک: %s", e)
-        if not ok:
-            for data, fn in batch:
-                if await _send_one(context, chat_id, data, fn, mode):
-                    sent += 1
-                await asyncio.sleep(0.3)
-        await asyncio.sleep(SLEEP_BETWEEN_GROUPS)
-    return sent
-
-
-def build_pdf(blobs: list[bytes]) -> bytes:
-    """ساخت PDF کم‌مصرف: هر عکس تک‌به‌تک باز، کوچک (در صورت نیاز) و به JPEG
-    تبدیل می‌شود؛ سپس img2pdf بدون decodeِ دوباره، آن‌ها را در PDF می‌چیند."""
-    from PIL import Image
-    jpegs = []
-    for b in blobs:
-        try:
-            im = Image.open(io.BytesIO(b))
-            im.load()
-            if im.mode in ("RGBA", "LA", "P", "PA"):
-                im = im.convert("RGBA")
-                bg = Image.new("RGB", im.size, (255, 255, 255))
-                bg.paste(im, mask=im.split()[3])
-                im = bg
-            elif im.mode != "RGB":
-                im = im.convert("RGB")
-            if im.width > MAX_IMG_WIDTH:
-                h = max(1, round(im.height * MAX_IMG_WIDTH / im.width))
-                im = im.resize((MAX_IMG_WIDTH, h))
-            buf = io.BytesIO()
-            im.save(buf, format="JPEG", quality=88)
-            jpegs.append(buf.getvalue())
-            im.close()
-        except Exception as e:
-            log.warning("صفحه در PDF رد شد: %s", e)
-    if not jpegs:
-        return b""
-    try:
-        import img2pdf
-        return img2pdf.convert(jpegs)
-    except Exception as e:
-        log.warning("img2pdf در دسترس نبود، PIL: %s", e)
-        from PIL import Image as I
-        pil = [I.open(io.BytesIO(j)) for j in jpegs]
-        out = io.BytesIO()
-        pil[0].save(out, format="PDF", save_all=True, append_images=pil[1:])
-        return out.getvalue()
-
-
-async def _download_chunk(chapter, urls):
-    pairs = []
-    for u in urls:
-        try:
-            data, _ = await asyncio.to_thread(scraper.download_image, u, chapter.url)
-            pairs.append((u, data))
-        except Exception as e:
-            log.warning("دانلود ناموفق %s: %s", u, e)
-        await asyncio.sleep(SLEEP_BETWEEN_DOWNLOADS)
-    return pairs
-
-
-async def deliver_chapter(context, chat_id, chapter, mode: str) -> int:
-    await context.bot.send_chat_action(chat_id, ChatAction.UPLOAD_PHOTO)
-    urls = await asyncio.to_thread(scraper.get_images, chapter.url)
-    if not urls:
-        await context.bot.send_message(chat_id, f"⚠️ برای {chapter.label} صفحه‌ای پیدا نشد.")
-        return 0
-
-    def ext_of(u):
-        m = re.search(r"\.(jpe?g|png|webp|gif)(?:$|\?)", u, re.I)
-        return m.group(1).lower() if m else "jpg"
-
-    n_int = int(chapter.num) if chapter.num == int(chapter.num) else chapter.num
-    sent = 0
-
-    if mode == "pdf":
-        total_parts = (len(urls) + PDF_PAGES - 1) // PDF_PAGES
-        for pi, start in enumerate(range(0, len(urls), PDF_PAGES), 1):
-            await context.bot.send_chat_action(chat_id, ChatAction.UPLOAD_DOCUMENT)
-            pairs = await _download_chunk(chapter, urls[start:start + PDF_PAGES])
-            if not pairs:
-                continue
-            pdf = await asyncio.to_thread(build_pdf, [d for _, d in pairs])
-            pairs = None
-            gc.collect()
-            if not pdf:
-                continue
-            cap = chapter.label + (f" — بخش {pi}/{total_parts}" if total_parts > 1 else "")
-            fn = f"chapter_{n_int}" + (f"_p{pi}" if total_parts > 1 else "") + ".pdf"
-            try:
-                await _safe(context.bot.send_document, chat_id,
-                            document=InputFile(io.BytesIO(pdf), filename=fn), caption=cap)
-                sent += min(PDF_PAGES, len(urls) - start)
-            except Exception as e:
-                log.warning("ارسال PDF ناموفق: %s", e)
-            pdf = None
-            gc.collect()
-            await asyncio.sleep(SLEEP_BETWEEN_GROUPS)
-        if sent == 0:
-            await context.bot.send_message(chat_id, f"⚠️ ساخت PDF برای {chapter.label} ناموفق بود.")
-        return sent
-
-    # photo / document : استریمی، دسته‌های ۱۰تایی
-    counter = 0
-    for start in range(0, len(urls), GROUP_SIZE):
-        pairs = await _download_chunk(chapter, urls[start:start + GROUP_SIZE])
-        items = []
-        for u, data in pairs:
-            counter += 1
-            items.append((data, f"{n_int}_{counter:03d}.{ext_of(u)}"))
-        if items:
-            sent += await send_images(context, chat_id, items, mode)
-        gc.collect()
-        await asyncio.sleep(0.5)
-    if sent == 0:
-        await context.bot.send_message(chat_id, f"⚠️ دانلود صفحه‌های {chapter.label} ناموفق بود.")
-    return sent
-
-
-async def send_chapter_idx(context, chat_id, ud, idx, mode) -> int:
-    chapters = ud["chapters"]
-    ch = chapters[idx]
-    await context.bot.send_message(
-        chat_id, f"📥 در حال آماده‌سازی {ch.label} ...\n🔗 لینک مستقیم این قسمت:\n{ch.url}",
-        disable_web_page_preview=True)
-    n = await deliver_chapter(context, chat_id, ch, mode)
-    if n:
-        ud["last_idx"] = idx
-        set_progress(ud["uid"], ud["series_url"], ud["title"], ch.num, ch.label, len(chapters))
-        nxt = "برای بعدی ➡️ ادامه بزن یا شمارهٔ قسمت رو بفرست." if idx + 1 < len(chapters) else "🎉 این آخرین قسمت بود."
-        await context.bot.send_message(
-            chat_id, f"✅ {ch.label} ({n} صفحه) ارسال شد.\n🔗 {ch.url}\n{nxt}",
-            reply_markup=main_kb(mode), disable_web_page_preview=True)
-    return n
-
-
-# ----------------------------- helpers -----------------------------
-
-async def open_series(context, chat_id, ud, any_url, status_msg=None):
-    try:
-        series = await asyncio.to_thread(scraper.get_series, any_url)
-    except Exception as e:
-        txt = f"❌ خطا در خواندن سایت:\n{e}"
-        await (status_msg.edit_text(txt) if status_msg else context.bot.send_message(chat_id, txt))
-        return False
-    if not series.chapters:
-        txt = "❌ هیچ قسمتی پیدا نشد. لینک یا ساختار سایت رو چک کن."
-        await (status_msg.edit_text(txt) if status_msg else context.bot.send_message(chat_id, txt))
-        return False
-
-    ud.update({"chapters": series.chapters, "series_url": series.url,
-               "title": series.title, "await_pick": False})
-    prog = get_progress(ud["uid"], series.url)
-    mode = ud.get("mode", DEFAULT_MODE)
-    first, last = series.chapters[0].label, series.chapters[-1].label
-    text = (f"✅ «{series.title}»\n"
-            f"{len(series.chapters)} قسمت ({first} تا {last}).\n"
-            f"👈 شمارهٔ قسمت رو بفرست (مثلاً {int(series.chapters[0].num)}).")
-    if prog:
-        text += f"\n📖 آخرین‌بار تا {prog['label']} خوندی — «➡️ ادامه» بزن."
-    if status_msg:
-        try:
-            await status_msg.delete()
-        except Exception:
-            pass
-    await context.bot.send_message(chat_id, text, reply_markup=main_kb(mode))
-    return True
-
-
-async def do_resume(context, chat_id, ud, mode):
-    if not ud.get("chapters"):
-        await context.bot.send_message(chat_id, "اول یه لینک داستان بفرست یا 📖 داستان‌های من رو بزن.",
-                                        reply_markup=main_kb(mode))
-        return
-    prog = get_progress(ud["uid"], ud["series_url"])
-    chapters = ud["chapters"]
-    nxt = next((i for i, c in enumerate(chapters) if c.num > prog["num"]), None) if prog else 0
-    if nxt is None:
-        await context.bot.send_message(chat_id, "🎉 به آخرین قسمت رسیدی!", reply_markup=main_kb(mode))
-        return
-    await send_chapter_idx(context, chat_id, ud, nxt, mode)
-
-
-def _uniq_label(base, pick_map, slug=""):
-    label = base[:55] or slug
-    while label in pick_map:
-        label = f"{label} ·"
+def _uniq(base, used, slug=""):
+    label = (base or slug)[:55]
+    while label in used:
+        label += " ·"
     return label
 
 
 async def show_picker(context, chat_id, ud, items, header):
-    """لیست داستان‌ها را به صورت کیبورد پایین نشان می‌دهد؛ تپ = باز کردن."""
     ud["pick_map"] = {}
-    titles = []
+    rows = []
     for it in items[:60]:
-        label = _uniq_label(it["title"], ud["pick_map"], it["slug"])
+        label = _uniq(it["title"], ud["pick_map"], it["slug"])
         ud["pick_map"][label] = it["url"]
-        titles.append(label)
+        rows.append([KeyboardButton(label)])
+    rows.append([KeyboardButton(BTN_BACK)])
     ud["await_pick"] = True
-    await context.bot.send_message(chat_id, header, reply_markup=mine_kb(titles))
+    await context.bot.send_message(
+        chat_id, header, reply_markup=ReplyKeyboardMarkup(rows, resize_keyboard=True, is_persistent=True))
 
 
 async def show_browse(context, chat_id, ud):
@@ -488,7 +228,7 @@ async def show_browse(context, chat_id, ud):
     ud["pick_map"] = {}
     rows = []
     for it in chunk:
-        label = _uniq_label(it["title"], ud["pick_map"], it["slug"])
+        label = _uniq(it["title"], ud["pick_map"], it["slug"])
         ud["pick_map"][label] = it["url"]
         rows.append([KeyboardButton(label)])
     nav = []
@@ -505,20 +245,150 @@ async def show_browse(context, chat_id, ud):
         reply_markup=ReplyKeyboardMarkup(rows, resize_keyboard=True, is_persistent=True))
 
 
-async def show_mine(context, chat_id, ud):
-    items = list_progress(ud["uid"])
-    mode = ud.get("mode", DEFAULT_MODE)
+async def show_follows(context, chat_id, ud):
+    items = list_follows(ud["uid"])
     if not items:
-        await context.bot.send_message(chat_id, "📖 هنوز داستانی نخوندی. یه لینک بفرست.",
-                                        reply_markup=main_kb(mode))
+        await context.bot.send_message(chat_id, "📖 هنوز داستانی باز نکردی. یه اسم سرچ کن یا 📚 همهٔ داستان‌ها رو بزن.",
+                                        reply_markup=main_kb())
         return
-    ud["pick_map"], titles = {}, []
-    for u, info in items:
-        label = f"{info['title']} — {info['label']}"
-        ud["pick_map"][label] = u
-        titles.append(label)
+    ud["pick_map"] = {}
+    rows = []
+    for url, info in items:
+        last = f" (تا قسمت {info['last_num']})" if info.get("last_num") else ""
+        label = _uniq(f"{info['title']}{last}", ud["pick_map"])
+        ud["pick_map"][label] = url
+        rows.append([KeyboardButton(label)])
+    rows.append([KeyboardButton(BTN_BACK)])
     ud["await_pick"] = True
-    await context.bot.send_message(chat_id, "📖 یکی رو انتخاب کن تا ادامه بدی:", reply_markup=mine_kb(titles))
+    await context.bot.send_message(
+        chat_id, "📖 داستان‌هایی که دنبال می‌کنی:",
+        reply_markup=ReplyKeyboardMarkup(rows, resize_keyboard=True, is_persistent=True))
+
+
+# ----------------------------- open series / links -----------------------------
+
+async def open_series(context, chat_id, ud, any_url, status_msg=None):
+    try:
+        series = await asyncio.to_thread(scraper.get_series, any_url)
+    except Exception as e:
+        txt = f"❌ خطا در خواندن سایت:\n{e}"
+        await (status_msg.edit_text(txt) if status_msg else context.bot.send_message(chat_id, txt))
+        return False
+    if not series.chapters:
+        txt = "❌ هیچ قسمتی پیدا نشد."
+        await (status_msg.edit_text(txt) if status_msg else context.bot.send_message(chat_id, txt))
+        return False
+
+    ud.update({"chapters": series.chapters, "series_url": series.url,
+               "title": series.title, "await_pick": False})
+    prev = (_read(FOLLOWS_FILE) or {}).get(str(ud["uid"]), {}).get(series.url, {})
+    follow_story(ud["uid"], series.url, series.title, len(series.chapters))
+
+    first, last = series.chapters[0].label, series.chapters[-1].label
+    text = (f"✅ «{series.title}»\n"
+            f"{len(series.chapters)} قسمت ({first} تا {last}).\n"
+            f"🔗 لینک داستان:\n{series.url}\n\n"
+            f"👈 شمارهٔ قسمت رو بفرست تا لینکش رو بدم،\n"
+            f"یا «🔗 لینک همهٔ قسمت‌ها» رو بزن.")
+    if prev.get("last_num"):
+        text += f"\n📖 آخرین‌بار تا قسمت {prev['last_num']} رفته بودی."
+    if status_msg:
+        try:
+            await status_msg.delete()
+        except Exception:
+            pass
+    await context.bot.send_message(chat_id, text, reply_markup=main_kb(), disable_web_page_preview=True)
+    return True
+
+
+async def send_all_links(context, chat_id, ud):
+    chapters = ud.get("chapters")
+    if not chapters:
+        await context.bot.send_message(chat_id, "اول یه داستان انتخاب کن (سرچ یا 📚 همهٔ داستان‌ها).",
+                                        reply_markup=main_kb())
+        return
+    await context.bot.send_message(chat_id, f"🔗 لینک {len(chapters)} قسمت «{ud['title']}»:")
+    lines = [f"{c.label}: {c.url}" for c in chapters]
+    for i in range(0, len(lines), LINKS_PER_MSG):
+        await context.bot.send_message(
+            chat_id, "\n".join(lines[i:i + LINKS_PER_MSG]), disable_web_page_preview=True)
+        await asyncio.sleep(0.4)
+    await context.bot.send_message(chat_id, "تمام ✅", reply_markup=main_kb())
+
+
+# ----------------------------- updates -----------------------------
+
+async def check_updates(app, notify_chat=None):
+    """کاتالوگ را تازه می‌کند؛ داستان‌های جدید و قسمت‌های جدیدِ دنبال‌شده‌ها را خبر می‌دهد.
+    اگر notify_chat داده شود، گزارش دستی هم به همان چت می‌فرستد."""
+    old_items = load_catalog_items()
+    old_slugs = {it["slug"] for it in old_items}
+    items = await asyncio.to_thread(scraper.get_catalog)
+    if not items:
+        if notify_chat:
+            await app.bot.send_message(notify_chat, "نشد فهرست رو بگیرم.")
+        return
+    new_series = [it for it in items if it["slug"] not in old_slugs]
+    save_catalog(items)
+    first_run = not old_items
+
+    # قسمت‌های جدیدِ داستان‌های دنبال‌شده
+    follows = load_follows()
+    chapter_updates = {}  # uid -> [(title, new_count, old_count, url)]
+    for uid, d in follows.items():
+        for url, info in list(d.items()):
+            try:
+                sr = await asyncio.to_thread(scraper.get_series, url)
+            except Exception:
+                continue
+            new_count = len(sr.chapters)
+            if new_count > info.get("count", 0):
+                chapter_updates.setdefault(uid, []).append(
+                    (sr.title, new_count, info.get("count", 0), url))
+            info["count"] = new_count
+            info["title"] = sr.title
+    save_follows(follows)
+
+    targets = [str(t) for t in ALLOWED_IDS] or list(follows.keys())
+
+    # اطلاع‌رسانی داستان‌های جدید (در اجرای اول خبر نمی‌دهیم تا اسپم نشود)
+    if new_series and not first_run:
+        head = f"🆕 {len(new_series)} داستان جدید به سایت اضافه شد:"
+        body = "\n".join(f"• {it['title']}\n{it['url']}" for it in new_series[:20])
+        for t in targets:
+            try:
+                await app.bot.send_message(int(t), head + "\n" + body, disable_web_page_preview=True)
+            except Exception:
+                pass
+
+    # اطلاع‌رسانی قسمت‌های جدید
+    for uid, ups in chapter_updates.items():
+        msg = "📣 قسمت‌های جدید:\n" + "\n".join(
+            f"• «{t}»: {n - o} قسمت جدید (الان {n} قسمت)\n{u}" for t, n, o, u in ups)
+        try:
+            await app.bot.send_message(int(uid), msg, disable_web_page_preview=True)
+        except Exception:
+            pass
+
+    if notify_chat:
+        n_new = 0 if first_run else len(new_series)
+        n_ch = sum(len(v) for v in chapter_updates.values())
+        await app.bot.send_message(
+            notify_chat,
+            f"✅ چک شد. کل داستان‌ها: {len(items)} | داستان جدید: {n_new} | "
+            f"داستان‌های دارای قسمت جدید: {n_ch}"
+            + ("\n(اجرای اول بود؛ فهرست ذخیره شد و از این به بعد تغییرات خبر داده می‌شه.)" if first_run else ""),
+            reply_markup=main_kb())
+
+
+async def updater_loop(app):
+    await asyncio.sleep(40)
+    while True:
+        try:
+            await check_updates(app)
+        except Exception as e:
+            log.warning("updater: %s", e)
+        await asyncio.sleep(UPDATE_INTERVAL)
 
 
 # ----------------------------- handlers -----------------------------
@@ -528,43 +398,24 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⛔ این ربات خصوصی است.")
         return
     context.user_data["uid"] = update.effective_user.id
-    mode = context.user_data.get("mode", DEFAULT_MODE)
     await update.message.reply_text(
-        "سلام! 👋\n\n"
+        "سلام! 👋 این ربات لینک‌دهه (دانلود نمی‌کنه).\n\n"
         "• 🔎 اسم داستان رو بفرست تا توی کل سایت سرچ کنم.\n"
-        "• 📚 «همهٔ داستان‌ها» رو بزن تا کل فهرست سایت رو مرور کنی.\n"
-        "• لینک سری/قسمت هم مستقیم کار می‌کنه.\n"
-        "• برای یه قسمت مشخص: شمارهٔ قسمت رو بفرست (مثلاً 34).\n"
-        "• حالت پیش‌فرض «📄 پی‌دی‌اف»: همهٔ صفحه‌های قسمت در یک فایل، فارسی و باکیفیت.\n"
-        "• هر قسمت، لینک مستقیمش هم فرستاده می‌شه.\n"
-        "• ربات یادش می‌مونه هر داستان رو تا کجا خوندی («➡️ ادامه» یا «📖 داستان‌های من»).",
-        reply_markup=main_kb(mode), disable_web_page_preview=True,
+        "• 📚 «همهٔ داستان‌ها» = مرور کل فهرست سایت.\n"
+        "• یه داستان رو باز کن، بعد شمارهٔ قسمت رو بفرست تا لینکش رو بدم،\n"
+        "  یا «🔗 لینک همهٔ قسمت‌ها» رو بزن.\n"
+        "• 🆕 «بروزرسانی‌ها» = چک تغییرات سایت. ربات خودش هم هر چند ساعت\n"
+        "  چک می‌کنه و داستان/قسمت جدید رو بهت خبر می‌ده.\n"
+        "• 📖 «دنبال‌شده‌ها» = داستان‌هایی که باز کردی.",
+        reply_markup=main_kb(), disable_web_page_preview=True,
     )
 
 
-async def cmd_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def cmd_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not authorized(update):
         return
-    arg = (context.args[0].lower() if context.args else "")
-    if arg in MODE_LABELS:
-        context.user_data["mode"] = arg
-    mode = context.user_data.get("mode", DEFAULT_MODE)
-    await update.message.reply_text(f"حالت ارسال: {MODE_HUMAN[mode]}", reply_markup=main_kb(mode))
-
-
-async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not authorized(update):
-        return
-    context.user_data["cancel"] = True
-    await update.message.reply_text("⏹️ توقف ثبت شد.",
-                                    reply_markup=main_kb(context.user_data.get("mode", DEFAULT_MODE)))
-
-
-async def cmd_me(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not authorized(update):
-        return
-    context.user_data["uid"] = update.effective_user.id
-    await show_mine(context, update.effective_chat.id, context.user_data)
+    await update.message.reply_text("⏳ در حال چک کردن سایت...")
+    await check_updates(context.application, notify_chat=update.effective_chat.id)
 
 
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -575,7 +426,6 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ud["uid"] = update.effective_user.id
     chat_id = update.effective_chat.id
     text = (update.message.text or "").strip()
-    mode = ud.get("mode", DEFAULT_MODE)
 
     m = URL_RE.search(text)
     if m:
@@ -583,30 +433,23 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await open_series(context, chat_id, ud, m.group(0), status_msg=msg)
         return
 
-    if text == BTN_ALL:
-        if not ud.get("chapters"):
-            await update.message.reply_text("اول یه لینک بفرست.", reply_markup=main_kb(mode))
-            return
-        ud["cancel"] = False
-        context.application.create_task(batch_download(context, chat_id, dict(ud), 0, mode))
-        return
-    if text == BTN_STOP:
-        ud["cancel"] = True
-        await update.message.reply_text("⏹️ توقف ثبت شد.", reply_markup=main_kb(mode))
-        return
-    if text == BTN_RESUME:
-        await do_resume(context, chat_id, ud, mode)
-        return
-    if text == BTN_MINE:
-        await show_mine(context, chat_id, ud)
-        return
     if text == BTN_SEARCH:
-        await update.message.reply_text("🔎 اسم داستان (یا بخشی ازش) رو بفرست.", reply_markup=main_kb(mode))
+        await update.message.reply_text("🔎 اسم داستان (یا بخشی ازش) رو بفرست.", reply_markup=main_kb())
+        return
+    if text == BTN_ALLLINKS:
+        await send_all_links(context, chat_id, ud)
+        return
+    if text == BTN_UPDATES:
+        await update.message.reply_text("⏳ در حال چک کردن سایت...")
+        await check_updates(context.application, notify_chat=chat_id)
+        return
+    if text == BTN_FOLLOWS:
+        await show_follows(context, chat_id, ud)
         return
     if text == BTN_ALLSTORIES:
         items = await ensure_catalog(context, chat_id)
         if not items:
-            await update.message.reply_text("نشد فهرست رو بگیرم، دوباره امتحان کن.", reply_markup=main_kb(mode))
+            await update.message.reply_text("نشد فهرست رو بگیرم، دوباره امتحان کن.", reply_markup=main_kb())
             return
         ud["browse"], ud["bpage"] = items, 0
         await show_browse(context, chat_id, ud)
@@ -616,16 +459,11 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ud["bpage"] = ud.get("bpage", 0) + (1 if text == BTN_NEXT else -1)
             await show_browse(context, chat_id, ud)
         return
-    if re.fullmatch(r"\d+/\d+", text):   # دکمهٔ نشانگر صفحه
+    if re.fullmatch(r"\d+/\d+", text):
         return
     if text == BTN_BACK:
         ud["await_pick"] = False
-        await update.message.reply_text("باشه.", reply_markup=main_kb(mode))
-        return
-    if text in LABEL_TO_MODE:
-        ud["mode"] = MODE_CYCLE[LABEL_TO_MODE[text]]
-        mode = ud["mode"]
-        await update.message.reply_text(f"✅ حالت: {MODE_HUMAN[mode]}", reply_markup=main_kb(mode))
+        await update.message.reply_text("باشه.", reply_markup=main_kb())
         return
 
     if ud.get("await_pick") and text in (ud.get("pick_map") or {}):
@@ -633,68 +471,52 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await open_series(context, chat_id, ud, ud["pick_map"][text])
         return
 
+    # شمارهٔ قسمت -> لینک همون قسمت
     mnum = re.fullmatch(r"(?:قسمت\s*)?(\d+(?:\.\d+)?)", text)
     if mnum:
-        if not ud.get("chapters"):
-            await update.message.reply_text("اول یه لینک داستان بفرست.", reply_markup=main_kb(mode))
+        chapters = ud.get("chapters")
+        if not chapters:
+            await update.message.reply_text("اول یه داستان انتخاب کن (سرچ یا 📚 همهٔ داستان‌ها).",
+                                            reply_markup=main_kb())
             return
         want = float(mnum.group(1))
-        chapters = ud["chapters"]
         idx = next((i for i, c in enumerate(chapters) if c.num == want), None)
         if idx is None and want == int(want) and 1 <= int(want) <= len(chapters):
-            idx = int(want) - 1  # شمارهٔ دقیق نبود؛ قسمتِ n‌ام فهرست
+            idx = int(want) - 1
         if idx is None:
             await update.message.reply_text(
                 f"قسمت {int(want) if want==int(want) else want} پیدا نشد (۱ تا {len(chapters)}).",
-                reply_markup=main_kb(mode))
+                reply_markup=main_kb())
             return
-        await send_chapter_idx(context, chat_id, ud, idx, mode)
+        ch = chapters[idx]
+        follow_story(ud["uid"], ud["series_url"], ud["title"], len(chapters), last_num=int(ch.num) if ch.num == int(ch.num) else ch.num)
+        await update.message.reply_text(
+            f"🔗 {ch.label} — «{ud['title']}»\n{ch.url}",
+            reply_markup=main_kb(), disable_web_page_preview=True)
         return
 
-    # هر متن دیگر = جستجو در کاتالوگ سایت
+    # هر متن دیگر = جستجو
     items = await ensure_catalog(context, chat_id)
     res = search_catalog(items, text) if items else []
     if not res:
         await update.message.reply_text(
             f"🔎 «{text}» چیزی پیدا نشد. اسم دیگه‌ای امتحان کن یا 📚 همهٔ داستان‌ها رو بزن.",
-            reply_markup=main_kb(mode))
+            reply_markup=main_kb())
         return
     await show_picker(context, chat_id, ud, res, f"🔎 {len(res)} نتیجه برای «{text}». یکی رو انتخاب کن:")
 
 
-async def batch_download(context, chat_id, ud, start, mode):
-    chapters = ud["chapters"]
-    total = len(chapters)
-    await context.bot.send_message(
-        chat_id, f"⏬ دانلود از {chapters[start].label} تا آخر ({total - start} قسمت)... «⏹ توقف» برای ایست.")
-    for idx in range(start, total):
-        if context.user_data.get("cancel"):
-            await context.bot.send_message(chat_id, "⏹️ متوقف شد.", reply_markup=main_kb(mode))
-            return
-        ch = chapters[idx]
-        await context.bot.send_message(
-            chat_id, f"— {ch.label} ({idx+1}/{total})\n🔗 {ch.url}", disable_web_page_preview=True)
-        try:
-            n = await deliver_chapter(context, chat_id, ch, mode)
-            if n:
-                context.user_data["last_idx"] = idx
-                set_progress(ud["uid"], ud["series_url"], ud["title"], ch.num, ch.label, total)
-        except Exception as e:
-            log.exception("batch item failed")
-            await context.bot.send_message(chat_id, f"❌ {ch.label} رد شد: {e}")
-        await asyncio.sleep(1.5)
-    await context.bot.send_message(chat_id, "🎉 تمام شد.", reply_markup=main_kb(mode))
+async def post_init(app):
+    app.create_task(updater_loop(app))
 
 
 def main():
     if not BOT_TOKEN:
         raise SystemExit("BOT_TOKEN تنظیم نشده (در .env یا متغیر محیطی).")
-    app = Application.builder().token(BOT_TOKEN).concurrent_updates(True).build()
+    app = Application.builder().token(BOT_TOKEN).concurrent_updates(True).post_init(post_init).build()
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_start))
-    app.add_handler(CommandHandler("me", cmd_me))
-    app.add_handler(CommandHandler("mode", cmd_mode))
-    app.add_handler(CommandHandler("cancel", cmd_cancel))
+    app.add_handler(CommandHandler("update", cmd_update))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     log.info("ربات روشن شد.")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
