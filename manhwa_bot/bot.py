@@ -21,6 +21,7 @@ bot.py — ربات تلگرام دانلود مانهوا از sarrast.com
 from __future__ import annotations
 
 import asyncio
+import gc
 import io
 import json
 import logging
@@ -77,6 +78,7 @@ ALLOWED_IDS = {int(x) for x in re.findall(r"\d+", os.environ.get("ALLOWED_IDS", 
 
 GROUP_SIZE = 10
 PDF_PAGES = 30                 # حداکثر صفحه در هر فایل PDF (برای ماندن زیر محدودیت ۵۰ مگ تلگرام)
+MAX_IMG_WIDTH = 1600           # عکس پهن‌تر از این کوچک می‌شود (کم‌کردن رم و حجم)
 SLEEP_BETWEEN_GROUPS = 1.0
 SLEEP_BETWEEN_DOWNLOADS = 0.15
 DEFAULT_MODE = "pdf"
@@ -222,9 +224,10 @@ async def send_images(context, chat_id, items, mode: str) -> int:
 
 
 def build_pdf(blobs: list[bytes]) -> bytes:
-    """ساخت یک PDF از لیست بایت‌های عکس (با حفظ کیفیت/ابعاد اصلی)."""
+    """ساخت PDF کم‌مصرف: هر عکس تک‌به‌تک باز، کوچک (در صورت نیاز) و به JPEG
+    تبدیل می‌شود؛ سپس img2pdf بدون decodeِ دوباره، آن‌ها را در PDF می‌چیند."""
     from PIL import Image
-    imgs = []
+    jpegs = []
     for b in blobs:
         try:
             im = Image.open(io.BytesIO(b))
@@ -236,41 +239,45 @@ def build_pdf(blobs: list[bytes]) -> bytes:
                 im = bg
             elif im.mode != "RGB":
                 im = im.convert("RGB")
-            imgs.append(im)
+            if im.width > MAX_IMG_WIDTH:
+                h = max(1, round(im.height * MAX_IMG_WIDTH / im.width))
+                im = im.resize((MAX_IMG_WIDTH, h))
+            buf = io.BytesIO()
+            im.save(buf, format="JPEG", quality=88)
+            jpegs.append(buf.getvalue())
+            im.close()
         except Exception as e:
             log.warning("صفحه در PDF رد شد: %s", e)
-    if not imgs:
+    if not jpegs:
         return b""
-    out = io.BytesIO()
-    imgs[0].save(out, format="PDF", save_all=True, append_images=imgs[1:], quality=90)
-    return out.getvalue()
+    try:
+        import img2pdf
+        return img2pdf.convert(jpegs)
+    except Exception as e:
+        log.warning("img2pdf در دسترس نبود، PIL: %s", e)
+        from PIL import Image as I
+        pil = [I.open(io.BytesIO(j)) for j in jpegs]
+        out = io.BytesIO()
+        pil[0].save(out, format="PDF", save_all=True, append_images=pil[1:])
+        return out.getvalue()
 
 
-async def send_as_pdf(context, chat_id, chapter, blobs: list[bytes]) -> int:
-    n_int = int(chapter.num) if chapter.num == int(chapter.num) else chapter.num
-    parts = [blobs[i:i + PDF_PAGES] for i in range(0, len(blobs), PDF_PAGES)]
-    sent = 0
-    for pi, part in enumerate(parts, 1):
-        await context.bot.send_chat_action(chat_id, ChatAction.UPLOAD_DOCUMENT)
-        pdf = await asyncio.to_thread(build_pdf, part)
-        if not pdf:
-            continue
-        cap = chapter.label + (f" — بخش {pi}/{len(parts)}" if len(parts) > 1 else "")
-        fn = f"chapter_{n_int}" + (f"_p{pi}" if len(parts) > 1 else "") + ".pdf"
+async def _download_chunk(chapter, urls):
+    pairs = []
+    for u in urls:
         try:
-            await _safe(context.bot.send_document, chat_id,
-                        document=InputFile(io.BytesIO(pdf), filename=fn), caption=cap)
-            sent += len(part)
+            data, _ = await asyncio.to_thread(scraper.download_image, u, chapter.url)
+            pairs.append((u, data))
         except Exception as e:
-            log.warning("ارسال PDF ناموفق: %s", e)
-        await asyncio.sleep(SLEEP_BETWEEN_GROUPS)
-    return sent
+            log.warning("دانلود ناموفق %s: %s", u, e)
+        await asyncio.sleep(SLEEP_BETWEEN_DOWNLOADS)
+    return pairs
 
 
 async def deliver_chapter(context, chat_id, chapter, mode: str) -> int:
     await context.bot.send_chat_action(chat_id, ChatAction.UPLOAD_PHOTO)
-    img_urls = await asyncio.to_thread(scraper.get_images, chapter.url)
-    if not img_urls:
+    urls = await asyncio.to_thread(scraper.get_images, chapter.url)
+    if not urls:
         await context.bot.send_message(chat_id, f"⚠️ برای {chapter.label} صفحه‌ای پیدا نشد.")
         return 0
 
@@ -279,22 +286,50 @@ async def deliver_chapter(context, chat_id, chapter, mode: str) -> int:
         return m.group(1).lower() if m else "jpg"
 
     n_int = int(chapter.num) if chapter.num == int(chapter.num) else chapter.num
-    blobs = []
-    for idx, u in enumerate(img_urls, 1):
-        try:
-            data, _ = await asyncio.to_thread(scraper.download_image, u, chapter.url)
-            blobs.append((data, f"{n_int}_{idx:03d}.{ext_of(u)}"))
-        except Exception as e:
-            log.warning("دانلود ناموفق %s: %s", u, e)
-        await asyncio.sleep(SLEEP_BETWEEN_DOWNLOADS)
-
-    if not blobs:
-        await context.bot.send_message(chat_id, f"⚠️ دانلود صفحه‌های {chapter.label} ناموفق بود.")
-        return 0
+    sent = 0
 
     if mode == "pdf":
-        return await send_as_pdf(context, chat_id, chapter, [b for b, _ in blobs])
-    return await send_images(context, chat_id, blobs, mode)
+        total_parts = (len(urls) + PDF_PAGES - 1) // PDF_PAGES
+        for pi, start in enumerate(range(0, len(urls), PDF_PAGES), 1):
+            await context.bot.send_chat_action(chat_id, ChatAction.UPLOAD_DOCUMENT)
+            pairs = await _download_chunk(chapter, urls[start:start + PDF_PAGES])
+            if not pairs:
+                continue
+            pdf = await asyncio.to_thread(build_pdf, [d for _, d in pairs])
+            pairs = None
+            gc.collect()
+            if not pdf:
+                continue
+            cap = chapter.label + (f" — بخش {pi}/{total_parts}" if total_parts > 1 else "")
+            fn = f"chapter_{n_int}" + (f"_p{pi}" if total_parts > 1 else "") + ".pdf"
+            try:
+                await _safe(context.bot.send_document, chat_id,
+                            document=InputFile(io.BytesIO(pdf), filename=fn), caption=cap)
+                sent += min(PDF_PAGES, len(urls) - start)
+            except Exception as e:
+                log.warning("ارسال PDF ناموفق: %s", e)
+            pdf = None
+            gc.collect()
+            await asyncio.sleep(SLEEP_BETWEEN_GROUPS)
+        if sent == 0:
+            await context.bot.send_message(chat_id, f"⚠️ ساخت PDF برای {chapter.label} ناموفق بود.")
+        return sent
+
+    # photo / document : استریمی، دسته‌های ۱۰تایی
+    counter = 0
+    for start in range(0, len(urls), GROUP_SIZE):
+        pairs = await _download_chunk(chapter, urls[start:start + GROUP_SIZE])
+        items = []
+        for u, data in pairs:
+            counter += 1
+            items.append((data, f"{n_int}_{counter:03d}.{ext_of(u)}"))
+        if items:
+            sent += await send_images(context, chat_id, items, mode)
+        gc.collect()
+        await asyncio.sleep(0.5)
+    if sent == 0:
+        await context.bot.send_message(chat_id, f"⚠️ دانلود صفحه‌های {chapter.label} ناموفق بود.")
+    return sent
 
 
 async def send_chapter_idx(context, chat_id, ud, idx, mode) -> int:
