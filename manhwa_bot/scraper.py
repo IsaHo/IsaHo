@@ -57,6 +57,22 @@ def extract_num(slug: str) -> float:
     return float(m.group(1)) if m else 0.0
 
 
+_BADGE_RE = re.compile(r"(تازه|شروع خواندن|ادامه(?: مطلب)?|بیشتر|سرراست|\+?\s*۱۸\s*\+?|\+?\s*18\s*\+?|NEW|new)")
+
+
+def _best_title(texts) -> str:
+    """از میان متن‌های یک کارت، اسم واقعی داستان را درمی‌آورد (برچسب‌هایی مثل «تازه» حذف می‌شوند)."""
+    best = ""
+    for t in texts:
+        c = " ".join(_BADGE_RE.sub(" ", t).split()).strip(" |-–—:")
+        # حذف کاندیدهای بی‌ارزش (خالی، فقط عدد/علامت)
+        if not c or re.fullmatch(r"[\d۰-۹,،.\s/|–—-]+", c):
+            continue
+        if len(c) > len(best):
+            best = c
+    return best
+
+
 def _page_no(fname: str) -> int:
     """شمارهٔ صفحه را از نام فایل درمی‌آورد، برای هر سه حالت:
     '1-f37fa' -> 1 (عدد اول) ، '0' / '001' -> 0 ، '3532_Q2.._0' -> 0 (عدد آخر)."""
@@ -194,7 +210,7 @@ class Scraper:
     def get_catalog(self, max_pages: int = 60) -> list[dict]:
         """فهرست همهٔ داستان‌های سایت را با پیمایش صفحه‌های اصلی جمع می‌کند.
         هر آیتم: {'slug','title','url'}."""
-        out: dict[str, str] = {}
+        cand: dict[str, set] = {}
         empty_streak = 0
         for pg in range(1, max_pages + 1):
             url = f"{SITE}/" if pg == 1 else f"{SITE}/?page={pg}"
@@ -203,24 +219,29 @@ class Scraper:
             except Exception:
                 break
             soup = BeautifulSoup(html, "html.parser")
-            before = len(out)
+            before = len(cand)
             for a in soup.find_all("a"):
                 href = self._unwrap((a.get("href") or "").strip())
                 parts = urlparse(urljoin(url, href)).path.strip("/").split("/")
                 if len(parts) == 2 and parts[0] == "series":
-                    slug = parts[1]
+                    texts = cand.setdefault(parts[1], set())
                     t = " ".join(a.get_text(strip=True).split())
-                    out.setdefault(slug, "")
-                    if t and t not in ("شروع خواندن", "ادامه") and not out[slug]:
-                        out[slug] = t
-            if len(out) == before:
+                    if t:
+                        texts.add(t)
+                    img = a.find("img")
+                    if img:
+                        for att in ("alt", "title"):
+                            v = " ".join((img.get(att) or "").split())
+                            if v:
+                                texts.add(v)
+            if len(cand) == before:
                 empty_streak += 1
                 if empty_streak >= 2:
                     break
             else:
                 empty_streak = 0
-        return [{"slug": s, "title": t or s, "url": f"{SITE}/series/{s}"}
-                for s, t in sorted(out.items(), key=lambda kv: kv[1] or kv[0])]
+        return [{"slug": s, "title": _best_title(ts) or s, "url": f"{SITE}/series/{s}"}
+                for s, ts in sorted(cand.items(), key=lambda kv: _best_title(kv[1]) or kv[0])]
 
     # ---------- images ----------
 

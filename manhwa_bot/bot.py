@@ -68,6 +68,7 @@ DATA_DIR = os.path.join(HERE, "data")
 CATALOG_FILE = os.path.join(DATA_DIR, "catalog.json")
 FOLLOWS_FILE = os.path.join(DATA_DIR, "follows.json")
 CATALOG_TTL = 6 * 3600
+CATALOG_VERSION = 2               # با تغییر روش استخراج اسم، کش قدیمی باطل می‌شود
 UPDATE_INTERVAL = 2 * 3600        # هر چند ثانیه سایت برای بروزرسانی چک شود
 BROWSE_PER = 16
 LINKS_PER_MSG = 40
@@ -111,20 +112,23 @@ def _write(path, data):
     os.replace(tmp, path)
 
 
-# catalog: {"ts":..., "items":[{slug,title,url}, ...]}
+# catalog: {"ts":..., "v":..., "items":[{slug,title,url}, ...]}
 def load_catalog_items():
     d = _read(CATALOG_FILE) or {}
+    if d.get("v") != CATALOG_VERSION:
+        return []
     return d.get("items") or []
 
 
 def catalog_fresh():
     d = _read(CATALOG_FILE) or {}
-    return bool(d.get("items")) and (time.time() - d.get("ts", 0) < CATALOG_TTL)
+    return (d.get("v") == CATALOG_VERSION and bool(d.get("items"))
+            and time.time() - d.get("ts", 0) < CATALOG_TTL)
 
 
 def save_catalog(items):
     with _lock:
-        _write(CATALOG_FILE, {"ts": time.time(), "items": items})
+        _write(CATALOG_FILE, {"ts": time.time(), "v": CATALOG_VERSION, "items": items})
 
 
 # follows: {uid: {series_url: {title, count, last_num, ts}}}
