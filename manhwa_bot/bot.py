@@ -40,6 +40,7 @@ from telegram import (
 )
 from telegram.ext import (
     Application,
+    CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
     MessageHandler,
@@ -319,6 +320,29 @@ async def open_series(context, chat_id, ud, any_url, status_msg=None):
     return True
 
 
+def chapter_link_markup(idx, total, url):
+    rows = [[InlineKeyboardButton("🌐 باز کردن در مرورگر", url=url)]]
+    nav = []
+    if idx > 0:
+        nav.append(InlineKeyboardButton("⬅️ قسمت قبل", callback_data=f"go:{idx-1}"))
+    if idx + 1 < total:
+        nav.append(InlineKeyboardButton("قسمت بعد ➡️", callback_data=f"go:{idx+1}"))
+    if nav:
+        rows.append(nav)
+    return InlineKeyboardMarkup(rows)
+
+
+async def send_chapter_link(context, chat_id, ud, idx):
+    chapters = ud["chapters"]
+    ch = chapters[idx]
+    follow_story(ud["uid"], ud["series_url"], ud["title"], len(chapters),
+                 last_num=int(ch.num) if ch.num == int(ch.num) else ch.num)
+    await context.bot.send_message(
+        chat_id, f"🔗 {ch.label} — «{ud['title']}»\n{ch.url}",
+        reply_markup=chapter_link_markup(idx, len(chapters), ch.url),
+        disable_web_page_preview=True)
+
+
 async def send_all_links(context, chat_id, ud):
     chapters = ud.get("chapters")
     if not chapters:
@@ -571,12 +595,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"قسمت {int(want) if want==int(want) else want} پیدا نشد (۱ تا {len(chapters)}).",
                 reply_markup=main_kb())
             return
-        ch = chapters[idx]
-        follow_story(ud["uid"], ud["series_url"], ud["title"], len(chapters), last_num=int(ch.num) if ch.num == int(ch.num) else ch.num)
-        await update.message.reply_text(
-            f"🔗 {ch.label} — «{ud['title']}»\n{ch.url}",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🌐 باز کردن در مرورگر", url=ch.url)]]),
-            disable_web_page_preview=True)
+        await send_chapter_link(context, chat_id, ud, idx)
         return
 
     # هر متن دیگر = جستجو
@@ -588,6 +607,29 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=main_kb())
         return
     await show_picker(context, chat_id, ud, res, f"🔎 {len(res)} نتیجه برای «{text}». یکی رو انتخاب کن:")
+
+
+async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    if not authorized(update):
+        await q.answer("⛔ دسترسی ندارید", show_alert=True)
+        return
+    data = q.data or ""
+    ud = context.user_data
+    ud["uid"] = update.effective_user.id
+    if data.startswith("go:"):
+        chapters = ud.get("chapters")
+        if not chapters:
+            await q.answer("لیست عوض شده؛ داستان رو دوباره باز کن.", show_alert=True)
+            return
+        idx = int(data[3:])
+        if not (0 <= idx < len(chapters)):
+            await q.answer("قسمت نامعتبر.", show_alert=True)
+            return
+        await q.answer()
+        await send_chapter_link(context, q.message.chat_id, ud, idx)
+        return
+    await q.answer()
 
 
 async def post_init(app):
@@ -602,6 +644,7 @@ def main():
     app.add_handler(CommandHandler("help", cmd_start))
     app.add_handler(CommandHandler("update", cmd_update))
     app.add_handler(CommandHandler("logo", cmd_logo))
+    app.add_handler(CallbackQueryHandler(on_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     log.info("ربات روشن شد.")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
