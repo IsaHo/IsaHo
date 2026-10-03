@@ -335,14 +335,17 @@ async def deliver_chapter(context, chat_id, chapter, mode: str) -> int:
 async def send_chapter_idx(context, chat_id, ud, idx, mode) -> int:
     chapters = ud["chapters"]
     ch = chapters[idx]
-    await context.bot.send_message(chat_id, f"📥 در حال آماده‌سازی {ch.label} ...")
+    await context.bot.send_message(
+        chat_id, f"📥 در حال آماده‌سازی {ch.label} ...\n🔗 لینک مستقیم این قسمت:\n{ch.url}",
+        disable_web_page_preview=True)
     n = await deliver_chapter(context, chat_id, ch, mode)
     if n:
         ud["last_idx"] = idx
         set_progress(ud["uid"], ud["series_url"], ud["title"], ch.num, ch.label, len(chapters))
         nxt = "برای بعدی ➡️ ادامه بزن یا شمارهٔ قسمت رو بفرست." if idx + 1 < len(chapters) else "🎉 این آخرین قسمت بود."
         await context.bot.send_message(
-            chat_id, f"✅ {ch.label} ({n} صفحه) ارسال شد.\n{nxt}", reply_markup=main_kb(mode))
+            chat_id, f"✅ {ch.label} ({n} صفحه) ارسال شد.\n🔗 {ch.url}\n{nxt}",
+            reply_markup=main_kb(mode), disable_web_page_preview=True)
     return n
 
 
@@ -535,7 +538,8 @@ async def batch_download(context, chat_id, ud, start, mode):
             await context.bot.send_message(chat_id, "⏹️ متوقف شد.", reply_markup=main_kb(mode))
             return
         ch = chapters[idx]
-        await context.bot.send_message(chat_id, f"— {ch.label} ({idx+1}/{total})")
+        await context.bot.send_message(
+            chat_id, f"— {ch.label} ({idx+1}/{total})\n🔗 {ch.url}", disable_web_page_preview=True)
         try:
             n = await deliver_chapter(context, chat_id, ch, mode)
             if n:
