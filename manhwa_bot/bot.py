@@ -19,6 +19,7 @@ bot.py — ربات لینک‌دهی و اطلاع‌رسانی بروزرسا�
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import logging
 import os
@@ -26,10 +27,13 @@ import re
 import threading
 import time
 from datetime import datetime
+from urllib.parse import urljoin
 
+from bs4 import BeautifulSoup
 from telegram import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    InputFile,
     KeyboardButton,
     ReplyKeyboardMarkup,
     Update,
@@ -42,7 +46,7 @@ from telegram.ext import (
     filters,
 )
 
-from scraper import Scraper
+from scraper import SITE, Scraper
 
 logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s", level=logging.INFO
@@ -432,6 +436,71 @@ async def cmd_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await check_updates(context.application, notify_chat=update.effective_chat.id)
 
 
+def _logo_candidates(html: str) -> list[str]:
+    soup = BeautifulSoup(html, "html.parser")
+    cands = []
+    og = soup.find("meta", attrs={"property": "og:image"})
+    if og and og.get("content"):
+        cands.append(og["content"])
+    for l in soup.find_all("link"):
+        rel = " ".join(l.get("rel") or []).lower()
+        if any(k in rel for k in ("apple-touch-icon", "icon")) and l.get("href"):
+            cands.append(l["href"])
+    for img in soup.find_all("img"):
+        blob = (img.get("src", "") + " " + " ".join(img.get("class") or []) +
+                " " + (img.get("alt") or "")).lower()
+        if "logo" in blob and img.get("src"):
+            cands.append(img["src"])
+    seen, out = set(), []
+    for c in cands:
+        u = urljoin(SITE + "/", c)
+        if u not in seen:
+            seen.add(u)
+            out.append(u)
+    # عکس‌های رسترِ بزرگ‌تر اول، SVG آخر
+    out.sort(key=lambda x: (x.lower().endswith(".svg"), "apple-touch" not in x.lower()))
+    return out
+
+
+async def cmd_logo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not authorized(update):
+        return
+    chat_id = update.effective_chat.id
+    await update.message.reply_text("⏳ در حال گرفتن لوگوی سایت...")
+    try:
+        html = await asyncio.to_thread(lambda: scraper.get(SITE + "/").text)
+    except Exception as e:
+        await update.message.reply_text(f"❌ خطا: {e}")
+        return
+    cands = _logo_candidates(html)
+    if not cands:
+        await update.message.reply_text("لوگویی پیدا نشد.")
+        return
+    sent = 0
+    for u in cands[:5]:
+        try:
+            data, ct = await asyncio.to_thread(scraper.download_image, u, SITE)
+        except Exception:
+            continue
+        fn = (u.split("/")[-1].split("?")[0]) or "logo"
+        try:
+            await context.bot.send_document(
+                chat_id, document=InputFile(io.BytesIO(data), filename=fn), caption=u)
+            sent += 1
+        except Exception:
+            continue
+        if not u.lower().endswith(".svg"):
+            break
+    if sent:
+        await update.message.reply_text(
+            "👆 فایل لوگو. برای گذاشتن روی بات:\n"
+            "به @BotFather برو → /setuserpic → این بات رو انتخاب کن → همین عکس رو بفرست.\n"
+            "(اگه SVG بود، توی گوشی به PNG مربع تبدیلش کن.)",
+            reply_markup=main_kb())
+    else:
+        await update.message.reply_text("نشد لوگو رو دانلود کنم.")
+
+
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not authorized(update):
         await update.message.reply_text("⛔ این ربات خصوصی است.")
@@ -532,6 +601,7 @@ def main():
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_start))
     app.add_handler(CommandHandler("update", cmd_update))
+    app.add_handler(CommandHandler("logo", cmd_logo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     log.info("ربات روشن شد.")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
