@@ -1,14 +1,16 @@
 """
-scraper.py — استخراج قسمت‌ها (chapters) و صفحه‌ها (images) از sarrast.com
+scraper.py — استخراج قسمت‌ها و صفحه‌ها از sarrast.com
 
-ساختار سایت (کشف‌شده):
-  • صفحه‌ی هر قسمت، لیست کامل همهٔ قسمت‌های سری را به صورت لینک <a> دارد.
-  • بعضی لینک‌ها داخل لینک‌کوتاه‌کن ouo.io پیچیده شده‌اند؛ آدرس واقعی در پارامتر ?s= است.
-  • عکس‌های هر قسمت: <img class="pg"> با مسیر /public/img/series/<series>/<chapter>/NNN.jpg
+ساختار سایت:
+  • صفحه‌ی هر قسمت، لیست کامل قسمت‌های سری را به صورت لینک <a> دارد.
+  • بعضی لینک‌ها داخل ouo.io پیچیده شده‌اند؛ آدرس واقعی در پارامتر ?s= است.
+  • اسلاگ قسمت یا با عدد شروع می‌شود (34-cum-in-mouth) یا episode-NNN-xxxx.
+  • عکس‌های هر قسمت: /public/img/series/<series>/<chapter>/<N>.(jpg|webp)
+    (بنر «ادامه دارد» با شماره‌ی غیرعادی مثل 9999999999999 تهش می‌آید و فیلتر می‌شود.)
 
-تست مستقل:
-    python scraper.py "https://sarrast.com/series/free-porn-manhwa-sarrast/34-cum-in-mouth"
-    python scraper.py "https://sarrast.com/series/free-porn-manhwa-sarrast/" --images-of 34
+تست:
+    python scraper.py "https://sarrast.com/series/secret-class"
+    python scraper.py "https://sarrast.com/series/secret-class" --images-of 1
 """
 
 from __future__ import annotations
@@ -16,7 +18,7 @@ from __future__ import annotations
 import re
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from urllib.parse import urlparse, urljoin, parse_qs, unquote
 
 import requests
@@ -32,12 +34,32 @@ DEFAULT_HEADERS = {
 }
 
 IMG_ATTRS = ["data-src", "data-lazy-src", "data-original", "src"]
+MAX_PAGE_NO = 2000  # شماره‌ی صفحه‌ی بزرگ‌تر از این = آشغال (بنر ادامه دارد)
+
+# الگوهای استخراج شماره‌ی قسمت از اسلاگ (به ترتیب اولویت)
+_NUM_PATTERNS = [
+    r"episode[-_ ]?(\d+(?:\.\d+)?)",
+    r"chapter[-_ ]?(\d+(?:\.\d+)?)",
+    r"\bep[-_ ]?(\d+(?:\.\d+)?)",
+    r"part[-_ ]?(\d+(?:\.\d+)?)",
+    r"قسمت[-_ ]?(\d+(?:\.\d+)?)",
+    r"^(\d+(?:\.\d+)?)",
+]
+
+
+def extract_num(slug: str) -> float:
+    for pat in _NUM_PATTERNS:
+        m = re.search(pat, slug, re.I)
+        if m:
+            return float(m.group(1))
+    m = re.search(r"(\d+)", slug)
+    return float(m.group(1)) if m else 0.0
 
 
 @dataclass
 class Chapter:
     num: float
-    title: str   # اسلاگ قسمت، مثل "34-cum-in-mouth"
+    title: str   # اسلاگ، مثل "episode-001-L7PKh"
     url: str
 
     @property
@@ -47,6 +69,13 @@ class Chapter:
 
     def __repr__(self) -> str:
         return f"<Chapter {self.num} {self.title!r}>"
+
+
+@dataclass
+class Series:
+    title: str
+    url: str
+    chapters: list = field(default_factory=list)
 
 
 class Scraper:
@@ -82,11 +111,10 @@ class Scraper:
     def get(self, url: str, **kw) -> requests.Response:
         return self._request("GET", url, **kw)
 
-    # ---------- url helpers ----------
+    # ---------- helpers ----------
 
     @staticmethod
     def _unwrap(href: str) -> str:
-        """باز کردن لینک‌های پیچیده‌شده در ouo.io (آدرس واقعی در پارامتر s=)."""
         if href and "ouo.io" in href:
             q = parse_qs(urlparse(href).query)
             if q.get("s"):
@@ -95,19 +123,27 @@ class Scraper:
 
     @staticmethod
     def series_url(any_url: str) -> str:
-        """آدرس صفحه‌ی سری از روی هر لینک (قسمت یا خود سری).
-        ساختار: scheme://host/<base>/<series-slug>/[chapter]
-        """
         p = urlparse(any_url)
         parts = [x for x in p.path.split("/") if x]
         if len(parts) >= 2:
             return f"{p.scheme}://{p.netloc}/{parts[0]}/{parts[1]}/"
         return any_url if any_url.endswith("/") else any_url + "/"
 
+    @staticmethod
+    def _title(soup: BeautifulSoup, fallback: str) -> str:
+        og = soup.find("meta", attrs={"property": "og:title"})
+        raw = (og.get("content") if og and og.get("content") else None)
+        if not raw and soup.title and soup.title.string:
+            raw = soup.title.string
+        if not raw:
+            return fallback
+        return raw.split("|")[0].split("-")[0].strip() or fallback
+
     # ---------- chapters ----------
 
     def _chapter_links(self, soup: BeautifulSoup, s_url: str) -> list[Chapter]:
-        series_path = urlparse(s_url).path.rstrip("/")   # /series/<slug>
+        series_path = urlparse(s_url).path.rstrip("/")
+        prefix = series_path + "/"
         out: dict[str, Chapter] = {}
         for a in soup.find_all("a"):
             href = self._unwrap((a.get("href") or "").strip())
@@ -115,34 +151,30 @@ class Scraper:
                 continue
             href = urljoin(s_url, href)
             path = urlparse(href).path.rstrip("/")
-            prefix = series_path + "/"
             if not path.startswith(prefix):
                 continue
             rest = path[len(prefix):]
-            if not rest or "/" in rest:        # باید دقیقاً یک سطح پایین‌تر باشد
+            if not rest or "/" in rest:
                 continue
-            m = re.match(r"(\d+(?:\.\d+)?)", rest)
-            num = float(m.group(1)) if m else 0.0
-            # آدرس را بدون کوئری نگه می‌داریم
             clean = f"{urlparse(href).scheme}://{urlparse(href).netloc}{path}"
-            out[clean] = Chapter(num=num, title=rest, url=clean)
+            out[clean] = Chapter(num=extract_num(rest), title=rest, url=clean)
         return sorted(out.values(), key=lambda c: (c.num, c.title))
 
-    def get_chapters(self, any_url: str) -> list[Chapter]:
-        """لیست همهٔ قسمت‌های سری به ترتیب صعودی.
-
-        صفحه‌ی هر قسمت کل لیست را دارد؛ اگر لینک ورودی خودِ صفحه‌ی سری باشد
-        (که فقط لینک قسمت اول را دارد) اول آن قسمت را باز می‌کنیم تا لیست کامل بیاید.
-        """
+    def get_series(self, any_url: str) -> Series:
         s_url = self.series_url(any_url)
+        fallback = s_url.rstrip("/").split("/")[-1]
         soup = BeautifulSoup(self.get(any_url).text, "html.parser")
+        title = self._title(soup, fallback)
         chapters = self._chapter_links(soup, s_url)
         if len(chapters) < 2 and chapters:
             soup2 = BeautifulSoup(self.get(chapters[0].url).text, "html.parser")
             more = self._chapter_links(soup2, s_url)
             if len(more) > len(chapters):
                 chapters = more
-        return chapters
+        return Series(title=title, url=s_url, chapters=chapters)
+
+    def get_chapters(self, any_url: str) -> list[Chapter]:
+        return self.get_series(any_url).chapters
 
     # ---------- images ----------
 
@@ -160,30 +192,30 @@ class Scraper:
         return None
 
     def get_images(self, chapter_url: str) -> list[str]:
-        """آدرس تمام صفحه‌های یک قسمت، به ترتیب شماره‌ی صفحه."""
         soup = BeautifulSoup(self.get(chapter_url).text, "html.parser")
         slug = urlparse(chapter_url).path.rstrip("/").split("/")[-1]
 
-        imgs = soup.select("img.pg") or soup.find_all("img")
-        urls: list[str] = []
-        for img in imgs:
+        raw: list[str] = []
+        for img in (soup.select("img.pg") or soup.find_all("img")):
             src = self._best_src(img, chapter_url)
             if src and src.lower().startswith("http"):
-                urls.append(src)
+                raw.append(src)
 
-        # فقط عکس‌های همین قسمت (مسیر پوشه‌ی همین اسلاگ یا داخل public/img/series)
-        filt = [u for u in urls if f"/{slug}/" in u] or \
-               [u for u in urls if "/public/img/series" in u.lower()] or urls
+        pat_slug = re.compile(rf"/{re.escape(slug)}/(\d+)\.(?:jpe?g|png|webp|gif)(?:$|\?)", re.I)
+        pat_any = re.compile(r"/public/img/series/.+/(\d+)\.(?:jpe?g|png|webp|gif)(?:$|\?)", re.I)
 
+        pages: list[tuple[int, str]] = []
+        for u in raw:
+            m = pat_slug.search(u) or pat_any.search(u)
+            if not m:
+                continue
+            n = int(m.group(1))
+            if 0 <= n <= MAX_PAGE_NO:        # آشغال‌های با شماره‌ی غیرعادی را رد کن
+                pages.append((n, u))
+
+        pages.sort(key=lambda x: x[0])
         seen = set()
-        filt = [u for u in filt if not (u in seen or seen.add(u))]
-
-        def page_no(u: str) -> int:
-            m = re.search(r"(\d+)\.(?:jpe?g|png|webp|gif)(?:$|\?)", u, re.I)
-            return int(m.group(1)) if m else 0
-
-        filt.sort(key=page_no)
-        return filt
+        return [u for _, u in pages if not (u in seen or seen.add(u))]
 
     def download_image(self, img_url: str, referer: str) -> tuple[bytes, str]:
         r = self.get(img_url, headers={"Referer": referer})
@@ -200,26 +232,27 @@ def _main(argv: list[str]) -> int:
     sc = Scraper()
     if "--images-of" in argv:
         want = float(argv[argv.index("--images-of") + 1])
-        chs = sc.get_chapters(url)
-        target = next((c for c in chs if c.num == want), None)
+        s = sc.get_series(url)
+        target = next((c for c in s.chapters if c.num == want), None)
         if not target:
             print("قسمت پیدا نشد")
             return 1
         imgs = sc.get_images(target.url)
         print(f"{target.label}: {len(imgs)} صفحه")
-        for u in imgs[:10]:
+        for u in imgs[:8]:
             print("  ", u)
-        if len(imgs) > 10:
-            print(f"   ... و {len(imgs) - 10} صفحه دیگر")
+        if len(imgs) > 8:
+            print(f"   ... و {len(imgs) - 8} صفحه دیگر")
         return 0
 
-    chs = sc.get_chapters(url)
-    print(f"سری: {sc.series_url(url)}")
-    print(f"تعداد قسمت‌ها: {len(chs)}")
-    for c in chs[:25]:
-        print(f"  {c.label:>10}  ({c.title})  ->  {c.url}")
-    if len(chs) > 25:
-        print(f"  ... و {len(chs) - 25} قسمت دیگر")
+    s = sc.get_series(url)
+    print(f"سری: {s.title}")
+    print(f"آدرس: {s.url}")
+    print(f"تعداد قسمت‌ها: {len(s.chapters)}")
+    for c in s.chapters[:25]:
+        print(f"  {c.label:>10}  ({c.title})")
+    if len(s.chapters) > 25:
+        print(f"  ... و {len(s.chapters) - 25} قسمت دیگر")
     return 0
 
 
