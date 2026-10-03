@@ -1,0 +1,22 @@
+# نصب روی سرور (systemd) تا بات همیشه بالا بماند و بعد از ریبوت هم خودش اجرا شود:
+#   sudo cp soolakhi-bot.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now soolakhi-bot
+#   journalctl -u soolakhi-bot -f        # دیدن لاگ‌ها
+#
+# مسیر WorkingDirectory و User و مسیر پایتونِ venv را مطابق سرور خودت تنظیم کن.
+[Unit]
+Description=Soolakhi Telegram video bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/soolakhi-bot
+ExecStart=/opt/soolakhi-bot/.venv/bin/python /opt/soolakhi-bot/bot.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
