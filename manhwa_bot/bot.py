@@ -73,11 +73,13 @@ def _load_env(path: str) -> None:
 _load_env(os.path.join(HERE, ".env"))
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
-ALLOWED_IDS = {int(x) for x in re.findall(r"\d+", os.environ.get("ALLOWED_IDS", ""))}
+# آیدی‌های داخل .env = مدیرها (قابل حذف نیستند و می‌توانند آیدی مدیریت کنند)
+OWNER_IDS = {int(x) for x in re.findall(r"\d+", os.environ.get("ALLOWED_IDS", ""))}
 
 DATA_DIR = os.path.join(HERE, "data")
 CATALOG_FILE = os.path.join(DATA_DIR, "catalog.json")
 FOLLOWS_FILE = os.path.join(DATA_DIR, "follows.json")
+ALLOWED_FILE = os.path.join(DATA_DIR, "allowed.json")
 CATALOG_TTL = 6 * 3600
 CATALOG_VERSION = 3               # با تغییر روش استخراج اسم، کش قدیمی باطل می‌شود
 UPDATE_INTERVAL = 2 * 3600        # هر چند ثانیه سایت برای بروزرسانی چک شود
@@ -90,6 +92,7 @@ BTN_ALLSTORIES = "📚 همهٔ داستان‌ها"
 BTN_ALLLINKS = "🔗 لینک همهٔ قسمت‌ها"
 BTN_UPDATES = "🆕 بروزرسانی‌ها"
 BTN_FOLLOWS = "📖 دنبال‌شده‌ها"
+BTN_IDS = "👤 مدیریت آیدی‌ها"
 BTN_NEXT = "صفحهٔ بعد ▶️"
 BTN_PREV = "◀️ صفحهٔ قبل"
 BTN_BACK = "⬅️ بازگشت"
@@ -98,11 +101,30 @@ scraper = Scraper()
 _lock = threading.Lock()
 
 
+def load_allowed() -> set:
+    d = _read(ALLOWED_FILE) or {}
+    return {int(x) for x in d.get("ids", [])}
+
+
+def save_allowed(s):
+    with _lock:
+        _write(ALLOWED_FILE, {"ids": sorted(int(x) for x in s)})
+
+
+def all_allowed() -> set:
+    return OWNER_IDS | load_allowed()
+
+
 def authorized(update: Update) -> bool:
-    if not ALLOWED_IDS:
+    allowed = all_allowed()
+    if not allowed:
         return True
     u = update.effective_user
-    return bool(u and u.id in ALLOWED_IDS)
+    return bool(u and u.id in allowed)
+
+
+def is_admin(uid) -> bool:
+    return (not OWNER_IDS) or (uid in OWNER_IDS)
 
 
 # ----------------------------- json stores -----------------------------
@@ -207,10 +229,29 @@ def main_kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         [[BTN_SEARCH, BTN_ALLSTORIES],
          [BTN_ALLLINKS],
-         [BTN_UPDATES, BTN_FOLLOWS]],
+         [BTN_UPDATES, BTN_FOLLOWS],
+         [BTN_IDS]],
         resize_keyboard=True, is_persistent=True,
         input_field_placeholder="اسم داستان، شمارهٔ قسمت، یا لینک رو بفرست",
     )
+
+
+async def show_ids_menu(context, chat_id, uid, edit_msg=None):
+    owners = ", ".join(str(x) for x in sorted(OWNER_IDS)) or "—"
+    extra = sorted(load_allowed() - OWNER_IDS)
+    lines = [f"👤 آیدی خودت: `{uid}`", f"🔑 مدیرها: {owners}", "➕ اضافه‌شده‌ها:"]
+    lines.append("\n".join(f"• {i}" for i in extra) if extra else "— (کسی اضافه نشده)")
+    rows = [[InlineKeyboardButton(f"🗑 حذف {i}", callback_data=f"delid:{i}")] for i in extra]
+    rows.append([InlineKeyboardButton("➕ افزودن آیدی", callback_data="addid")])
+    kb = InlineKeyboardMarkup(rows)
+    txt = "\n".join(lines)
+    if edit_msg:
+        try:
+            await edit_msg.edit_text(txt, reply_markup=kb, parse_mode="Markdown")
+            return
+        except Exception:
+            pass
+    await context.bot.send_message(chat_id, txt, reply_markup=kb, parse_mode="Markdown")
 
 
 def _uniq(base, used, slug=""):
@@ -391,7 +432,7 @@ async def check_updates(app, notify_chat=None):
             info["title"] = sr.title
     save_follows(follows)
 
-    targets = [str(t) for t in ALLOWED_IDS] or list(follows.keys())
+    targets = [str(t) for t in all_allowed()] or list(follows.keys())
 
     # اطلاع‌رسانی داستان‌های جدید (در اجرای اول خبر نمی‌دهیم تا اسپم نشود)
     if new_series and not first_run:
@@ -534,6 +575,26 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     text = (update.message.text or "").strip()
 
+    # در حال افزودن آیدی (فقط مدیر)
+    if ud.get("await_addid"):
+        mid = re.search(r"\d{4,}", text)
+        if mid and is_admin(ud["uid"]):
+            ud["await_addid"] = False
+            s = load_allowed()
+            s.add(int(mid.group(0)))
+            save_allowed(s)
+            await update.message.reply_text(f"✅ آیدی {mid.group(0)} اضافه شد.", reply_markup=main_kb())
+            await show_ids_menu(context, chat_id, ud["uid"])
+            return
+        ud["await_addid"] = False  # متن عددی نبود → لغو و ادامهٔ عادی
+
+    if text == BTN_IDS:
+        if not is_admin(ud["uid"]):
+            await update.message.reply_text("⛔ فقط مدیر می‌تونه آیدی‌ها رو مدیریت کنه.", reply_markup=main_kb())
+            return
+        await show_ids_menu(context, chat_id, ud["uid"])
+        return
+
     m = URL_RE.search(text)
     if m:
         msg = await update.message.reply_text("⏳ در حال خواندن...")
@@ -617,6 +678,29 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = q.data or ""
     ud = context.user_data
     ud["uid"] = update.effective_user.id
+
+    if data == "addid":
+        if not is_admin(ud["uid"]):
+            await q.answer("⛔ فقط مدیر", show_alert=True)
+            return
+        ud["await_addid"] = True
+        await q.answer()
+        await context.bot.send_message(
+            q.message.chat_id,
+            "➕ آیدی عددی کاربر رو بفرست.\n(کاربر می‌تونه آیدی خودش رو از @userinfobot بگیره.)")
+        return
+    if data.startswith("delid:"):
+        if not is_admin(ud["uid"]):
+            await q.answer("⛔ فقط مدیر", show_alert=True)
+            return
+        rid = int(data[6:])
+        s = load_allowed()
+        s.discard(rid)
+        save_allowed(s)
+        await q.answer(f"آیدی {rid} حذف شد")
+        await show_ids_menu(context, q.message.chat_id, ud["uid"], edit_msg=q.message)
+        return
+
     if data.startswith("go:"):
         chapters = ud.get("chapters")
         if not chapters:
