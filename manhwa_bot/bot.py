@@ -92,6 +92,7 @@ BTN_ALLSTORIES = "📚 همهٔ داستان‌ها"
 BTN_ALLLINKS = "🔗 لینک همهٔ قسمت‌ها"
 BTN_UPDATES = "🆕 بروزرسانی‌ها"
 BTN_FOLLOWS = "📖 دنبال‌شده‌ها"
+BTN_FOLLOW_EDIT = "🗑 حذف از دنبال‌شده‌ها"
 BTN_IDS = "👤 مدیریت آیدی‌ها"
 BTN_NEXT = "صفحهٔ بعد ▶️"
 BTN_PREV = "◀️ صفحهٔ قبل"
@@ -192,6 +193,16 @@ def list_follows(uid):
     items = list((_read(FOLLOWS_FILE) or {}).get(str(uid), {}).items())
     items.sort(key=lambda kv: kv[1].get("ts", ""), reverse=True)
     return items
+
+
+def del_follow(uid, url):
+    with _lock:
+        d = _read(FOLLOWS_FILE) or {}
+        u = d.get(str(uid), {})
+        if url in u:
+            u.pop(url)
+            d[str(uid)] = u
+            _write(FOLLOWS_FILE, d)
 
 
 # ----------------------------- catalog / search -----------------------------
@@ -314,11 +325,38 @@ async def show_follows(context, chat_id, ud):
         label = _uniq(f"{info['title']}{last}", ud["pick_map"])
         ud["pick_map"][label] = url
         rows.append([KeyboardButton(label)])
+    rows.append([KeyboardButton(BTN_FOLLOW_EDIT)])
     rows.append([KeyboardButton(BTN_BACK)])
     ud["await_pick"] = True
     await context.bot.send_message(
-        chat_id, "📖 داستان‌هایی که دنبال می‌کنی:",
+        chat_id, "📖 داستان‌هایی که دنبال می‌کنی:\n(برای حذف، «🗑 حذف از دنبال‌شده‌ها» رو بزن)",
         reply_markup=ReplyKeyboardMarkup(rows, resize_keyboard=True, is_persistent=True))
+
+
+async def show_follow_edit(context, chat_id, ud, edit_msg=None):
+    items = list_follows(ud["uid"])
+    if not items:
+        txt = "📭 لیست دنبال‌شده‌ها خالیه."
+        if edit_msg:
+            try:
+                await edit_msg.edit_text(txt)
+                return
+            except Exception:
+                pass
+        await context.bot.send_message(chat_id, txt, reply_markup=main_kb())
+        return
+    ud["unfollow_list"] = [u for u, _ in items]
+    rows = [[InlineKeyboardButton(f"🗑 {info['title'][:45]}", callback_data=f"uf:{i}")]
+            for i, (_, info) in enumerate(items)]
+    txt = "🗑 روی هر داستان بزنی از دنبال‌شده‌ها حذف می‌شه (بقیه می‌مونن):"
+    kb = InlineKeyboardMarkup(rows)
+    if edit_msg:
+        try:
+            await edit_msg.edit_text(txt, reply_markup=kb)
+            return
+        except Exception:
+            pass
+    await context.bot.send_message(chat_id, txt, reply_markup=kb)
 
 
 # ----------------------------- open series / links -----------------------------
@@ -614,6 +652,9 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text == BTN_FOLLOWS:
         await show_follows(context, chat_id, ud)
         return
+    if text == BTN_FOLLOW_EDIT:
+        await show_follow_edit(context, chat_id, ud)
+        return
     if text == BTN_ALLSTORIES:
         items = await ensure_catalog(context, chat_id)
         if not items:
@@ -699,6 +740,17 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_allowed(s)
         await q.answer(f"آیدی {rid} حذف شد")
         await show_ids_menu(context, q.message.chat_id, ud["uid"], edit_msg=q.message)
+        return
+
+    if data.startswith("uf:"):
+        lst = ud.get("unfollow_list") or []
+        i = int(data[3:])
+        if 0 <= i < len(lst):
+            del_follow(ud["uid"], lst[i])
+            await q.answer("حذف شد")
+            await show_follow_edit(context, q.message.chat_id, ud, edit_msg=q.message)
+        else:
+            await q.answer("دوباره «🗑 حذف از دنبال‌شده‌ها» رو بزن", show_alert=True)
         return
 
     if data.startswith("go:"):
