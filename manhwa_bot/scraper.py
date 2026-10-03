@@ -193,11 +193,17 @@ class Scraper:
         soup = BeautifulSoup(self.get(any_url).text, "html.parser")
         title = self._title(soup, fallback)
         chapters = self._chapter_links(soup, s_url)
-        if len(chapters) < 2 and chapters:
-            soup2 = BeautifulSoup(self.get(chapters[0].url).text, "html.parser")
-            more = self._chapter_links(soup2, s_url)
-            if len(more) > len(chapters):
-                chapters = more
+        # صفحهٔ اصلیِ سری فقط چند قسمت (اولی + آخرین‌ها) را لیست می‌کند؛
+        # صفحهٔ یک قسمت، لیست کاملِ همهٔ قسمت‌ها را دارد.
+        is_chapter_page = len([p for p in urlparse(any_url).path.split("/") if p]) >= 3
+        if chapters and not is_chapter_page:
+            try:
+                soup2 = BeautifulSoup(self.get(chapters[0].url).text, "html.parser")
+                more = self._chapter_links(soup2, s_url)
+                if len(more) > len(chapters):
+                    chapters = more
+            except Exception:
+                pass
         return Series(title=title, url=s_url, chapters=chapters)
 
     def get_chapters(self, any_url: str) -> list[Chapter]:
