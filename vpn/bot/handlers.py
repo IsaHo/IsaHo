@@ -541,11 +541,13 @@ async def settings_relaytest(cb: CallbackQuery):
     if not users:
         await cb.message.answer("اول یک کاربر فعال بسازید.")
         return
-    link = links.reality_link(users[0], cfg.server_ip, cfg.reality_port, "test")
-    cmd = ("curl -fsSL https://raw.githubusercontent.com/IsaHo/IsaHo/claude/vpn-telegram-bot/vpn/relay.sh"
-           f" | bash -s test '{link}' {cfg.server_ip}")
-    await cb.message.answer("روی متن زیر بزنید تا کپی شود، بعد در ترمینال <b>سرور ایران</b> پیست کنید:\n\n"
-                            f"<code>{html.escape(cmd)}</code>")
+    base = "curl -fsSL https://raw.githubusercontent.com/IsaHo/IsaHo/claude/vpn-telegram-bot/vpn/relay.sh | bash -s test"
+    reality = links.reality_link(users[0], cfg.server_ip, cfg.reality_port, "test")
+    cmd1 = f"{base} '{reality}' {cfg.server_ip}"
+    cmd2 = f"{base} '{links.cdn_link(users[0])}'"
+    await cb.message.answer("روی هر دستور بزنید تا کپی شود و در ترمینال <b>سرور ایران</b> پیست کنید.\n\n"
+                            f"۱) Reality مستقیم به سرور خارج:\n<code>{html.escape(cmd1)}</code>\n\n"
+                            f"۲) از طریق کلادفلر (CDN):\n<code>{html.escape(cmd2)}</code>")
 
 
 @router.callback_query(F.data == "set:relays", admin)
