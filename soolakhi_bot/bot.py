@@ -552,6 +552,24 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             BLOCKED.append(d)
             save_json(BLOCK_FILE, BLOCKED)
         return await update.message.reply_text(f"🚫 {d} بلاک شد.", reply_markup=blocked_kb())
+    urls = re.findall(r"(?:https?://)?(?:[\w-]+\.)+[a-z]{2,}(?:/[^\s,،]*)?", text, re.I)
+    if len(urls) >= 2:  # چند سایت یک‌جا → همه ذخیره شوند
+        ctx.user_data.pop("adding", None)
+        added, dup = [], 0
+        for u in urls:
+            u = u if u.lower().startswith("http") else "https://" + u
+            root = site_root(u)
+            k = site_id(root)
+            if k in SITES or any(host_of(v["url"]) == host_of(root) for v in SITES.values()):
+                dup += 1
+                continue
+            SITES[k] = {"name": host_of(root), "url": root}
+            added.append(host_of(root))
+        save_json(SITES_FILE, SITES)
+        txt = f"✅ {len(added)} سایت ذخیره شد" + (f" ({dup} تا تکراری بود)" if dup else "")
+        if added:
+            txt += ":\n" + "\n".join(f"• {d}" for d in added[:50])
+        return await update.message.reply_text(txt[:4000], reply_markup=sites_kb())
     if text == BTN_SITES:
         ctx.user_data.pop("adding", None)
         await show_sites(chat_id, ctx)
