@@ -40,6 +40,12 @@ MENU = ReplyKeyboardMarkup([[BTN_SEARCH], [BTN_SITES, BTN_NEW], [BTN_FAVS, BTN_S
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("bot")
 
+try:
+    import lxml  # noqa: F401  — چند برابر سریع‌تر از html.parser
+    PARSER = "lxml"
+except ImportError:
+    PARSER = "html.parser"
+
 VIDEOS: dict[str, dict] = {}  # id -> {title, image, page, video}
 EXTERNAL: dict[str, list] = {}  # page url -> لینک پلیرها/فایل‌هاست‌های خارجی
 # فایل‌هاست‌ها: لینک .mp4 دارند ولی صفحه دانلود (کپچا/اشتراک) هستند نه فایل مستقیم
@@ -117,7 +123,7 @@ IMG_ATTRS = ["poster", "data-poster", "data-thumb", "data-thumbnail", "data-prev
 
 
 def parse_page(url: str, html: str, domain: str):
-    soup = BeautifulSoup(html, "html.parser")
+    soup = BeautifulSoup(html, PARSER)
     site_name = (soup.find("meta", property="og:site_name") or {}).get("content")
     meta = lambda p: (soup.find("meta", property=p) or soup.find("meta", attrs={"name": p}) or {}).get("content")
     J = lambda u: urljoin(url, u.strip())
@@ -270,7 +276,11 @@ async def ytdlp_info(url: str):
         proc = await asyncio.create_subprocess_exec(
             "yt-dlp", "-J", "--no-playlist", "--skip-download", "--no-warnings", url,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
-        out, _ = await asyncio.wait_for(proc.communicate(), 40)
+        try:
+            out, _ = await asyncio.wait_for(proc.communicate(), 15)
+        except asyncio.TimeoutError:
+            proc.kill()
+            return None, None
         if proc.returncode == 0:
             d = json.loads(out)
             return d.get("title"), d.get("thumbnail")
@@ -279,37 +289,69 @@ async def ytdlp_info(url: str):
     return None, None
 
 
+CONCURRENCY = int(os.environ.get("CONCURRENCY", "8"))  # تعداد صفحات همزمان
+# صفحاتی که معمولاً ویدیو ندارند (اول بقیه بررسی می‌شوند، این‌ها آخر صف)
+LOW_PRIORITY = re.compile(r"/(tag|tags|category|categories|author|page|archive|date|search|label|cat|actors?|"
+                          r"models?|pornstars?|channels?)(/|\?|$)|[?&](page|paged|p)=\d", re.I)
+# صفحاتی که اصلاً ارزش باز کردن ندارند
+SKIP_URL = re.compile(r"(/wp-(admin|login|json)|/feed/?$|/xmlrpc|/cart|/checkout|/my-account|/login|/register|"
+                      r"/signup|/contact|/privacy|/terms|/dmca|/about|replytocom=|/comment-page-|\?share=|"
+                      r"/cdn-cgi/|/amp/?$|\.(rss|atom)$)", re.I)
+
+
 class Crawler:
-    """اسکن مرحله‌ای: هر بار فقط تا پیدا شدن BATCH ویدیو جدید جلو می‌رود."""
+    """اسکن مرحله‌ای و همزمان: هر بار تا پیدا شدن BATCH ویدیو جلو می‌رود.
+    صفحات احتمالاً ویدیویی (کارت‌های دارای عکس) جلوتر از صفحات دسته/تگ بررسی می‌شوند."""
     def __init__(self, start_url: str):
         self.domain = urlparse(start_url).netloc.removeprefix("www.")
-        self.seen, self.queue, self.pages = set(), deque([start_url]), 0
+        self.seen, self.pages = set(), 0
+        self.hi, self.mid, self.lo = deque([start_url]), deque(), deque()
         self.sent: set[str] = set()
+
+    def _push(self, links):
+        for l in links:
+            if l in self.seen or SKIP_URL.search(l):
+                continue
+            self.seen.add(l)
+            if l in CARD_HINTS:
+                self.hi.append(l)       # کارت با عکس → به احتمال زیاد صفحه ویدیو
+            elif LOW_PRIORITY.search(l):
+                self.lo.append(l)
+            else:
+                self.mid.append(l)
+
+    def _pop(self):
+        for q in (self.hi, self.mid, self.lo):
+            if q:
+                return q.popleft()
+
+    async def _fetch(self, c, url, found):
+        try:
+            r = await c.get(url)
+            if "text/html" not in r.headers.get("content-type", ""):
+                return []
+        except Exception as e:
+            log.warning("fetch fail %s: %s", url, e)
+            return []
+        return await process_page(url, r.text, self.domain, self.sent, found)
 
     async def next_batch(self):
         found = []
-        async with httpx.AsyncClient(headers=HEADERS, follow_redirects=True, timeout=30) as c:
-            while self.queue and self.pages < MAX_PAGES and len(found) < BATCH:
-                url = self.queue.popleft()
-                if url in self.seen:
-                    continue
-                self.seen.add(url)
-                self.pages += 1
-                try:
-                    r = await c.get(url)
-                    if "text/html" not in r.headers.get("content-type", ""):
-                        continue
-                except Exception as e:
-                    log.warning("fetch fail %s: %s", url, e)
-                    continue
-                links = await process_page(url, r.text, self.domain, self.sent, found)
-                self.queue.extend(l for l in links if l not in self.seen)
-                await asyncio.sleep(0.3)
+        self.seen.update(self.hi)
+        limits = httpx.Limits(max_connections=CONCURRENCY, max_keepalive_connections=CONCURRENCY)
+        async with httpx.AsyncClient(headers=HEADERS, follow_redirects=True, timeout=20, limits=limits) as c:
+            while (self.hi or self.mid or self.lo) and self.pages < MAX_PAGES and len(found) < BATCH:
+                batch = []
+                while len(batch) < CONCURRENCY and (self.hi or self.mid or self.lo):
+                    batch.append(self._pop())
+                self.pages += len(batch)
+                for links in await asyncio.gather(*(self._fetch(c, u, found) for u in batch)):
+                    self._push(links)
         return found
 
     @property
     def done(self):
-        return not self.queue or self.pages >= MAX_PAGES
+        return not (self.hi or self.mid or self.lo) or self.pages >= MAX_PAGES
 
 
 async def process_page(url, html, domain, sent: set, found: list, query_words=None):
@@ -317,7 +359,7 @@ async def process_page(url, html, domain, sent: set, found: list, query_words=No
     if True:
         if True:
             if True:
-                title, image, videos, iframes, links = parse_page(url, html, domain)
+                title, image, videos, iframes, links = await asyncio.to_thread(parse_page, url, html, domain)
                 if not videos and iframes:
                     videos = {url}  # yt-dlp خودش از صفحه/iframe استخراج می‌کند
                     if not image:
@@ -392,24 +434,26 @@ class SearchCrawler:
         async with httpx.AsyncClient(headers=HEADERS, follow_redirects=True, timeout=25) as c:
             if not self.ready:
                 await self._prepare(c)
-            while self.queue and len(found) < BATCH and self.pages < 150:
-                url = self.queue.popleft()
-                if url in self.seen:
-                    continue
-                self.seen.add(url)
-                if is_blocked(url):
-                    continue
-                self.pages += 1
+            async def one(url):
                 try:
                     r = await c.get(url)
                     if "text/html" not in r.headers.get("content-type", ""):
-                        continue
+                        return
                 except Exception as e:
                     log.warning("fetch fail %s: %s", url, e)
-                    continue
+                    return
                 final = str(r.url)
-                dom = urlparse(final).netloc.removeprefix("www.")
-                await process_page(final, r.text, dom, self.sent, found)
+                await process_page(final, r.text, urlparse(final).netloc.removeprefix("www."), self.sent, found)
+
+            while self.queue and len(found) < BATCH and self.pages < 150:
+                batch = []
+                while self.queue and len(batch) < CONCURRENCY:
+                    url = self.queue.popleft()
+                    if url not in self.seen and not is_blocked(url):
+                        self.seen.add(url)
+                        batch.append(url)
+                self.pages += len(batch)
+                await asyncio.gather(*(one(u) for u in batch))
         return found
 
     @property
@@ -493,7 +537,7 @@ async def send_batch(chat_id, ctx: ContextTypes.DEFAULT_TYPE):
         if CRAWLERS.get(chat_id) is not cr:  # در این حین توقف یا اسکن جدید زده شده
             return
         await send_card(chat_id, i, VIDEOS[i], ctx)
-        await asyncio.sleep(1)  # جلوگیری از flood limit تلگرام
+        await asyncio.sleep(0.4)  # جلوگیری از flood limit تلگرام
     if cr.done:
         CRAWLERS.pop(chat_id, None)
         if isinstance(cr, SearchCrawler) and not cr.sent:

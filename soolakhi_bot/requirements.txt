@@ -4,3 +4,4 @@ beautifulsoup4
 yt-dlp
 Pillow
 curl_cffi
+lxml
