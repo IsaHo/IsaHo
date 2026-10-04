@@ -41,6 +41,13 @@ PY
     sleep 2
     if curl -sS -m 15 -o /dev/null -w "HTTP %{http_code} in %{time_total}s\n" --socks5-hostname 127.0.0.1:31999 https://www.gstatic.com/generate_204; then
         echo "✅ tunnel works from this server"
+        URL="https://speed.cloudflare.com/__down?bytes=25000000"
+        for i in 1 2 3; do
+            curl -sS -m 15 -o /dev/null -w "   new connection #$i: %{time_appconnect}s handshake, %{time_total}s total\n" \
+                --socks5-hostname 127.0.0.1:31999 https://www.gstatic.com/generate_204 || true
+        done
+        curl -sS -m 40 -o /dev/null -w "   download THROUGH tunnel: %{speed_download} B/s\n" --socks5-hostname 127.0.0.1:31999 "$URL" || true
+        curl -sS -m 40 -o /dev/null -w "   download DIRECT from this server: %{speed_download} B/s\n" "$URL" || true
     else
         echo "❌ tunnel failed from this server"; tail -5 "$D/log"
     fi
