@@ -15,7 +15,8 @@ from telegram.ext import Application, CallbackQueryHandler, CommandHandler, Cont
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 ALLOWED_USERS = {int(x) for x in os.environ.get("ALLOWED_USERS", "").split(",") if x}
 START_URL = os.environ.get("START_URL", "https://www.soolakhi.com/")
-MAX_PAGES = int(os.environ.get("MAX_PAGES", "300"))
+MAX_PAGES = int(os.environ.get("MAX_PAGES", "5000"))
+BATCH = int(os.environ.get("BATCH", "10"))  # تعداد ویدیو در هر صفحه
 # اگر Local Bot API Server داری، آدرسش را بده تا محدودیت آپلود 50MB به 2GB برسد
 LOCAL_API = os.environ.get("LOCAL_API")  # e.g. http://127.0.0.1:8081/bot
 
@@ -66,32 +67,45 @@ def parse_page(url: str, html: str):
     return title, (urljoin(url, image) if image else None), videos, has_iframe, links
 
 
-async def crawl():
-    found, seen, queue = [], set(), deque([START_URL])
-    async with httpx.AsyncClient(headers=HEADERS, follow_redirects=True, timeout=30) as c:
-        while queue and len(seen) < MAX_PAGES:
-            url = queue.popleft()
-            if url in seen:
-                continue
-            seen.add(url)
-            try:
-                r = await c.get(url)
-                if "text/html" not in r.headers.get("content-type", ""):
+class Crawler:
+    """اسکن مرحله‌ای: هر بار فقط تا پیدا شدن BATCH ویدیو جدید جلو می‌رود."""
+    def __init__(self):
+        self.seen, self.queue, self.pages = set(), deque([START_URL]), 0
+
+    async def next_batch(self):
+        found = []
+        async with httpx.AsyncClient(headers=HEADERS, follow_redirects=True, timeout=30) as c:
+            while self.queue and self.pages < MAX_PAGES and len(found) < BATCH:
+                url = self.queue.popleft()
+                if url in self.seen:
                     continue
-            except Exception as e:
-                log.warning("fetch fail %s: %s", url, e)
-                continue
-            title, image, videos, has_iframe, links = parse_page(url, r.text)
-            if not videos and has_iframe:
-                videos = {url}  # yt-dlp خودش از صفحه/iframe استخراج می‌کند
-            for v in videos:
-                i = vid_id(v)
-                if i not in VIDEOS:
-                    VIDEOS[i] = {"title": title, "image": image, "page": url, "video": v}
-                    found.append(i)
-            queue.extend(l for l in links if l not in seen)
-            await asyncio.sleep(0.3)
-    return found
+                self.seen.add(url)
+                self.pages += 1
+                try:
+                    r = await c.get(url)
+                    if "text/html" not in r.headers.get("content-type", ""):
+                        continue
+                except Exception as e:
+                    log.warning("fetch fail %s: %s", url, e)
+                    continue
+                title, image, videos, has_iframe, links = parse_page(url, r.text)
+                if not videos and has_iframe:
+                    videos = {url}  # yt-dlp خودش از صفحه/iframe استخراج می‌کند
+                for v in videos:
+                    i = vid_id(v)
+                    if i not in VIDEOS:
+                        VIDEOS[i] = {"title": title, "image": image, "page": url, "video": v}
+                        found.append(i)
+                self.queue.extend(l for l in links if l not in self.seen)
+                await asyncio.sleep(0.3)
+        return found
+
+    @property
+    def done(self):
+        return not self.queue or self.pages >= MAX_PAGES
+
+
+CRAWLERS: dict[int, Crawler] = {}  # chat_id -> وضعیت اسکن
 
 
 def allowed(update: Update) -> bool:
@@ -103,24 +117,46 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("/scan برای اسکن سایت")
 
 
-async def cmd_scan(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not allowed(update):
-        return
-    msg = await update.message.reply_text("در حال اسکن سایت...")
-    found = await crawl()
-    await msg.edit_text(f"{len(found)} ویدیو جدید پیدا شد.")
+async def send_batch(chat_id, ctx: ContextTypes.DEFAULT_TYPE):
+    cr = CRAWLERS[chat_id]
+    msg = await ctx.bot.send_message(chat_id, "در حال اسکن...")
+    found = await cr.next_batch()
+    await msg.delete()
     for i in found:
         v = VIDEOS[i]
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("⬇️ دانلود", callback_data=f"dl:{i}")]])
         cap = f"🎬 {v['title']}\n{v['page']}"[:1000]
         try:
             if v["image"]:
-                await update.message.reply_photo(v["image"], caption=cap, reply_markup=kb)
+                await ctx.bot.send_photo(chat_id, v["image"], caption=cap, reply_markup=kb)
             else:
-                await update.message.reply_text(cap, reply_markup=kb)
+                await ctx.bot.send_message(chat_id, cap, reply_markup=kb)
         except Exception:
-            await update.message.reply_text(cap, reply_markup=kb)
+            await ctx.bot.send_message(chat_id, cap, reply_markup=kb)
         await asyncio.sleep(1)  # جلوگیری از flood limit تلگرام
+    if cr.done:
+        await ctx.bot.send_message(chat_id, f"✅ اسکن تمام شد ({cr.pages} صفحه).")
+    else:
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("➡️ صفحه بعد", callback_data="next")]])
+        await ctx.bot.send_message(chat_id, f"{len(found)} ویدیو. ({cr.pages} صفحه اسکن شد)", reply_markup=kb)
+
+
+async def cmd_scan(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not allowed(update):
+        return
+    CRAWLERS[update.effective_chat.id] = Crawler()
+    await send_batch(update.effective_chat.id, ctx)
+
+
+async def on_next(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    if not allowed(update):
+        return await q.answer("دسترسی ندارید")
+    await q.answer()
+    if q.message.chat_id not in CRAWLERS:
+        return await q.message.reply_text("دوباره /scan بزنید")
+    await q.edit_message_reply_markup(None)  # جلوگیری از دوبار زدن
+    await send_batch(q.message.chat_id, ctx)
 
 
 async def download_and_send(chat_id, v, ctx):
@@ -179,6 +215,7 @@ def main():
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("scan", cmd_scan))
     app.add_handler(CallbackQueryHandler(on_button, pattern=r"^dl:"))
+    app.add_handler(CallbackQueryHandler(on_next, pattern=r"^next$"))
     app.run_polling()
 
 
