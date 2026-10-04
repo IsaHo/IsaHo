@@ -422,34 +422,85 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("متوجه نشدم. لینک سایت بفرست یا از دکمه‌ها استفاده کن.", reply_markup=MENU)
 
 
-async def download_and_send(chat_id, v, ctx):
-    # 1) اول: تلگرام خودش از URL مستقیم بگیرد (هیچ چیزی روی سرور نمی‌آید)
-    if re.search(r"\.(mp4)(\?|$)", v["video"], re.I):
-        try:
-            await ctx.bot.send_video(chat_id, v["video"], caption=v["title"][:1000], supports_streaming=True)
-            return
-        except Exception as e:
-            log.info("send by URL failed, fallback to yt-dlp: %s", e)
+async def http_download(url: str, referer: str, dest_dir: str, limit_mb: int, depth=0):
+    """دانلود مستقیم با هدرهای مرورگر (خیلی از سایت‌ها yt-dlp را می‌بندند ولی مرورگر را نه).
+    اگر به‌جای فایل، صفحه HTML برگشت، لینک ویدیو را از آن درمی‌آورد."""
+    hdr = {**HEADERS, "Referer": referer, "Accept": "*/*", "Accept-Language": "en-US,en;q=0.9,fa;q=0.8",
+           "Origin": f"{urlparse(referer).scheme}://{urlparse(referer).netloc}"}
+    async with httpx.AsyncClient(headers=hdr, follow_redirects=True, timeout=httpx.Timeout(60, read=120)) as c:
+        async with c.stream("GET", url) as r:
+            r.raise_for_status()
+            ctype = r.headers.get("content-type", "").lower()
+            if "text/html" in ctype:
+                if depth:
+                    return None
+                html = (await r.aread()).decode(errors="ignore")
+                _, _, videos, iframes, _ = parse_page(str(r.url), html, urlparse(str(r.url)).netloc.removeprefix("www."))
+                for u in sorted(videos, key=lambda x: (".m3u8" in x or ".mpd" in x)):
+                    if not re.search(r"\.(m3u8|mpd)(\?|$)", u, re.I):
+                        p = await http_download(u, str(r.url), dest_dir, limit_mb, depth + 1)
+                        if p:
+                            return p
+                return None
+            if "mpegurl" in ctype or "dash+xml" in ctype:
+                return None  # استریم HLS/DASH → yt-dlp
+            size = int(r.headers.get("content-length") or 0)
+            if size > limit_mb * 2**20:
+                raise RuntimeError(f"حجم فایل {size // 2**20}MB بیشتر از محدودیت {limit_mb}MB تلگرام است")
+            ext = (re.search(rf"\.({VID_EXTS})(\?|$)", str(r.url), re.I) or [None, "mp4"])[1]
+            path = os.path.join(dest_dir, f"video.{ext}")
+            done = 0
+            with open(path, "wb") as f:  # تکه‌تکه روی دیسک موقت؛ RAM پر نمی‌شود
+                async for chunk in r.aiter_bytes(1 << 20):
+                    done += len(chunk)
+                    if done > limit_mb * 2**20:
+                        raise RuntimeError(f"حجم فایل بیشتر از محدودیت {limit_mb}MB تلگرام است")
+                    f.write(chunk)
+            return path
 
-    # 2) دانلود موقت با yt-dlp -> ارسال -> حذف فوری
-    with tempfile.TemporaryDirectory() as tmp:
-        out = os.path.join(tmp, "video.%(ext)s")
-        proc = await asyncio.create_subprocess_exec(
-            "yt-dlp", "-q", "--no-playlist", "-f", "b[ext=mp4]/bv*+ba/b",
-            "--merge-output-format", "mp4", "--referer", v["page"], "-o", out, v["video"],
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+
+async def ytdlp_download(url: str, referer: str, dest_dir: str):
+    out = os.path.join(dest_dir, "video.%(ext)s")
+    base = ["yt-dlp", "-q", "--no-playlist", "-f", "b[ext=mp4]/bv*+ba/b", "--merge-output-format", "mp4",
+            "--user-agent", HEADERS["User-Agent"], "--referer", referer,
+            "--add-header", "Accept-Language:en-US,en;q=0.9", "--retries", "5", "-o", out]
+    err = b""
+    for extra in (["--impersonate", "chrome"], []):  # impersonate نیاز به curl_cffi دارد
+        proc = await asyncio.create_subprocess_exec(*base, *extra, url, stdout=asyncio.subprocess.PIPE,
+                                                    stderr=asyncio.subprocess.PIPE)
         _, err = await proc.communicate()
-        files = os.listdir(tmp)
-        if proc.returncode != 0 or not files:
-            raise RuntimeError(err.decode(errors="ignore")[-400:] or "دانلود ناموفق")
-        path = os.path.join(tmp, files[0])
+        files = [f for f in os.listdir(dest_dir) if not f.endswith((".part", ".ytdl"))]
+        if proc.returncode == 0 and files:
+            return os.path.join(dest_dir, files[0])
+    raise RuntimeError(err.decode(errors="ignore")[-400:] or "دانلود ناموفق")
+
+
+async def download_and_send(chat_id, v, ctx):
+    limit = 2000 if LOCAL_API else 50
+    with tempfile.TemporaryDirectory() as tmp:
+        path, errors = None, []
+        # 1) دانلود مستقیم با هدر مرورگر  2) yt-dlp روی لینک ویدیو  3) yt-dlp روی خود صفحه
+        try:
+            path = await http_download(v["video"], v["page"], tmp, limit)
+        except RuntimeError:
+            raise
+        except Exception as e:
+            errors.append(f"direct: {e}")
+        for target in (v["video"], v["page"]):
+            if path:
+                break
+            try:
+                path = await ytdlp_download(target, v["page"], tmp)
+            except Exception as e:
+                errors.append(f"yt-dlp: {e}")
+        if not path:
+            raise RuntimeError("\n".join(errors)[-700:] or "دانلود ناموفق")
         size = os.path.getsize(path)
-        limit = 2000 if LOCAL_API else 50
-        if size > limit * 1024 * 1024:
+        if size > limit * 2**20:
             raise RuntimeError(f"حجم فایل {size // 2**20}MB بیشتر از محدودیت {limit}MB تلگرام است")
         with open(path, "rb") as f:  # فایل استریم می‌شود، کل آن در RAM لود نمی‌شود
             await ctx.bot.send_video(chat_id, f, caption=v["title"][:1000], supports_streaming=True,
-                                     read_timeout=600, write_timeout=600)
+                                     read_timeout=1800, write_timeout=1800)
     # با خروج از with، پوشه موقت و فایل حذف شده‌اند
 
 

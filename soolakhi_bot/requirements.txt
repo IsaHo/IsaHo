@@ -3,3 +3,4 @@ httpx
 beautifulsoup4
 yt-dlp
 Pillow
+curl_cffi
