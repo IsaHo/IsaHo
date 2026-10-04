@@ -16,13 +16,25 @@ def cdn_public_port() -> int:
     return int(db.get_setting("cdn_public_port") or cfg.cdn_port)
 
 
-def reality_link(u) -> str:
+def relays() -> list:
+    """Iranian relay servers as (host, port); they NAT-forward to our Reality port."""
+    out = []
+    for item in db.get_setting("relays").split(","):
+        item = item.strip()
+        if item:
+            host, _, port = item.rpartition(":") if ":" in item else (item, "", "443")
+            out.append((host, int(port)))
+    return out
+
+
+def reality_link(u, address: str = "", port: int = 0, tag: str = "Reality") -> str:
     q = urlencode({
         "encryption": "none", "flow": "xtls-rprx-vision", "security": "reality",
         "sni": cfg.reality_sni, "fp": "chrome", "pbk": cfg.reality_public_key,
         "sid": cfg.reality_short_id, "type": "tcp", "headerType": "none",
     })
-    return f"vless://{u.uuid}@{cfg.server_ip}:{cfg.reality_port}?{q}#{quote(f'{cfg.brand}-{u.name}-Reality')}"
+    address, port = address or cfg.server_ip, port or cfg.reality_port
+    return f"vless://{u.uuid}@{address}:{port}?{q}#{quote(f'{cfg.brand}-{u.name}-{tag}')}"
 
 
 def cdn_link(u) -> str:
@@ -36,6 +48,9 @@ def cdn_link(u) -> str:
 
 def all_links(u) -> list:
     links = []
+    if cfg.reality_public_key:
+        for i, (host, port) in enumerate(relays(), 1):
+            links.append(reality_link(u, host, port, f"IR{i}"))
     if cfg.server_ip and cfg.reality_public_key:
         links.append(reality_link(u))
     if cfg.domain:

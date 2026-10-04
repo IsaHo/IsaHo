@@ -65,6 +65,13 @@ def main() -> None:
             "realitySettings": {"serverName": cfg.reality_sni, "fingerprint": "chrome",
                                 "publicKey": cfg.reality_public_key, "shortId": cfg.reality_short_id}}))
 
+    for i, (host, port) in enumerate(links.relays(), 1):
+        try_config(f"Relay IR{i} ({host}:{port} -> Reality)", 30810 + i, vless(
+            host, port, u.uuid, flow="xtls-rprx-vision", stream={
+                "network": "tcp", "security": "reality",
+                "realitySettings": {"serverName": cfg.reality_sni, "fingerprint": "chrome",
+                                    "publicKey": cfg.reality_public_key, "shortId": cfg.reality_short_id}}))
+
     try_config(f"CDN XHTTP (through Cloudflare, port {links.cdn_public_port()})", 30802, vless(
         links.cdn_address(), links.cdn_public_port(), u.uuid, stream={
             "network": "xhttp", "security": "tls",

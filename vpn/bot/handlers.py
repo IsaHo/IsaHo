@@ -50,6 +50,7 @@ class Edit(StatesGroup):
     note = State()
     search = State()
     cdn_ip = State()
+    relays = State()
     broadcast = State()
 
 
@@ -123,7 +124,12 @@ def links_text(u) -> str:
              "📥 <b>لینک سابسکریپشن</b> (پیشنهادی - خودکار آپدیت می‌شود):",
              f"<code>{html.escape(links.sub_url(u))}</code>", ""]
     for link in links.all_links(u):
-        label = "⚡ Reality (سریع‌ترین)" if "security=reality" in link else "☁️ CDN (پشتیبان، ضد فیلتر)"
+        if "-IR" in link.rsplit("#", 1)[-1]:
+            label = "🇮🇷 از طریق سرور واسط ایران (پیشنهادی)"
+        elif "security=reality" in link:
+            label = "⚡ Reality (مستقیم)"
+        else:
+            label = "☁️ CDN (پشتیبان، ضد فیلتر)"
         parts += [f"<b>{label}</b>", f"<code>{html.escape(link)}</code>", ""]
     me_link = f"https://t.me/{db.get_setting('bot_username')}?start={u.sub_token}"
     parts.append(f"🤖 لینک اتصال کاربر به ربات (برای دیدن مصرف):\n<code>{me_link}</code>")
@@ -488,10 +494,11 @@ async def settings_menu(msg: Message):
         f"Reality: پورت {cfg.reality_port} | SNI <code>{cfg.reality_sni}</code>\n"
         f"CDN (XHTTP): پورت کلادفلر {links.cdn_public_port()} → سرور {cfg.cdn_port} | path <code>{cfg.cdn_path}</code>\n"
         f"آدرس اتصال CDN: <code>{links.cdn_address()}</code>\n"
-        f"سابسکریپشن: پورت {cfg.sub_port}"
+        f"سابسکریپشن: پورت {cfg.sub_port}\n"
+        f"سرورهای واسط: <code>{', '.join(f'{h}:{p}' for h, p in links.relays()) or 'ندارد'}</code>"
     )
     await msg.answer(text, reply_markup=ikb([
-        [("🌐 تنظیم IP تمیز کلادفلر", "set:cdn")],
+        [("🇮🇷 سرور واسط", "set:relays"), ("🌐 تنظیم IP تمیز کلادفلر", "set:cdn")],
         [("🔌 پورت CDN: 443", "set:port:443"), (f"🔌 پورت CDN: {cfg.cdn_port}", f"set:port:{cfg.cdn_port}")],
         [("🔄 ریستارت Xray", "set:restart"), ("🛠 بازسازی کانفیگ", "set:rebuild")],
     ]))
@@ -524,6 +531,33 @@ async def settings_port(cb: CallbackQuery):
             f"• Custom filter: Hostname equals <code>{cfg.domain}</code> AND Server Port equals <code>443</code>\n"
             f"• Destination Port → Rewrite to <code>{cfg.cdn_port}</code>\n\n"
             "بعد کاربران فقط سابسکریپشن را آپدیت کنند. تست: <code>isaho doctor</code>")
+
+
+@router.callback_query(F.data == "set:relays", admin)
+async def settings_relays(cb: CallbackQuery, state: FSMContext):
+    await cb.answer()
+    await state.set_state(Edit.relays)
+    await cb.message.answer(
+        "🇮🇷 آدرس سرور(های) واسط ایران را به شکل <code>IP:پورت</code> بفرستید؛ چند تا را با کاما جدا کنید.\n"
+        "مثال: <code>1.2.3.4:443</code>\n"
+        "برای حذف همه: <code>reset</code>\n\n"
+        "روی سرور ایران قبلش این را اجرا کنید:\n"
+        f"<code>curl -fsSL https://raw.githubusercontent.com/IsaHo/IsaHo/claude/vpn-telegram-bot/vpn/relay.sh"
+        f" | bash -s {cfg.server_ip}</code>", reply_markup=CANCEL_KB)
+
+
+@router.message(Edit.relays, admin)
+async def settings_relays_set(msg: Message, state: FSMContext):
+    value = (msg.text or "").strip()
+    if value.lower() == "reset":
+        value = ""
+    elif not re.match(r"^[A-Za-z0-9.\-]+(:\d{1,5})?(\s*,\s*[A-Za-z0-9.\-]+(:\d{1,5})?)*$", value):
+        await msg.answer("❌ قالب نامعتبر است. مثال: <code>1.2.3.4:443</code>")
+        return
+    db.set_setting("relays", value.replace(" ", ""))
+    await state.clear()
+    await msg.answer(f"✅ سرورهای واسط: <code>{', '.join(f'{h}:{p}' for h, p in links.relays()) or 'ندارد'}</code>\n"
+                     "کاربران فقط سابسکریپشن را آپدیت کنند.", reply_markup=ADMIN_KB)
 
 
 @router.callback_query(F.data == "set:cdn", admin)
