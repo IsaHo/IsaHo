@@ -114,9 +114,13 @@ ENV
 chmod 600 "$ENV_FILE"
 
 green "==> Installing bot"
-rm -rf "$APP_DIR/bot"
-cp -r "$SRC_DIR/bot" "$APP_DIR/bot"
-cp "$SRC_DIR/install.sh" "$APP_DIR/install.sh"
+if [[ $SRC_DIR != "$APP_DIR" ]]; then
+    rm -rf "$APP_DIR/bot"
+    cp -r "$SRC_DIR/bot" "$APP_DIR/bot"
+    cp "$SRC_DIR/install.sh" "$APP_DIR/install.sh"
+    # remember the git checkout so `isaho update` can pull from it
+    git -C "$SRC_DIR" rev-parse --show-toplevel >"$APP_DIR/repo_path" 2>/dev/null || true
+fi
 [[ -d $APP_DIR/venv ]] || python3 -m venv "$APP_DIR/venv"
 "$APP_DIR/venv/bin/pip" install -q --upgrade pip
 "$APP_DIR/venv/bin/pip" install -q -r "$APP_DIR/bot/requirements.txt"
@@ -174,14 +178,18 @@ case "${1:-}" in
   status)  systemctl --no-pager status xray isaho-bot ;;
   logs)    journalctl -u isaho-bot -u xray -n 100 -f ;;
   restart) systemctl restart xray isaho-bot && echo restarted ;;
-  update)  bash /opt/isaho-vpn/install.sh ;;
+  update)
+    repo=$(cat /opt/isaho-vpn/repo_path 2>/dev/null)
+    [[ -n $repo && -d $repo/.git ]] || { echo "git checkout not found; run install.sh from your clone"; exit 1; }
+    git -C "$repo" pull --ff-only && bash "$repo/vpn/install.sh" ;;
+  doctor)  cd /opt/isaho-vpn/bot && /opt/isaho-vpn/venv/bin/python doctor.py ;;
   env)     ${EDITOR:-nano} /etc/isaho-vpn/vpn.env && systemctl restart isaho-bot ;;
   uninstall)
     read -rp "Remove bot, users DB and Xray? [y/N] " a; [[ $a == y ]] || exit
     systemctl disable --now isaho-bot xray
     rm -rf /opt/isaho-vpn /var/lib/isaho-vpn /etc/isaho-vpn /etc/systemd/system/isaho-bot.service /usr/local/bin/isaho
     bash -c "$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ remove --purge ;;
-  *) echo "usage: isaho {status|logs|restart|update|env|uninstall}" ;;
+  *) echo "usage: isaho {status|logs|restart|update|doctor|env|uninstall}" ;;
 esac
 CLI
 chmod +x /usr/local/bin/isaho
@@ -202,5 +210,5 @@ Cloudflare checklist for $DOMAIN:
   • Network: gRPC ON, WebSockets ON
   • Speed -> Optimization: turn OFF Rocket Loader for this host
 
-Manage from the shell with:  isaho status | logs | restart | update | env | uninstall
+Manage from the shell with:  isaho status | logs | restart | update | doctor | env | uninstall
 "
