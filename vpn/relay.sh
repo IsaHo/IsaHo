@@ -5,6 +5,49 @@
 #   usage: bash relay.sh <foreign-server-ip> [listen-port] [foreign-port]
 set -euo pipefail
 
+# Test mode: bash relay.sh test '<vless link>' [override-address]
+# Runs a real Xray client on this server and fetches a URL through the link.
+if [[ ${1:-} == test ]]; then
+    LINK=${2:?usage: bash relay.sh test '<vless link>' [address]}
+    OVERRIDE=${3:-}
+    D=/tmp/isaho-test; mkdir -p "$D"
+    if [[ ! -x $D/xray ]]; then
+        command -v unzip >/dev/null || apt-get install -y -qq unzip >/dev/null
+        curl -fsSL -o "$D/x.zip" https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip
+        unzip -oq "$D/x.zip" -d "$D"
+    fi
+    python3 - "$LINK" "$OVERRIDE" >"$D/c.json" <<'PY'
+import json, sys
+from urllib.parse import urlsplit, parse_qs, unquote
+u = urlsplit(sys.argv[1]); q = {k: v[0] for k, v in parse_qs(u.query).items()}
+host = sys.argv[2] or u.hostname
+user = {"id": unquote(u.username), "encryption": "none"}
+if q.get("flow"): user["flow"] = q["flow"]
+stream = {"network": q.get("type", "tcp"), "security": q.get("security", "none")}
+if stream["security"] == "reality":
+    stream["realitySettings"] = {"serverName": q.get("sni"), "fingerprint": q.get("fp", "chrome"),
+                                 "publicKey": q.get("pbk"), "shortId": q.get("sid", "")}
+elif stream["security"] == "tls":
+    stream["tlsSettings"] = {"serverName": q.get("sni"), "fingerprint": q.get("fp", "chrome"),
+                             "alpn": q.get("alpn", "h2,http/1.1").split(",")}
+if stream["network"] == "xhttp":
+    stream["xhttpSettings"] = {"host": q.get("host", ""), "path": q.get("path", "/"), "mode": q.get("mode", "auto")}
+print(json.dumps({"log": {"loglevel": "warning"},
+                  "inbounds": [{"listen": "127.0.0.1", "port": 31999, "protocol": "socks"}],
+                  "outbounds": [{"protocol": "vless", "settings": {"vnext": [
+                      {"address": host, "port": u.port, "users": [user]}]}, "streamSettings": stream}]}))
+PY
+    "$D/xray" run -c "$D/c.json" >"$D/log" 2>&1 & XP=$!
+    sleep 2
+    if curl -sS -m 15 -o /dev/null -w "HTTP %{http_code} in %{time_total}s\n" --socks5-hostname 127.0.0.1:31999 https://www.gstatic.com/generate_204; then
+        echo "✅ tunnel works from this server"
+    else
+        echo "❌ tunnel failed from this server"; tail -5 "$D/log"
+    fi
+    kill $XP 2>/dev/null
+    exit 0
+fi
+
 FOREIGN_IP=${1:?usage: bash relay.sh <foreign-server-ip> [listen-port] [foreign-port]}
 LISTEN_PORT=${2:-443}
 FOREIGN_PORT=${3:-443}
