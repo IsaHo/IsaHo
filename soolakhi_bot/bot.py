@@ -422,47 +422,70 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("متوجه نشدم. لینک سایت بفرست یا از دکمه‌ها استفاده کن.", reply_markup=MENU)
 
 
+CHUNK = 2 * 2**20  # هر تکه 2MB
+
+
 async def http_download(url: str, referer: str, dest_dir: str, limit_mb: int, depth=0):
-    """دانلود مستقیم با هدرهای مرورگر (خیلی از سایت‌ها yt-dlp را می‌بندند ولی مرورگر را نه).
-    اگر به‌جای فایل، صفحه HTML برگشت، لینک ویدیو را از آن درمی‌آورد."""
-    # هدر ساده (تست روی takcdn نشان داد هدرهای اضافه/HTTP2 باعث قطع اتصال می‌شود)
+    """دانلود مستقیم تکه‌تکه با Range (بعضی CDNها مثل takcdn اتصال طولانی را قطع می‌کنند
+    ولی درخواست‌های کوچک Range را جواب می‌دهند). اگر HTML برگشت، لینک ویدیو را از آن درمی‌آورد."""
     hdr = {**HEADERS, "Referer": referer}
-    async with httpx.AsyncClient(headers=hdr, follow_redirects=True,
-                                 timeout=httpx.Timeout(60, read=120)) as c:
-        if depth == 0:
-            try:  # اول صفحه را باز کن تا کوکی‌های سایت (session/cloudflare) گرفته شود
-                await c.get(referer, headers={"Accept": "text/html"})
-            except Exception:
-                pass
-        async with c.stream("GET", url) as r:
-            r.raise_for_status()
-            ctype = r.headers.get("content-type", "").lower()
-            if "text/html" in ctype:
-                if depth:
-                    return None
-                html = (await r.aread()).decode(errors="ignore")
-                _, _, videos, iframes, _ = parse_page(str(r.url), html, urlparse(str(r.url)).netloc.removeprefix("www."))
-                for u in sorted(videos, key=lambda x: (".m3u8" in x or ".mpd" in x)):
-                    if not re.search(r"\.(m3u8|mpd)(\?|$)", u, re.I):
-                        p = await http_download(u, str(r.url), dest_dir, limit_mb, depth + 1)
-                        if p:
-                            return p
+    async with httpx.AsyncClient(headers=hdr, follow_redirects=True, timeout=httpx.Timeout(30, read=60)) as c:
+        r = await c.get(url, headers={"Range": "bytes=0-1023"})
+        r.raise_for_status()
+        ctype = r.headers.get("content-type", "").lower()
+        if "text/html" in ctype:
+            if depth:
                 return None
-            if "mpegurl" in ctype or "dash+xml" in ctype:
-                return None  # استریم HLS/DASH → yt-dlp
-            size = int(r.headers.get("content-length") or 0)
-            if size > limit_mb * 2**20:
-                raise RuntimeError(f"حجم فایل {size // 2**20}MB بیشتر از محدودیت {limit_mb}MB تلگرام است")
-            ext = (re.search(rf"\.({VID_EXTS})(\?|$)", str(r.url), re.I) or [None, "mp4"])[1]
-            path = os.path.join(dest_dir, f"video.{ext}")
-            done = 0
-            with open(path, "wb") as f:  # تکه‌تکه روی دیسک موقت؛ RAM پر نمی‌شود
-                async for chunk in r.aiter_bytes(1 << 20):
-                    done += len(chunk)
-                    if done > limit_mb * 2**20:
-                        raise RuntimeError(f"حجم فایل بیشتر از محدودیت {limit_mb}MB تلگرام است")
-                    f.write(chunk)
+            _, _, videos, _, _ = parse_page(str(r.url), r.text, urlparse(str(r.url)).netloc.removeprefix("www."))
+            for u in videos:
+                if not re.search(r"\.(m3u8|mpd)(\?|$)", u, re.I):
+                    p = await http_download(u, str(r.url), dest_dir, limit_mb, depth + 1)
+                    if p:
+                        return p
+            return None
+        if "mpegurl" in ctype or "dash+xml" in ctype:
+            return None  # استریم HLS/DASH → yt-dlp
+        final = str(r.url)
+        m = re.search(r"/(\d+)$", r.headers.get("content-range", ""))
+        total = int(m.group(1)) if m else (int(r.headers.get("content-length") or 0) if r.status_code == 200 else 0)
+        if total > limit_mb * 2**20:
+            raise RuntimeError(f"حجم فایل {total // 2**20}MB بیشتر از محدودیت {limit_mb}MB تلگرام است")
+        ext = (re.search(rf"\.({VID_EXTS})(\?|$)", final, re.I) or [None, "mp4"])[1]
+        path = os.path.join(dest_dir, f"video.{ext}")
+
+        if r.status_code == 200 and total and len(r.content) >= total:  # فایل کوچک، یکجا آمد
+            with open(path, "wb") as f:
+                f.write(r.content)
             return path
+
+        done = 0
+        with open(path, "wb") as f:  # روی دیسک موقت؛ RAM پر نمی‌شود
+            while not total or done < total:
+                end = done + CHUNK - 1
+                if total:
+                    end = min(end, total - 1)
+                for attempt in range(6):
+                    try:
+                        cr = await c.get(final, headers={"Range": f"bytes={done}-{end}"})
+                        if cr.status_code == 416:  # به انتهای فایل رسیدیم (وقتی total نامعلوم است)
+                            return path
+                        cr.raise_for_status()
+                        data = cr.content
+                        break
+                    except Exception as e:
+                        if attempt == 5:
+                            raise RuntimeError(f"قطع در {done // 2**20}MB: {type(e).__name__}") from e
+                        await asyncio.sleep(1 + attempt)
+                if cr.status_code == 200:  # سرور Range را نادیده گرفت و کل فایل را داد
+                    f.seek(0); f.truncate(); f.write(data)
+                    return path
+                f.write(data)
+                done += len(data)
+                if done > limit_mb * 2**20:
+                    raise RuntimeError(f"حجم فایل بیشتر از محدودیت {limit_mb}MB تلگرام است")
+                if not data or (not total and len(data) < end - (done - len(data)) + 1):
+                    break
+        return path
 
 
 async def ytdlp_download(url: str, referer: str, dest_dir: str):
