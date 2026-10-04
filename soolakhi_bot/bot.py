@@ -3,12 +3,13 @@
 ربات تلگرام: اسکن مرحله‌ای سایت‌ها، ارسال تیتر + عکس ویدیوها، دانلود با دکمه، ذخیره علاقه‌مندی‌ها.
 فایل ویدیو روی سرور نگه داشته نمی‌شود (فایل موقت بلافاصله بعد از ارسال پاک می‌شود).
 """
-import asyncio, hashlib, json, logging, os, re, tempfile
+import asyncio, hashlib, io, json, logging, os, re, tempfile
 from collections import deque
 from urllib.parse import urljoin, urlparse
 
 import httpx
 from bs4 import BeautifulSoup
+from PIL import Image
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, Update
 from telegram.ext import (Application, CallbackQueryHandler, CommandHandler, ContextTypes,
                           MessageHandler, filters)
@@ -38,6 +39,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 log = logging.getLogger("bot")
 
 VIDEOS: dict[str, dict] = {}  # id -> {title, image, page, video}
+CARD_HINTS: dict[str, dict] = {}  # page url -> {title, image} از کارت‌های صفحه لیست
 
 
 def load_json(path, default):
@@ -92,6 +94,7 @@ IMG_ATTRS = ["poster", "data-poster", "data-thumb", "data-thumbnail", "data-prev
 
 def parse_page(url: str, html: str, domain: str):
     soup = BeautifulSoup(html, "html.parser")
+    site_name = (soup.find("meta", property="og:site_name") or {}).get("content")
     meta = lambda p: (soup.find("meta", property=p) or soup.find("meta", attrs={"name": p}) or {}).get("content")
     J = lambda u: urljoin(url, u.strip())
 
@@ -169,7 +172,54 @@ def parse_page(url: str, html: str, domain: str):
                 and not re.search(r"\.(pdf|zip|rar|css|js|xml|json)(\?|$)", u, re.I):
             links.add(u)
     videos = {v for v in videos if v.startswith("http")}
-    return title.strip()[:300], image, videos, iframes, links
+
+    # کارت‌های صفحه لیست: لینک + عکس بندانگشتی + عنوان هر ویدیو
+    for a in soup.find_all("a", href=True):
+        u = urljoin(url, a["href"]).split("#")[0]
+        if u not in links or u == url:
+            continue
+        img = a.find("img")
+        container = a
+        if not img:  # گاهی عکس و لینک عنوان جدا هستند ولی در یک کارت مشترک
+            for _ in range(3):
+                container = container.parent
+                if container is None: break
+                img = container.find("img")
+                if img: break
+        if not img:
+            continue
+        thumb = next((J(x) for x in _attr_urls(img, IMG_ATTRS) if IMG_EXT.search(x) or "/" in x), None)
+        t = a.get("title") or (a.get_text(" ", strip=True) if len(a.get_text(strip=True)) > 3 else "")
+        if not t:
+            box = a.parent
+            for _ in range(3):  # عنوان کارت معمولاً در h2/h3 کنار عکس است
+                if box is None: break
+                h = box.find(["h1", "h2", "h3", "h4", "h5"])
+                if h and len(h.get_text(strip=True)) > 3:
+                    t = h.get_text(" ", strip=True); break
+                box = box.parent
+        if not t:
+            alt = img.get("alt") or img.get("title") or ""
+            t = alt if len(alt) > 3 else ""
+        if thumb or t:
+            old = CARD_HINTS.get(u, {})
+            CARD_HINTS[u] = {"title": old.get("title") or clean_title(t or "", site_name), "image": old.get("image") or thumb}
+    image = J(image) if image else None
+    return clean_title(title, site_name)[:300], image, videos, iframes, links
+
+
+def clean_title(t: str, site_name: str | None) -> str:
+    t = re.sub(r"\s+", " ", t or "").strip()
+    parts = re.split(r"\s+[|\-–—»«:]\s+", t)
+    if len(parts) > 1:
+        sn = (site_name or "").strip().lower()
+        keep = [p for p in parts if p.strip().lower() != sn and not (sn and sn in p.lower() and len(p) < len(sn) + 6)]
+        t = max(keep or parts, key=len) if not sn else " - ".join(keep or parts)
+    return t
+
+
+def looks_generic(img: str) -> bool:
+    return bool(re.search(r"(logo|icon|favicon|default|placeholder|no-?image|share|og-image)", img, re.I))
 
 
 async def ytdlp_info(url: str):
@@ -216,6 +266,11 @@ class Crawler:
                     if not image:
                         t2, img2 = await ytdlp_info(url)
                         title, image = t2 or title, img2 or image
+                hint = CARD_HINTS.pop(url, {})
+                if hint.get("image") and (not image or looks_generic(image)):
+                    image = hint["image"]
+                if hint.get("title") and (not title or title == url or len(title) < 4):
+                    title = hint["title"]
                 for v in videos:
                     i = vid_id(v)
                     VIDEOS.setdefault(i, {"title": title, "image": image, "page": url, "video": v})
@@ -244,13 +299,34 @@ def video_kb(i: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[InlineKeyboardButton("⬇️ دانلود", callback_data=f"dl:{i}"), fav]])
 
 
+async def fetch_image(url: str, referer: str):
+    """عکس را خودمان (با Referer) می‌گیریم و به JPEG تبدیل می‌کنیم؛ فقط در RAM و چند صد KB."""
+    async with httpx.AsyncClient(headers={**HEADERS, "Referer": referer}, follow_redirects=True, timeout=20) as c:
+        r = await c.get(url)
+        r.raise_for_status()
+        if len(r.content) > 15 * 2**20:
+            raise ValueError("image too big")
+    im = Image.open(io.BytesIO(r.content))
+    im = im.convert("RGB")
+    im.thumbnail((1280, 1280))
+    buf = io.BytesIO()
+    im.save(buf, "JPEG", quality=85)
+    buf.seek(0)
+    return buf
+
+
 async def send_card(chat_id, i, v, ctx):
     cap = f"🎬 {v['title']}"[:1000]
-    try:
-        if v.get("image"):
+    if v.get("image"):
+        try:  # 1) تلگرام مستقیم از URL
             return await ctx.bot.send_photo(chat_id, v["image"], caption=cap, reply_markup=video_kb(i))
-    except Exception:
-        pass
+        except Exception as e:
+            log.info("photo by URL failed (%s), fetching myself", e)
+        try:  # 2) دانلود و تبدیل خودمان (برای سایت‌هایی که hotlink را می‌بندند یا فرمت webp/avif دارند)
+            return await ctx.bot.send_photo(chat_id, await fetch_image(v["image"], v["page"]),
+                                            caption=cap, reply_markup=video_kb(i))
+        except Exception as e:
+            log.warning("photo failed %s: %s", v["image"], e)
     await ctx.bot.send_message(chat_id, cap, reply_markup=video_kb(i))
 
 
@@ -434,6 +510,20 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await status.edit_text(f"❌ خطا: {e}")
 
 
+async def cmd_debug(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """/debug <url> : نشان می‌دهد اسکنر از یک صفحه چه چیزی استخراج می‌کند."""
+    if not allowed(update) or not ctx.args:
+        return await update.message.reply_text("استفاده: /debug https://site.com/video-page")
+    url = ctx.args[0]
+    async with httpx.AsyncClient(headers=HEADERS, follow_redirects=True, timeout=30) as c:
+        r = await c.get(url)
+    title, image, videos, iframes, links = parse_page(url, r.text, urlparse(url).netloc.removeprefix("www."))
+    txt = (f"HTTP {r.status_code}\nTitle: {title}\nImage: {image}\nVideos ({len(videos)}):\n" + "\n".join(list(videos)[:8]) +
+           f"\nIframes: {iframes[:3]}\nLinks: {len(links)}\nCards: " +
+           "\n".join(f"{k} -> {v}" for k, v in list(CARD_HINTS.items())[:5]))
+    await update.message.reply_text(txt[:4000], disable_web_page_preview=True)
+
+
 def main():
     b = Application.builder().token(BOT_TOKEN).concurrent_updates(True)
     if LOCAL_API:
@@ -441,6 +531,7 @@ def main():
     app = b.build()
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("scan", cmd_scan))
+    app.add_handler(CommandHandler("debug", cmd_debug))
     app.add_handler(CallbackQueryHandler(on_button))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     app.run_polling()
