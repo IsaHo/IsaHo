@@ -1,0 +1,4 @@
+python-telegram-bot>=21
+httpx
+beautifulsoup4
+yt-dlp
