@@ -45,6 +45,9 @@ EXTERNAL: dict[str, list] = {}  # page url -> لینک پلیرها/فایل‌�
 # فایل‌هاست‌ها: لینک .mp4 دارند ولی صفحه دانلود (کپچا/اشتراک) هستند نه فایل مستقیم
 FILE_HOSTS = re.compile(r"(nitroflare|rapidgator|uploaded|katfile|ddownload|turbobit|filefactory|mega\.nz|"
                         r"1fichier|uptobox|k2s|keep2share|fboom|alfafile|hitfile|mexa|clicknupload)\.", re.I)
+# کوتاه‌کننده‌های تبلیغاتی با کپچا/انتظار: دور زدنشان انجام نمی‌شود
+CAPTCHA_HOSTS = re.compile(r"(ouo\.(io|press)|shrinkme|shrink\.|adf\.ly|linkvertise|exe\.io|exey\.io|"
+                           r"shorte\.st|bc\.vc|clk\.sh|cuty\.io|gplinks|droplink|za\.gl|fc\.lc)", re.I)
 PLAYER_HINT = re.compile(r"(player|vid|embed|stream|watch|play|tube|dood|filemoon|voe|streamtape)", re.I)
 CARD_HINTS: dict[str, dict] = {}  # page url -> {title, image} از کارت‌های صفحه لیست
 
@@ -710,6 +713,20 @@ async def download_and_send(chat_id, v, ctx):
                 path = await ytdlp_download(target, v["page"], tmp)
             except Exception as e:
                 errors.append(f"yt-dlp: {e}")
+        # 3) لینک‌های خارجی (ریدایرکت ساده یا صفحه دانلودی که لینک فایل داخلش هست).
+        #    کوتاه‌کننده‌های کپچادار و فایل‌هاست‌های پولی رد می‌شوند.
+        for u in v.get("ext", []):
+            if path:
+                break
+            if CAPTCHA_HOSTS.search(u) or FILE_HOSTS.search(u):
+                continue
+            try:
+                path = await http_download(u, v["page"], tmp, limit)
+            except RuntimeError as e:
+                if "محدودیت" in str(e):
+                    raise
+            except Exception as e:
+                errors.append(f"{host_of(u)}: {type(e).__name__}")
         if not path:
             raise RuntimeError("\n".join(errors)[-700:] or "دانلود ناموفق")
         size = os.path.getsize(path)
