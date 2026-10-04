@@ -20,14 +20,19 @@ MAX_PAGES = int(os.environ.get("MAX_PAGES", "5000"))
 BATCH = int(os.environ.get("BATCH", "10"))  # تعداد ویدیو در هر صفحه
 # اگر Local Bot API Server داری، آدرسش را بده تا محدودیت آپلود 50MB به 2GB برسد
 LOCAL_API = os.environ.get("LOCAL_API")  # e.g. http://127.0.0.1:8081/bot
-FAV_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "favorites.json")
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+FAV_FILE = os.path.join(BASE_DIR, "favorites.json")
+SITES_FILE = os.path.join(BASE_DIR, "sites.json")
 
-VIDEO_EXT = re.compile(r"\.(mp4|mkv|webm|mov|avi|m4v|m3u8)(\?|$)", re.I)
+VID_EXTS = "mp4|mkv|webm|mov|avi|m4v|m3u8|mpd|flv|wmv|3gp|ts|ogv|mpg|mpeg"
+IMG_EXTS = "jpg|jpeg|png|gif|webp|avif|bmp|svg|jfif"
+VIDEO_EXT = re.compile(rf"\.({VID_EXTS})(\?|$)", re.I)
+IMG_EXT = re.compile(rf"\.({IMG_EXTS})(\?|$)", re.I)
 HEADERS = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124 Safari/537.36"}
 
-BTN_SCAN, BTN_NEW, BTN_FAVS = "🔍 اسکن سایت پیش‌فرض", "🌐 اسکن سایت جدید", "⭐ ذخیره‌ها"
+BTN_SITES, BTN_NEW, BTN_FAVS = "🌐 سایت‌های من", "➕ افزودن سایت", "⭐ ذخیره‌ها"
 BTN_STOP = "⏹ توقف اسکن"
-MENU = ReplyKeyboardMarkup([[BTN_SCAN, BTN_NEW], [BTN_FAVS, BTN_STOP]], resize_keyboard=True)
+MENU = ReplyKeyboardMarkup([[BTN_SITES, BTN_NEW], [BTN_FAVS, BTN_STOP]], resize_keyboard=True)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("bot")
@@ -35,63 +40,157 @@ log = logging.getLogger("bot")
 VIDEOS: dict[str, dict] = {}  # id -> {title, image, page, video}
 
 
-def load_favs() -> dict:
+def load_json(path, default):
     try:
-        with open(FAV_FILE, encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             return json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
-        return {}
+        return default
 
 
-FAVS: dict[str, dict] = load_favs()  # فقط متن (تیتر/لینک)؛ حجمش ناچیز است
+def save_json(path, data):
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=1)
+
+
+FAVS: dict[str, dict] = load_json(FAV_FILE, {})  # فقط متن (تیتر/لینک)؛ حجمش ناچیز است
+# سایت‌های ذخیره‌شده: id -> {name, url}
+SITES: dict[str, dict] = load_json(SITES_FILE, None)
+if SITES is None:
+    SITES = {}
+    SITES[hashlib.md5(DEFAULT_URL.encode()).hexdigest()[:12]] = {"name": urlparse(DEFAULT_URL).netloc, "url": DEFAULT_URL}
+    save_json(SITES_FILE, SITES)
 
 
 def save_favs():
-    with open(FAV_FILE, "w", encoding="utf-8") as f:
-        json.dump(FAVS, f, ensure_ascii=False, indent=1)
+    save_json(FAV_FILE, FAVS)
+
+
+def site_id(url: str) -> str:
+    return hashlib.md5(url.encode()).hexdigest()[:12]
 
 
 def vid_id(url: str) -> str:
     return hashlib.md5(url.encode()).hexdigest()[:16]  # callback_data حداکثر 64 بایت
 
 
+def _attr_urls(tag, names):
+    for n in names:
+        val = tag.get(n)
+        if val:
+            for part in val.split(","):  # srcset: "a.jpg 1x, b.jpg 2x"
+                part = part.strip().split(" ")[0]
+                if part and not part.startswith("data:"):
+                    yield part
+
+
+SRC_ATTRS = ["src", "data-src", "data-lazy-src", "data-original", "data-url", "data-video", "data-video-src",
+             "data-mp4", "data-file", "data-hls", "data-stream", "srcset", "data-srcset", "href", "content"]
+IMG_ATTRS = ["poster", "data-poster", "data-thumb", "data-thumbnail", "data-preview", "data-image", "data-bg",
+             "src", "data-src", "data-lazy-src", "data-original", "srcset", "data-srcset"]
+
+
 def parse_page(url: str, html: str, domain: str):
     soup = BeautifulSoup(html, "html.parser")
     meta = lambda p: (soup.find("meta", property=p) or soup.find("meta", attrs={"name": p}) or {}).get("content")
-    title = meta("og:title") or (soup.title.string.strip() if soup.title and soup.title.string else url)
-    image = meta("og:image") or meta("twitter:image")
+    J = lambda u: urljoin(url, u.strip())
 
+    title = image = None
     videos = set()
-    for v in soup.find_all("video"):
-        if v.get("src"):
-            videos.add(urljoin(url, v["src"]))
-        if not image and v.get("poster"):
-            image = urljoin(url, v["poster"])
-        for s in v.find_all("source"):
-            if s.get("src"):
-                videos.add(urljoin(url, s["src"]))
-    for p in ("og:video", "og:video:url", "og:video:secure_url"):
-        if meta(p):
-            videos.add(urljoin(url, meta(p)))
-    for a in soup.find_all("a", href=True):
-        if VIDEO_EXT.search(a["href"]):
-            videos.add(urljoin(url, a["href"]))
-    for m in re.findall(r"""["'](https?://[^"'\s]+?\.(?:mp4|m3u8|webm)[^"'\s]*)["']""", html):
-        videos.add(m)
-    has_iframe = any(f.get("src") for f in soup.find_all("iframe"))
+
+    # 1) JSON-LD (VideoObject) — دقیق‌ترین منبع تیتر/عکس/ویدیو
+    for sc in soup.find_all("script", type="application/ld+json"):
+        try:
+            data = json.loads(sc.string or "")
+        except Exception:
+            continue
+        stack = data if isinstance(data, list) else [data]
+        while stack:
+            d = stack.pop()
+            if isinstance(d, list):
+                stack.extend(d); continue
+            if not isinstance(d, dict):
+                continue
+            stack.extend(v for v in d.values() if isinstance(v, (dict, list)))
+            if "VideoObject" in str(d.get("@type")):
+                title = title or d.get("name")
+                th = d.get("thumbnailUrl") or d.get("thumbnail")
+                if isinstance(th, list): th = th[0] if th else None
+                if isinstance(th, dict): th = th.get("url") or th.get("contentUrl")
+                if isinstance(th, str): image = image or J(th)
+                for k in ("contentUrl", "embedUrl"):
+                    if isinstance(d.get(k), str): videos.add(J(d[k]))
+
+    # 2) متاتگ‌ها
+    title = title or meta("og:title") or meta("twitter:title")
+    image = image or meta("og:image") or meta("og:image:url") or meta("twitter:image") or meta("thumbnailUrl")
+    for p in ("og:video", "og:video:url", "og:video:secure_url", "twitter:player:stream"):
+        if meta(p): videos.add(J(meta(p)))
+
+    # 3) تگ‌های video/source/a و هر attribute با پسوند ویدیو
+    for v in soup.find_all(["video", "source", "track", "embed", "object"]):
+        for u in _attr_urls(v, SRC_ATTRS + ["data"]):
+            if v.name in ("video", "source") or VIDEO_EXT.search(u): videos.add(J(u))
+        if not image:
+            for u in _attr_urls(v, ["poster", "data-poster", "data-thumb"]):
+                image = J(u); break
+    for t in soup.find_all(True):
+        for n, val in t.attrs.items():
+            if isinstance(val, str) and VIDEO_EXT.search(val) and not val.startswith("data:"):
+                videos.add(J(val.split(",")[0].split(" ")[0]))
+    # 4) لینک‌های ویدیو داخل جاوااسکریپت/JSON (مثل jwplayer, videojs, "file": "...")
+    for m in re.findall(rf"""(https?:)?(\\?/\\?/[^"'\s<>]+?\.(?:{VID_EXTS})(?:\?[^"'\s<>]*)?)["'\s]""", html, re.I):
+        videos.add(J((m[0] or "https:") + m[1].replace("\\/", "/")))
+    for m in re.findall(r"""["'](?:file|src|source|url|video_url|mp4|hls)["']\s*:\s*["']([^"']+)["']""", html):
+        if VIDEO_EXT.search(m): videos.add(J(m.replace("\\/", "/")))
+
+    # 5) iframe پلیرها
+    iframes = [J(u) for f in soup.find_all("iframe") for u in _attr_urls(f, ["src", "data-src"])
+               if not re.search(r"(google|facebook|twitter|disqus|recaptcha|doubleclick|ads)", u, re.I)]
+
+    # تیتر و عکس جایگزین
+    if not title:
+        h = soup.find("h1") or soup.find("h2")
+        title = h.get_text(" ", strip=True) if h else (soup.title.get_text(strip=True) if soup.title else url)
+    if not image:
+        for img in soup.find_all("img"):
+            for u in _attr_urls(img, IMG_ATTRS):
+                if not re.search(r"(logo|icon|avatar|sprite|banner|ads?[/_-])", u, re.I):
+                    image = J(u); break
+            if image: break
+    if not image:  # background-image: url(...)
+        m = re.search(rf"""url\(["']?([^"')]+\.(?:{IMG_EXTS})[^"')]*)["']?\)""", html, re.I)
+        if m: image = J(m.group(1))
 
     links = set()
     for a in soup.find_all("a", href=True):
         u = urljoin(url, a["href"]).split("#")[0]
-        if urlparse(u).netloc == domain and not VIDEO_EXT.search(u) and not re.search(r"\.(jpg|jpeg|png|gif|webp|pdf|zip|css|js)$", u, re.I):
+        if urlparse(u).netloc.removeprefix("www.") == domain and not VIDEO_EXT.search(u) and not IMG_EXT.search(u) \
+                and not re.search(r"\.(pdf|zip|rar|css|js|xml|json)(\?|$)", u, re.I):
             links.add(u)
-    return title, (urljoin(url, image) if image else None), videos, has_iframe, links
+    videos = {v for v in videos if v.startswith("http")}
+    return title.strip()[:300], image, videos, iframes, links
+
+
+async def ytdlp_info(url: str):
+    """برای صفحاتی که ویدیو داخل iframe/پلیر جاوااسکریپتی است: تیتر و عکس را yt-dlp استخراج کند."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "yt-dlp", "-J", "--no-playlist", "--skip-download", "--no-warnings", url,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+        out, _ = await asyncio.wait_for(proc.communicate(), 40)
+        if proc.returncode == 0:
+            d = json.loads(out)
+            return d.get("title"), d.get("thumbnail")
+    except Exception:
+        pass
+    return None, None
 
 
 class Crawler:
     """اسکن مرحله‌ای: هر بار فقط تا پیدا شدن BATCH ویدیو جدید جلو می‌رود."""
     def __init__(self, start_url: str):
-        self.domain = urlparse(start_url).netloc
+        self.domain = urlparse(start_url).netloc.removeprefix("www.")
         self.seen, self.queue, self.pages = set(), deque([start_url]), 0
         self.sent: set[str] = set()
 
@@ -111,9 +210,12 @@ class Crawler:
                 except Exception as e:
                     log.warning("fetch fail %s: %s", url, e)
                     continue
-                title, image, videos, has_iframe, links = parse_page(url, r.text, self.domain)
-                if not videos and has_iframe:
+                title, image, videos, iframes, links = parse_page(url, r.text, self.domain)
+                if not videos and iframes:
                     videos = {url}  # yt-dlp خودش از صفحه/iframe استخراج می‌کند
+                    if not image:
+                        t2, img2 = await ytdlp_info(url)
+                        title, image = t2 or title, img2 or image
                 for v in videos:
                     i = vid_id(v)
                     VIDEOS.setdefault(i, {"title": title, "image": image, "page": url, "video": v})
@@ -189,6 +291,18 @@ async def cmd_scan(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await start_scan(update.effective_chat.id, url, ctx)
 
 
+def sites_kb():
+    rows = [[InlineKeyboardButton(f"🔍 {v['name']}", callback_data=f"scan:{i}"),
+             InlineKeyboardButton("🗑", callback_data=f"delsite:{i}")] for i, v in SITES.items()]
+    return InlineKeyboardMarkup(rows) if rows else None
+
+
+async def show_sites(chat_id, ctx):
+    if not SITES:
+        return await ctx.bot.send_message(chat_id, "هیچ سایتی ذخیره نشده. با «➕ افزودن سایت» اضافه کن.")
+    await ctx.bot.send_message(chat_id, "🌐 سایت‌های ذخیره‌شده (برای اسکن بزن، 🗑 برای حذف):", reply_markup=sites_kb())
+
+
 async def show_favs(chat_id, ctx):
     if not FAVS:
         return await ctx.bot.send_message(chat_id, "هنوز چیزی ذخیره نکردی.")
@@ -202,16 +316,32 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not allowed(update):
         return
     chat_id, text = update.effective_chat.id, update.message.text.strip()
-    if text == BTN_SCAN:
-        await start_scan(chat_id, DEFAULT_URL, ctx)
+    if text == BTN_SITES:
+        ctx.user_data.pop("adding", None)
+        await show_sites(chat_id, ctx)
     elif text == BTN_NEW:
-        await update.message.reply_text("لینک سایت رو بفرست (مثلاً https://example.com)")
+        ctx.user_data["adding"] = True
+        await update.message.reply_text("لینک سایت رو بفرست. اگه بخوای اسم هم بذاری، بعد از لینک با فاصله بنویس:\n"
+                                        "https://example.com اسم دلخواه")
     elif text == BTN_FAVS:
         await show_favs(chat_id, ctx)
     elif text == BTN_STOP:
         await update.message.reply_text("⏹ اسکن متوقف شد." if CRAWLERS.pop(chat_id, None) else "اسکنی در جریان نیست.")
-    elif re.match(r"^(https?://)?[\w.-]+\.[a-z]{2,}(/\S*)?$", text, re.I):
-        await start_scan(chat_id, text if text.startswith("http") else "https://" + text, ctx)
+    elif re.match(r"^(https?://)?[\w.-]+\.[a-z]{2,}(/\S*)?(\s+.+)?$", text, re.I):
+        link, _, name = text.partition(" ")
+        url = link if link.startswith("http") else "https://" + link
+        i = site_id(url)
+        if ctx.user_data.pop("adding", None):
+            SITES[i] = {"name": name.strip() or urlparse(url).netloc.removeprefix("www."), "url": url}
+            save_json(SITES_FILE, SITES)
+            await update.message.reply_text(f"✅ «{SITES[i]['name']}» ذخیره شد.", reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("🔍 اسکن الان", callback_data=f"scan:{i}")]]))
+        else:
+            if i not in SITES:
+                ctx.bot_data.setdefault("tmp_sites", {})[i] = url
+                await update.message.reply_text("می‌خوای این سایت ذخیره بشه؟", reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("💾 ذخیره سایت", callback_data=f"savesite:{i}")]]))
+            await start_scan(chat_id, url, ctx)
     else:
         await update.message.reply_text("متوجه نشدم. لینک سایت بفرست یا از دکمه‌ها استفاده کن.", reply_markup=MENU)
 
@@ -261,6 +391,24 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return await send_batch(chat_id, ctx)
 
     action, i = q.data.split(":", 1)
+    if action == "scan":
+        await q.answer()
+        if i not in SITES:
+            return await q.message.reply_text("این سایت حذف شده.")
+        return await start_scan(chat_id, SITES[i]["url"], ctx)
+    if action == "delsite":
+        site = SITES.pop(i, None)
+        save_json(SITES_FILE, SITES)
+        await q.answer(f"🗑 {site['name']} حذف شد" if site else "قبلاً حذف شده")
+        return await q.edit_message_reply_markup(sites_kb())
+    if action == "savesite":
+        url = ctx.bot_data.get("tmp_sites", {}).get(i)
+        if url:
+            SITES[i] = {"name": urlparse(url).netloc.removeprefix("www."), "url": url}
+            save_json(SITES_FILE, SITES)
+        await q.answer("💾 ذخیره شد" if url else "منقضی شده")
+        return await q.edit_message_text("✅ سایت ذخیره شد.")
+
     v = VIDEOS.get(i) or FAVS.get(i)
     if not v:
         return await q.answer("منقضی شده؛ دوباره اسکن کن", show_alert=True)
