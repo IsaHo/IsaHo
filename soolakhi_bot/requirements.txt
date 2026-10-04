@@ -1,5 +1,5 @@
 python-telegram-bot>=21
-httpx[http2]
+httpx[http2,socks]
 beautifulsoup4
 yt-dlp
 Pillow

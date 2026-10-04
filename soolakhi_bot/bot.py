@@ -20,7 +20,9 @@ DEFAULT_URL = os.environ.get("START_URL", "https://www.soolakhi.com/")
 MAX_PAGES = int(os.environ.get("MAX_PAGES", "5000"))
 BATCH = int(os.environ.get("BATCH", "10"))  # تعداد ویدیو در هر صفحه
 # اگر Local Bot API Server داری، آدرسش را بده تا محدودیت آپلود 50MB به 2GB برسد
-LOCAL_API = os.environ.get("LOCAL_API")  # e.g. http://127.0.0.1:8081/bot
+LOCAL_API = os.environ.get("LOCAL_API")
+# پروکسی برای دانلود (مثلاً سایت‌هایی که IP کشور سرور را بسته‌اند): socks5://user:pass@host:port یا http://...
+DL_PROXY = os.environ.get("DL_PROXY")  # e.g. http://127.0.0.1:8081/bot
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 FAV_FILE = os.path.join(BASE_DIR, "favorites.json")
 SITES_FILE = os.path.join(BASE_DIR, "sites.json")
@@ -508,7 +510,17 @@ def video_kb(i: str) -> InlineKeyboardMarkup:
     v = VIDEOS.get(i) or FAVS.get(i) or {}
     links = [InlineKeyboardButton(f"▶️ {urlparse(u).netloc.removeprefix('www.')[:20]}", url=u) for u in v.get("ext", [])]
     rows += [links[k:k + 2] for k in range(0, len(links), 2)]
+    if v.get("page", "").startswith("http"):
+        root = site_root(v["page"])
+        if site_id(root) not in SITES:
+            rows.append([InlineKeyboardButton(f"💾 ذخیره سایت {urlparse(root).netloc.removeprefix('www.')[:25]}",
+                                              callback_data=f"savedom:{i}")])
     return InlineKeyboardMarkup(rows)
+
+
+def site_root(url: str) -> str:
+    p = urlparse(url)
+    return f"{p.scheme}://{p.netloc}/"
 
 
 async def fetch_image(url: str, referer: str):
@@ -650,7 +662,8 @@ async def http_download(url: str, referer: str, dest_dir: str, limit_mb: int, de
     """دانلود مستقیم تکه‌تکه با Range (بعضی CDNها مثل takcdn اتصال طولانی را قطع می‌کنند
     ولی درخواست‌های کوچک Range را جواب می‌دهند). اگر HTML برگشت، لینک ویدیو را از آن درمی‌آورد."""
     hdr = {**HEADERS, "Referer": referer}
-    async with httpx.AsyncClient(headers=hdr, follow_redirects=True, timeout=httpx.Timeout(30, read=60)) as c:
+    async with httpx.AsyncClient(headers=hdr, follow_redirects=True, timeout=httpx.Timeout(30, read=60),
+                                 proxy=DL_PROXY) as c:
         r = await c.get(url, headers={"Range": "bytes=0-1023"})
         r.raise_for_status()
         ctype = r.headers.get("content-type", "").lower()
@@ -713,7 +726,7 @@ async def ytdlp_download(url: str, referer: str, dest_dir: str):
     out = os.path.join(dest_dir, "video.%(ext)s")
     base = ["yt-dlp", "-q", "--no-playlist", "-f", "b[ext=mp4]/bv*+ba/b", "--merge-output-format", "mp4",
             "--user-agent", HEADERS["User-Agent"], "--referer", referer,
-            "--add-header", "Accept-Language:en-US,en;q=0.9", "--retries", "5", "-o", out]
+            "--add-header", "Accept-Language:en-US,en;q=0.9", "--retries", "5", "-o", out] + (["--proxy", DL_PROXY] if DL_PROXY else [])
     err = b""
     for extra in (["--impersonate", "chrome"], []):  # impersonate نیاز به curl_cffi دارد
         proc = await asyncio.create_subprocess_exec(*base, *extra, url, stdout=asyncio.subprocess.PIPE,
@@ -804,6 +817,15 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         save_json(SITES_FILE, SITES)
         await q.answer(f"🗑 {site['name']} حذف شد" if site else "قبلاً حذف شده")
         return await q.edit_message_reply_markup(sites_kb())
+    if action == "savedom":
+        v = VIDEOS.get(i) or FAVS.get(i)
+        if not v:
+            return await q.answer("منقضی شده", show_alert=True)
+        root = site_root(v["page"])
+        SITES[site_id(root)] = {"name": urlparse(root).netloc.removeprefix("www."), "url": root}
+        save_json(SITES_FILE, SITES)
+        await q.answer("💾 سایت به «سایت‌های من» اضافه شد")
+        return await q.edit_message_reply_markup(video_kb(i))
     if action == "savesite":
         url = ctx.bot_data.get("tmp_sites", {}).get(i)
         if url:
@@ -838,7 +860,11 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await status.edit_text("❌ این ویدیو فایل مستقیم نداره و فقط روی پلیر/فایل‌هاست خارجی هست.\n"
                                    "از دکمه‌های ▶️ زیر عکس ویدیو استفاده کن.")
         else:
-            await status.edit_text(f"❌ خطا: {e}"[:4000])
+            msg = str(e)
+            if re.search(r"(Redirection detected|require login|geo|not available in your country|403)", msg, re.I):
+                msg = ("این سایت دانلود رو از IP سرور (کشور سرور) بسته یا لاگین می‌خواد.\n"
+                       "راه‌حل: تنظیم پروکسی با DL_PROXY روی سرور.\n\n" + msg[-500:])
+            await status.edit_text(f"❌ خطا: {msg}"[:4000])
 
 
 async def cmd_debug(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
