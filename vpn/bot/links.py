@@ -24,7 +24,7 @@ def cdn_link(u) -> str:
     q = urlencode({
         "encryption": "none", "security": "tls", "sni": cfg.domain, "fp": "chrome",
         "alpn": "h2,http/1.1", "type": "xhttp", "host": cfg.domain, "path": cfg.cdn_path,
-        "mode": "auto",
+        "mode": "packet-up",
     })
     return f"vless://{u.uuid}@{cdn_address()}:{cfg.cdn_port}?{q}#{quote(f'{cfg.brand}-{u.name}-CDN')}"
 
