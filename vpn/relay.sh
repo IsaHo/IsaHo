@@ -56,6 +56,64 @@ PY
     exit 0
 fi
 
+# SSH mode: bash relay.sh ssh <foreign-ip> [listen-port] [ssh-port]
+# Carries users' Reality connections inside one persistent SSH connection (port 22),
+# for networks where TLS to foreign IPs is throttled but SSH passes.
+if [[ ${1:-} == ssh ]]; then
+    FOREIGN_IP=${2:?usage: bash relay.sh ssh <foreign-ip> [listen-port] [ssh-port]}
+    LISTEN_PORT=${3:-443}
+    SSH_PORT=${4:-22}
+    [[ $EUID -eq 0 ]] || { echo "run as root"; exit 1; }
+    # the NAT relay would grab the same port
+    systemctl disable --now isaho-relay 2>/dev/null || true
+    nft delete table ip isaho_relay 2>/dev/null || true
+    KEY=/root/.ssh/isaho_tunnel
+    mkdir -p /root/.ssh && chmod 700 /root/.ssh
+    [[ -f $KEY ]] || ssh-keygen -q -t ed25519 -N "" -C isaho-relay -f "$KEY"
+    cat >/etc/systemd/system/isaho-ssh-tunnel.service <<UNIT
+[Unit]
+Description=IsaHo SSH tunnel :$LISTEN_PORT -> $FOREIGN_IP 127.0.0.1:443
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/bin/ssh -N -T -i $KEY -p $SSH_PORT \\
+  -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o TCPKeepAlive=yes \\
+  -o ExitOnForwardFailure=yes -o StrictHostKeyChecking=accept-new -o BatchMode=yes \\
+  -o Compression=no -o IPQoS=throughput \\
+  -L 0.0.0.0:$LISTEN_PORT:127.0.0.1:443 isaho-tunnel@$FOREIGN_IP
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+    if command -v ufw >/dev/null && ufw status | grep -q "Status: active"; then ufw allow "$LISTEN_PORT/tcp" >/dev/null; fi
+    cat >/etc/sysctl.d/99-isaho-relay.conf <<SYSCTL
+net.core.default_qdisc=fq
+net.ipv4.tcp_congestion_control=bbr
+net.core.rmem_max=67108864
+net.core.wmem_max=67108864
+net.ipv4.tcp_rmem=4096 87380 67108864
+net.ipv4.tcp_wmem=4096 65536 67108864
+SYSCTL
+    sysctl --system >/dev/null 2>&1 || true
+    systemctl daemon-reload
+    systemctl enable -q isaho-ssh-tunnel
+    systemctl restart isaho-ssh-tunnel
+    PUB=$(cat "$KEY.pub")
+    echo "
+✅ SSH tunnel service installed on this server.
+
+Now run THIS on the FOREIGN server ($FOREIGN_IP) to authorize it (tap to copy the whole line):
+
+id isaho-tunnel >/dev/null 2>&1 || useradd -r -m -s /usr/sbin/nologin isaho-tunnel; mkdir -p ~isaho-tunnel/.ssh && echo 'restrict,port-forwarding,permitopen=\"127.0.0.1:443\" $PUB' > ~isaho-tunnel/.ssh/authorized_keys && chown -R isaho-tunnel: ~isaho-tunnel/.ssh && chmod 700 ~isaho-tunnel/.ssh && chmod 600 ~isaho-tunnel/.ssh/authorized_keys && echo AUTHORIZED
+
+Then check here with:  systemctl status isaho-ssh-tunnel --no-pager
+"
+    exit 0
+fi
+
 FOREIGN_IP=${1:?usage: bash relay.sh <foreign-server-ip> [listen-port] [foreign-port]}
 LISTEN_PORT=${2:-443}
 FOREIGN_PORT=${3:-443}
