@@ -5,7 +5,7 @@
 """
 import asyncio, hashlib, io, json, logging, os, re, tempfile
 from collections import deque
-from urllib.parse import urljoin, urlparse
+from urllib.parse import quote_plus, unquote, urljoin, urlparse
 
 import httpx
 from bs4 import BeautifulSoup
@@ -32,8 +32,8 @@ IMG_EXT = re.compile(rf"\.({IMG_EXTS})(\?|$)", re.I)
 HEADERS = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124 Safari/537.36"}
 
 BTN_SITES, BTN_NEW, BTN_FAVS = "🌐 سایت‌های من", "➕ افزودن سایت", "⭐ ذخیره‌ها"
-BTN_STOP = "⏹ توقف اسکن"
-MENU = ReplyKeyboardMarkup([[BTN_SITES, BTN_NEW], [BTN_FAVS, BTN_STOP]], resize_keyboard=True)
+BTN_STOP, BTN_SEARCH = "⏹ توقف", "🔎 جستجو"
+MENU = ReplyKeyboardMarkup([[BTN_SEARCH], [BTN_SITES, BTN_NEW], [BTN_FAVS, BTN_STOP]], resize_keyboard=True)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("bot")
@@ -285,7 +285,22 @@ class Crawler:
                 except Exception as e:
                     log.warning("fetch fail %s: %s", url, e)
                     continue
-                title, image, videos, iframes, links = parse_page(url, r.text, self.domain)
+                links = await process_page(url, r.text, self.domain, self.sent, found)
+                self.queue.extend(l for l in links if l not in self.seen)
+                await asyncio.sleep(0.3)
+        return found
+
+    @property
+    def done(self):
+        return not self.queue or self.pages >= MAX_PAGES
+
+
+async def process_page(url, html, domain, sent: set, found: list, query_words=None):
+    """یک صفحه را پارس می‌کند، ویدیوها را در VIDEOS ثبت و idهای جدید را به found اضافه می‌کند."""
+    if True:
+        if True:
+            if True:
+                title, image, videos, iframes, links = parse_page(url, html, domain)
                 if not videos and iframes:
                     videos = {url}  # yt-dlp خودش از صفحه/iframe استخراج می‌کند
                     if not image:
@@ -299,19 +314,118 @@ class Crawler:
                 ext = EXTERNAL.pop(url, [])
                 if not videos and ext:
                     videos = {url}  # فقط لینک پلیر/فایل‌هاست دارد → کارت با دکمه‌های لینک
+                if query_words and videos and not any(w in f"{title} {url}".lower() for w in query_words):
+                    videos = set()  # نتیجه جستجو به کلمه ربطی ندارد
                 for v in videos:
                     i = vid_id(v)
                     VIDEOS.setdefault(i, {"title": title, "image": image, "page": url, "video": v, "ext": ext})
-                    if i not in self.sent:
-                        self.sent.add(i)
+                    if i not in sent:
+                        sent.add(i)
                         found.append(i)
-                self.queue.extend(l for l in links if l not in self.seen)
-                await asyncio.sleep(0.3)
+                return links
+
+
+SEARCH_PATHS = ["?s={q}", "search/{q}/", "?q={q}", "search?q={q}", "videos/search?q={q}", "search/?query={q}"]
+
+
+def norm_words(q: str):
+    return [w for w in re.split(r"\s+", q.lower()) if len(w) > 1]
+
+
+class SearchCrawler:
+    """جستجو: اول صفحات نتیجه (داخل سایت‌ها یا موتور جستجو) را می‌گیرد، بعد فقط همان نتایج را باز می‌کند."""
+    def __init__(self, query: str, sites: list[str] | None, web: bool):
+        self.query, self.sites, self.web = query, sites or [], web
+        self.domain = "وب" if web else ("، ".join(urlparse(u).netloc.removeprefix("www.") for u in self.sites[:3])
+                                        + (" ..." if len(self.sites) > 3 else ""))
+        self.queue, self.seen, self.sent, self.pages, self.ready = deque(), set(), set(), 0, False
+        self.words = norm_words(query)
+
+    async def _site_results(self, c, site: str):
+        """صفحه جستجوی داخلی سایت را پیدا می‌کند (وردپرس ?s= و الگوهای رایج) و لینک نتایج را برمی‌گرداند."""
+        base = site if site.endswith("/") else site + "/"
+        dom = urlparse(base).netloc.removeprefix("www.")
+        for path in SEARCH_PATHS:
+            u = urljoin(base, path.format(q=quote_plus(self.query)))
+            try:
+                r = await c.get(u)
+            except Exception:
+                continue
+            if r.status_code != 200 or "text/html" not in r.headers.get("content-type", ""):
+                continue
+            before = set(CARD_HINTS)
+            parse_page(str(r.url), r.text, dom)
+            cards = [k for k in CARD_HINTS if k not in before and urlparse(k).netloc.removeprefix("www.") == dom]
+            rel = [k for k in cards if any(w in (CARD_HINTS[k].get("title") or "").lower() + unquote(k).lower()
+                                           for w in self.words)]
+            if rel:
+                return rel
+        return []
+
+    async def _web_results(self, c):
+        """موتور جستجو: DuckDuckGo (بدون API key) و در صورت خطا Bing."""
+        out = []
+        q = f"{self.query} video"
+        try:
+            r = await c.post("https://html.duckduckgo.com/html/", data={"q": q})
+            soup = BeautifulSoup(r.text, "html.parser")
+            for a in soup.select("a.result__a"):
+                href = a.get("href", "")
+                m = re.search(r"uddg=([^&]+)", href)
+                out.append(unquote(m.group(1)) if m else href)
+        except Exception as e:
+            log.warning("ddg fail: %s", e)
+        if len(out) < 5:
+            try:
+                for first in (1, 11):
+                    r = await c.get("https://www.bing.com/search", params={"q": q, "first": first})
+                    soup = BeautifulSoup(r.text, "html.parser")
+                    out += [a["href"] for a in soup.select("li.b_algo h2 a[href]")]
+            except Exception as e:
+                log.warning("bing fail: %s", e)
+        seen, res = set(), []
+        for u in out:
+            if u.startswith("http") and u not in seen and not re.search(r"(duckduckgo|bing\.com|google\.)", u):
+                seen.add(u); res.append(u)
+        return res[:40]
+
+    async def _prepare(self, c):
+        if self.web:
+            self.queue.extend(await self._web_results(c))
+        else:
+            results = await asyncio.gather(*(self._site_results(c, s) for s in self.sites))
+            for k in range(max((len(r) for r in results), default=0)):  # ترکیب نوبتی نتایج سایت‌ها
+                for r in results:
+                    if k < len(r):
+                        self.queue.append(r[k])
+        self.ready = True
+
+    async def next_batch(self):
+        found = []
+        async with httpx.AsyncClient(headers=HEADERS, follow_redirects=True, timeout=25) as c:
+            if not self.ready:
+                await self._prepare(c)
+            while self.queue and len(found) < BATCH:
+                url = self.queue.popleft()
+                if url in self.seen:
+                    continue
+                self.seen.add(url)
+                self.pages += 1
+                try:
+                    r = await c.get(url)
+                    if "text/html" not in r.headers.get("content-type", ""):
+                        continue
+                except Exception as e:
+                    log.warning("fetch fail %s: %s", url, e)
+                    continue
+                dom = urlparse(str(r.url)).netloc.removeprefix("www.")
+                await process_page(str(r.url), r.text, dom, self.sent, found,
+                                   self.words if self.web else None)
         return found
 
     @property
     def done(self):
-        return not self.queue or self.pages >= MAX_PAGES
+        return self.ready and not self.queue
 
 
 CRAWLERS: dict[int, Crawler] = {}  # chat_id -> وضعیت اسکن
@@ -348,7 +462,7 @@ async def fetch_image(url: str, referer: str):
 
 
 async def send_card(chat_id, i, v, ctx):
-    cap = f"🎬 {v['title']}"[:1000]
+    cap = f"🎬 {v['title']}\n🌐 {urlparse(v.get('page', '')).netloc.removeprefix('www.')}"[:1000]
     if v.get("image"):
         try:  # 1) تلگرام مستقیم از URL
             return await ctx.bot.send_photo(chat_id, v["image"], caption=cap, reply_markup=video_kb(i))
@@ -382,7 +496,10 @@ async def send_batch(chat_id, ctx: ContextTypes.DEFAULT_TYPE):
         await asyncio.sleep(1)  # جلوگیری از flood limit تلگرام
     if cr.done:
         CRAWLERS.pop(chat_id, None)
-        await ctx.bot.send_message(chat_id, f"✅ اسکن {cr.domain} تمام شد ({cr.pages} صفحه).")
+        if isinstance(cr, SearchCrawler) and not cr.sent:
+            await ctx.bot.send_message(chat_id, f"😕 برای «{cr.query}» ویدیویی پیدا نشد.")
+        else:
+            await ctx.bot.send_message(chat_id, f"✅ تمام شد ({cr.pages} صفحه بررسی شد).")
     else:
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("➡️ صفحه بعد", callback_data="next")]])
         await ctx.bot.send_message(chat_id, f"{len(found)} ویدیو. ({cr.pages} صفحه اسکن شد)", reply_markup=kb)
@@ -433,6 +550,8 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                                         "https://example.com اسم دلخواه")
     elif text == BTN_FAVS:
         await show_favs(chat_id, ctx)
+    elif text == BTN_SEARCH:
+        await update.message.reply_text("🔎 کلمه یا عبارت مورد نظرت رو بنویس:")
     elif text == BTN_STOP:
         await update.message.reply_text("⏹ اسکن متوقف شد." if CRAWLERS.pop(chat_id, None) else "اسکنی در جریان نیست.")
     elif re.match(r"^(https?://)?[\w.-]+\.[a-z]{2,}(/\S*)?(\s+.+)?$", text, re.I):
@@ -450,8 +569,12 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text("می‌خوای این سایت ذخیره بشه؟", reply_markup=InlineKeyboardMarkup(
                     [[InlineKeyboardButton("💾 ذخیره سایت", callback_data=f"savesite:{i}")]]))
             await start_scan(chat_id, url, ctx)
-    else:
-        await update.message.reply_text("متوجه نشدم. لینک سایت بفرست یا از دکمه‌ها استفاده کن.", reply_markup=MENU)
+    else:  # هر متن دیگری = جستجو
+        ctx.user_data["query"] = text[:100]
+        await update.message.reply_text(f"🔎 جستجوی «{text[:100]}» کجا انجام بشه؟", reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🌐 همه سایت‌های من", callback_data="sq:all")],
+            [InlineKeyboardButton("📌 انتخاب یک سایت", callback_data="sq:pick")],
+            [InlineKeyboardButton("🌍 جستجوی کلی در وب", callback_data="sq:web")]]))
 
 
 CHUNK = 2 * 2**20  # هر تکه 2MB
@@ -582,6 +705,29 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return await send_batch(chat_id, ctx)
 
     action, i = q.data.split(":", 1)
+    if action in ("sq", "sqs"):
+        query = ctx.user_data.get("query")
+        if not query:
+            return await q.answer("دوباره کلمه رو بفرست", show_alert=True)
+        await q.answer()
+        if i == "pick":
+            if not SITES:
+                return await q.edit_message_text("هیچ سایتی ذخیره نشده.")
+            return await q.edit_message_reply_markup(InlineKeyboardMarkup(
+                [[InlineKeyboardButton(v["name"], callback_data=f"sqs:{k}")] for k, v in SITES.items()]))
+        if action == "sqs":
+            if i not in SITES:
+                return await q.edit_message_text("این سایت حذف شده.")
+            cr, where = SearchCrawler(query, [SITES[i]["url"]], False), SITES[i]["name"]
+        elif i == "all":
+            if not SITES:
+                return await q.edit_message_text("هیچ سایتی ذخیره نشده.")
+            cr, where = SearchCrawler(query, [v["url"] for v in SITES.values()], False), "همه سایت‌های من"
+        else:
+            cr, where = SearchCrawler(query, None, True), "کل وب"
+        await q.edit_message_text(f"🔎 جستجوی «{query}» در {where} ...")
+        CRAWLERS[chat_id] = cr
+        return await send_batch(chat_id, ctx)
     if action == "scan":
         await q.answer()
         if i not in SITES:
