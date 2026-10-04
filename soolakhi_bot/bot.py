@@ -79,7 +79,9 @@ def vid_id(url: str) -> str:
 def _attr_urls(tag, names):
     for n in names:
         val = tag.get(n)
-        if val:
+        if isinstance(val, list):
+            val = " ".join(val)
+        if val and not val.strip().startswith("data:"):
             for part in val.split(","):  # srcset: "a.jpg 1x, b.jpg 2x"
                 part = part.strip().split(" ")[0]
                 if part and not part.startswith("data:"):
@@ -120,13 +122,19 @@ def parse_page(url: str, html: str, domain: str):
                 th = d.get("thumbnailUrl") or d.get("thumbnail")
                 if isinstance(th, list): th = th[0] if th else None
                 if isinstance(th, dict): th = th.get("url") or th.get("contentUrl")
-                if isinstance(th, str): image = image or J(th)
+                if isinstance(th, str) and not looks_generic(th): image = image or J(th)
                 for k in ("contentUrl", "embedUrl"):
-                    if isinstance(d.get(k), str): videos.add(J(d[k]))
+                    u = d.get(k)
+                    # embedUrl گاهی خود همین صفحه است → ویدیو حساب نشود
+                    if isinstance(u, str) and J(u).rstrip("/") != url.rstrip("/") and \
+                            (VIDEO_EXT.search(u) or urlparse(J(u)).netloc.removeprefix("www.") != domain):
+                        videos.add(J(u))
 
     # 2) متاتگ‌ها
     title = title or meta("og:title") or meta("twitter:title")
-    image = image or meta("og:image") or meta("og:image:url") or meta("twitter:image") or meta("thumbnailUrl")
+    for cand in (meta("og:image"), meta("og:image:url"), meta("twitter:image"), meta("thumbnailUrl")):
+        if not image and cand and not looks_generic(cand):
+            image = cand
     for p in ("og:video", "og:video:url", "og:video:secure_url", "twitter:player:stream"):
         if meta(p): videos.add(J(meta(p)))
 
@@ -158,7 +166,8 @@ def parse_page(url: str, html: str, domain: str):
     if not image:
         for img in soup.find_all("img"):
             for u in _attr_urls(img, IMG_ATTRS):
-                if not re.search(r"(logo|icon|avatar|sprite|banner|ads?[/_-])", u, re.I):
+                if not re.search(r"(logo|icon|avatar|gravatar|sprite|banner|emoji|(?<![a-z])ads?[/_-])", u, re.I) \
+                        and not (img.get("width", "999").isdigit() and int(img.get("width", "999")) < 100):
                     image = J(u); break
             if image: break
     if not image:  # background-image: url(...)
@@ -219,7 +228,7 @@ def clean_title(t: str, site_name: str | None) -> str:
 
 
 def looks_generic(img: str) -> bool:
-    return bool(re.search(r"(logo|icon|favicon|default|placeholder|no-?image|share|og-image)", img, re.I))
+    return bool(re.search(r"(logo|icon|favicon|default|placeholder|no-?image|share|og-image|gravatar|avatar)", img, re.I))
 
 
 async def ytdlp_info(url: str):
