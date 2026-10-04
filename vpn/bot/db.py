@@ -155,6 +155,15 @@ def delete(user_id: int) -> None:
         c.execute("DELETE FROM users WHERE id=?", (user_id,))
 
 
+def extra_admins() -> list:
+    return [int(x) for x in get_setting("admins").split(",") if x.strip().lstrip("-").isdigit()]
+
+
+def admin_ids() -> set:
+    """Owners from ADMIN_IDS (cannot be removed from the bot) plus admins added in the bot."""
+    return set(cfg.admin_ids) | set(extra_admins())
+
+
 def get_setting(key: str, default: str = "") -> str:
     with connect() as c:
         r = c.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()

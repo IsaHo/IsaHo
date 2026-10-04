@@ -32,10 +32,16 @@ NAME_RE = re.compile(r"^[A-Za-z0-9_.-]{2,32}$")
 
 class IsAdmin(Filter):
     async def __call__(self, event) -> bool:
+        return event.from_user is not None and event.from_user.id in db.admin_ids()
+
+
+class IsOwner(Filter):
+    async def __call__(self, event) -> bool:
         return event.from_user is not None and event.from_user.id in cfg.admin_ids
 
 
 admin = IsAdmin()
+owner = IsOwner()
 
 
 class AddUser(StatesGroup):
@@ -52,6 +58,7 @@ class Edit(StatesGroup):
     cdn_ip = State()
     relays = State()
     broadcast = State()
+    add_admin = State()
 
 
 # ---------- keyboards ----------
@@ -498,11 +505,106 @@ async def settings_menu(msg: Message):
         f"سرورهای واسط: <code>{', '.join(f'{h}:{p}' for h, p in links.relays()) or 'ندارد'}</code>"
     )
     await msg.answer(text, reply_markup=ikb([
+        [("🔗 لینک‌های سابسکریپشن", "lt:menu"), ("👮 مدیران", "adm:menu")],
         [("🇮🇷 سرور واسط", "set:relays"), ("🌐 تنظیم IP تمیز کلادفلر", "set:cdn")],
         [("🧪 دستور تست سرور واسط", "set:relaytest")],
         [("🔌 پورت CDN: 443", "set:port:443"), (f"🔌 پورت CDN: {cfg.cdn_port}", f"set:port:{cfg.cdn_port}")],
         [("🔄 ریستارت Xray", "set:restart"), ("🛠 بازسازی کانفیگ", "set:rebuild")],
     ]))
+
+
+def link_types_kb() -> InlineKeyboardMarkup:
+    types = links.enabled_types()
+    return ikb([[(f"{'✅' if t in types else '❌'} {label}", f"lt:{t}")] for t, label in links.LINK_TYPES.items()])
+
+
+LINK_TYPES_TEXT = ("🔗 <b>لینک‌های داخل سابسکریپشن و پیام لینک‌ها</b>\n"
+                   "روی هر مورد بزنید تا اضافه یا حذف شود. کاربران فقط سابسکریپشن را آپدیت کنند.")
+
+
+@router.callback_query(F.data == "lt:menu", admin)
+async def link_types_menu(cb: CallbackQuery):
+    await cb.answer()
+    await cb.message.answer(LINK_TYPES_TEXT, reply_markup=link_types_kb())
+
+
+@router.callback_query(F.data.startswith("lt:"), admin)
+async def link_types_toggle(cb: CallbackQuery):
+    t = cb.data[3:]
+    if t not in links.LINK_TYPES:
+        await cb.answer()
+        return
+    if t == "relay" and not links.relays() and t not in links.enabled_types():
+        await cb.answer("اول از «🇮🇷 سرور واسط» یک سرور اضافه کنید", show_alert=True)
+        return
+    links.toggle_type(t)
+    await cb.answer("✅ ذخیره شد")
+    await cb.message.edit_text(LINK_TYPES_TEXT, reply_markup=link_types_kb())
+
+
+def admins_view():
+    rows = [[(f"👑 {a} (مالک)", "noop_a")] for a in sorted(cfg.admin_ids)]
+    rows += [[(f"❌ حذف {a}", f"adm:del:{a}")] for a in db.extra_admins()]
+    rows.append([("➕ افزودن مدیر", "adm:add")])
+    text = ("👮 <b>مدیران ربات</b>\n"
+            "مالک‌ها از فایل تنظیمات سرور هستند و از اینجا حذف نمی‌شوند.\n"
+            "مدیرها به همه‌ی بخش‌ها جز مدیریت مدیران دسترسی دارند.")
+    return text, ikb(rows)
+
+
+@router.callback_query(F.data == "adm:menu", owner)
+async def admins_menu(cb: CallbackQuery):
+    await cb.answer()
+    text, kb = admins_view()
+    await cb.message.answer(text, reply_markup=kb)
+
+
+@router.callback_query(F.data == "adm:menu", admin)
+async def admins_menu_denied(cb: CallbackQuery):
+    await cb.answer("فقط مالک ربات می‌تواند مدیران را تغییر دهد", show_alert=True)
+
+
+@router.callback_query(F.data == "noop_a")
+async def admins_noop(cb: CallbackQuery):
+    await cb.answer()
+
+
+@router.callback_query(F.data == "adm:add", owner)
+async def admins_add_ask(cb: CallbackQuery, state: FSMContext):
+    await cb.answer()
+    await state.set_state(Edit.add_admin)
+    await cb.message.answer("آیدی عددی تلگرام مدیر جدید را بفرستید.\n"
+                            "(می‌تواند آیدی‌اش را از ربات @userinfobot بگیرد.)", reply_markup=CANCEL_KB)
+
+
+@router.message(Edit.add_admin, owner)
+async def admins_add_do(msg: Message, state: FSMContext, bot: Bot):
+    text = (msg.text or "").strip()
+    if not text.isdigit():
+        await msg.answer("❌ فقط آیدی عددی بفرستید، مثلاً <code>123456789</code>")
+        return
+    new_id = int(text)
+    await state.clear()
+    if new_id in db.admin_ids():
+        await msg.answer("این شخص از قبل مدیر است.", reply_markup=ADMIN_KB)
+        return
+    db.set_setting("admins", ",".join(str(a) for a in db.extra_admins() + [new_id]))
+    await msg.answer(f"✅ <code>{new_id}</code> مدیر شد.", reply_markup=ADMIN_KB)
+    try:
+        await bot.send_message(new_id, "👮 شما مدیر این ربات شدید. /start را بزنید.")
+    except Exception:
+        await msg.answer("ℹ️ نتوانستم به او پیام بدهم؛ باید یک بار خودش ربات را /start کند.")
+    text, kb = admins_view()
+    await msg.answer(text, reply_markup=kb)
+
+
+@router.callback_query(F.data.startswith("adm:del:"), owner)
+async def admins_del(cb: CallbackQuery):
+    target = int(cb.data.rsplit(":", 1)[1])
+    db.set_setting("admins", ",".join(str(a) for a in db.extra_admins() if a != target))
+    await cb.answer(f"🗑 {target} حذف شد")
+    text, kb = admins_view()
+    await cb.message.edit_text(text, reply_markup=kb)
 
 
 @router.callback_query(F.data == "set:restart", admin)

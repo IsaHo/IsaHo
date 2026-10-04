@@ -23,7 +23,7 @@ WARN_DAYS = 2
 
 
 async def notify(bot: Bot, user, text: str) -> None:
-    targets = set(cfg.admin_ids)
+    targets = db.admin_ids()
     for chat_id in targets:
         try:
             await bot.send_message(chat_id, text)

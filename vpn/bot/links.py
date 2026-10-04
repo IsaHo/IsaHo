@@ -46,14 +46,31 @@ def cdn_link(u) -> str:
     return f"vless://{u.uuid}@{cdn_address()}:{cdn_public_port()}?{q}#{quote(f'{cfg.brand}-{u.name}-CDN')}"
 
 
+LINK_TYPES = {"relay": "🇮🇷 تانل (سرور واسط)", "reality": "⚡ Reality مستقیم", "cdn": "☁️ CDN"}
+
+
+def enabled_types() -> set:
+    """Link types included in configs and subscriptions. Defaults to the tunnel only once a relay exists."""
+    raw = db.get_setting("link_types", "")
+    if raw:
+        return {t for t in raw.split(",") if t in LINK_TYPES}
+    return {"relay"} if relays() else {"reality", "cdn"}
+
+
+def toggle_type(t: str) -> set:
+    types = enabled_types() ^ {t}
+    db.set_setting("link_types", ",".join(sorted(types)) or "none")
+    return types
+
+
 def all_links(u) -> list:
-    links = []
-    if cfg.reality_public_key:
+    types, links = enabled_types(), []
+    if "relay" in types and cfg.reality_public_key:
         for i, (host, port) in enumerate(relays(), 1):
             links.append(reality_link(u, host, port, f"IR{i}"))
-    if cfg.server_ip and cfg.reality_public_key:
+    if "reality" in types and cfg.server_ip and cfg.reality_public_key:
         links.append(reality_link(u))
-    if cfg.domain:
+    if "cdn" in types and cfg.domain:
         links.append(cdn_link(u))
     return links
 
