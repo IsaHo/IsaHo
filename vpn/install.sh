@@ -57,6 +57,13 @@ if ! timeout 8 openssl s_client -connect "$REALITY_SNI:443" -servername "$REALIT
     yellow "⚠ $REALITY_SNI did not answer with TLS1.3 + h2 from this server; pick another camouflage site if Reality fails."
 fi
 
+# Many VPS have a published but broken IPv6 route; prefer IPv4 for outgoing connections
+if ! curl -6 -fsS -m 6 -o /dev/null https://api.telegram.org 2>/dev/null; then
+    yellow "IPv6 is not working on this server, preferring IPv4."
+    grep -q '^precedence ::ffff:0:0/96' /etc/gai.conf 2>/dev/null || echo 'precedence ::ffff:0:0/96  100' >>/etc/gai.conf
+fi
+curl -4 -fsS -m 10 -o /dev/null https://api.telegram.org || yellow "⚠ This server cannot reach api.telegram.org; the bot will not work."
+
 green "==> Installing Xray-core"
 bash -c "$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install -u root >/dev/null
 XRAY_BIN=/usr/local/bin/xray
