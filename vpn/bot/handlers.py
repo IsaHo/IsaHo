@@ -499,6 +499,7 @@ async def settings_menu(msg: Message):
     )
     await msg.answer(text, reply_markup=ikb([
         [("🇮🇷 سرور واسط", "set:relays"), ("🌐 تنظیم IP تمیز کلادفلر", "set:cdn")],
+        [("🧪 دستور تست سرور واسط", "set:relaytest")],
         [("🔌 پورت CDN: 443", "set:port:443"), (f"🔌 پورت CDN: {cfg.cdn_port}", f"set:port:{cfg.cdn_port}")],
         [("🔄 ریستارت Xray", "set:restart"), ("🛠 بازسازی کانفیگ", "set:rebuild")],
     ]))
@@ -531,6 +532,20 @@ async def settings_port(cb: CallbackQuery):
             f"• Custom filter: Hostname equals <code>{cfg.domain}</code> AND Server Port equals <code>443</code>\n"
             f"• Destination Port → Rewrite to <code>{cfg.cdn_port}</code>\n\n"
             "بعد کاربران فقط سابسکریپشن را آپدیت کنند. تست: <code>isaho doctor</code>")
+
+
+@router.callback_query(F.data == "set:relaytest", admin)
+async def settings_relaytest(cb: CallbackQuery):
+    await cb.answer()
+    users = db.active_users()
+    if not users:
+        await cb.message.answer("اول یک کاربر فعال بسازید.")
+        return
+    link = links.reality_link(users[0], cfg.server_ip, cfg.reality_port, "test")
+    cmd = ("curl -fsSL https://raw.githubusercontent.com/IsaHo/IsaHo/claude/vpn-telegram-bot/vpn/relay.sh"
+           f" | bash -s test '{link}' {cfg.server_ip}")
+    await cb.message.answer("روی متن زیر بزنید تا کپی شود، بعد در ترمینال <b>سرور ایران</b> پیست کنید:\n\n"
+                            f"<code>{html.escape(cmd)}</code>")
 
 
 @router.callback_query(F.data == "set:relays", admin)

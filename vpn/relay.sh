@@ -9,6 +9,7 @@ set -euo pipefail
 # Runs a real Xray client on this server and fetches a URL through the link.
 if [[ ${1:-} == test ]]; then
     LINK=${2:?usage: bash relay.sh test '<vless link>' [address]}
+    [[ $LINK == vless://* ]] || { echo "✖ the second argument must be a vless:// link (copy it from the bot)"; exit 1; }
     OVERRIDE=${3:-}
     D=/tmp/isaho-test; mkdir -p "$D"
     if [[ ! -x $D/xray ]]; then
