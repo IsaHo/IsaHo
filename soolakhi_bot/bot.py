@@ -658,12 +658,12 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 CHUNK = 2 * 2**20  # هر تکه 2MB
 
 
-async def http_download(url: str, referer: str, dest_dir: str, limit_mb: int, depth=0):
+async def http_download(url: str, referer: str, dest_dir: str, limit_mb: int, depth=0, proxy=None):
     """دانلود مستقیم تکه‌تکه با Range (بعضی CDNها مثل takcdn اتصال طولانی را قطع می‌کنند
     ولی درخواست‌های کوچک Range را جواب می‌دهند). اگر HTML برگشت، لینک ویدیو را از آن درمی‌آورد."""
     hdr = {**HEADERS, "Referer": referer}
     async with httpx.AsyncClient(headers=hdr, follow_redirects=True, timeout=httpx.Timeout(30, read=60),
-                                 proxy=DL_PROXY) as c:
+                                 proxy=proxy) as c:
         r = await c.get(url, headers={"Range": "bytes=0-1023"})
         r.raise_for_status()
         ctype = r.headers.get("content-type", "").lower()
@@ -673,7 +673,7 @@ async def http_download(url: str, referer: str, dest_dir: str, limit_mb: int, de
             _, _, videos, _, _ = parse_page(str(r.url), r.text, urlparse(str(r.url)).netloc.removeprefix("www."))
             for u in videos:
                 if not re.search(r"\.(m3u8|mpd)(\?|$)", u, re.I):
-                    p = await http_download(u, str(r.url), dest_dir, limit_mb, depth + 1)
+                    p = await http_download(u, str(r.url), dest_dir, limit_mb, depth + 1, proxy)
                     if p:
                         return p
             return None
@@ -722,11 +722,11 @@ async def http_download(url: str, referer: str, dest_dir: str, limit_mb: int, de
         return path
 
 
-async def ytdlp_download(url: str, referer: str, dest_dir: str):
+async def ytdlp_download(url: str, referer: str, dest_dir: str, proxy=None):
     out = os.path.join(dest_dir, "video.%(ext)s")
     base = ["yt-dlp", "-q", "--no-playlist", "-f", "b[ext=mp4]/bv*+ba/b", "--merge-output-format", "mp4",
             "--user-agent", HEADERS["User-Agent"], "--referer", referer,
-            "--add-header", "Accept-Language:en-US,en;q=0.9", "--retries", "5", "-o", out] + (["--proxy", DL_PROXY] if DL_PROXY else [])
+            "--add-header", "Accept-Language:en-US,en;q=0.9", "--retries", "5", "-o", out] + (["--proxy", proxy] if proxy else [])
     err = b""
     for extra in (["--impersonate", "chrome"], []):  # impersonate نیاز به curl_cffi دارد
         proc = await asyncio.create_subprocess_exec(*base, *extra, url, stdout=asyncio.subprocess.PIPE,
@@ -742,23 +742,30 @@ async def download_and_send(chat_id, v, ctx):
     limit = 2000 if LOCAL_API else 50
     with tempfile.TemporaryDirectory() as tmp:
         path, errors = None, []
-        # 1) دانلود مستقیم با هدر مرورگر  2) yt-dlp روی لینک ویدیو  3) yt-dlp روی خود صفحه
-        for attempt in range(3):
-            try:
-                path = await http_download(v["video"], v["page"], tmp, limit)
-                break
-            except RuntimeError:
-                raise
-            except Exception as e:
-                errors.append(f"direct#{attempt + 1}: {type(e).__name__}: {e}")
-                await asyncio.sleep(2)
-        for target in (v["video"], v["page"]):
+        # اول بدون پروکسی (سریع‌تر)؛ اگر نشد و DL_PROXY تنظیم شده، همه روش‌ها دوباره از پشت پروکسی
+        for proxy in [None] + ([DL_PROXY] if DL_PROXY else []):
+            tag = "proxy " if proxy else ""
+            for attempt in range(2):  # 1) دانلود مستقیم
+                try:
+                    path = await http_download(v["video"], v["page"], tmp, limit, proxy=proxy)
+                    break
+                except RuntimeError as e:
+                    if "محدودیت" in str(e):
+                        raise
+                    errors.append(f"{tag}direct: {e}")
+                    break
+                except Exception as e:
+                    errors.append(f"{tag}direct#{attempt + 1}: {type(e).__name__}: {e}")
+                    await asyncio.sleep(2)
+            for target in (v["video"], v["page"]):  # 2) yt-dlp روی لینک ویدیو، بعد روی صفحه
+                if path:
+                    break
+                try:
+                    path = await ytdlp_download(target, v["page"], tmp, proxy)
+                except Exception as e:
+                    errors.append(f"{tag}yt-dlp: {e}")
             if path:
                 break
-            try:
-                path = await ytdlp_download(target, v["page"], tmp)
-            except Exception as e:
-                errors.append(f"yt-dlp: {e}")
         if not path:
             raise RuntimeError("\n".join(errors)[-700:] or "دانلود ناموفق")
         size = os.path.getsize(path)
