@@ -43,6 +43,9 @@ EXTERNAL: dict[str, list] = {}  # page url -> لینک پلیرها/فایل‌�
 # فایل‌هاست‌ها: لینک .mp4 دارند ولی صفحه دانلود (کپچا/اشتراک) هستند نه فایل مستقیم
 FILE_HOSTS = re.compile(r"(nitroflare|rapidgator|uploaded|katfile|ddownload|turbobit|filefactory|mega\.nz|"
                         r"1fichier|uptobox|k2s|keep2share|fboom|alfafile|hitfile|mexa|clicknupload)\.", re.I)
+VIDEO_SITES = re.compile(r"(youtube\.com/watch|youtu\.be/|vimeo\.com/\d|dailymotion\.com/video|aparat\.com/v/|"
+                         r"ok\.ru/video|rumble\.com/v|bitchute\.com/video|namasha\.com/v|tiktok\.com/@[^/]+/video|"
+                         r"twitch\.tv/videos|streamable\.com/|archive\.org/details)", re.I)
 PLAYER_HINT = re.compile(r"(player|vid|embed|stream|watch|play|tube|dood|filemoon|voe|streamtape)", re.I)
 CARD_HINTS: dict[str, dict] = {}  # page url -> {title, image} از کارت‌های صفحه لیست
 
@@ -362,32 +365,72 @@ class SearchCrawler:
                 return rel
         return []
 
-    async def _web_results(self, c):
-        """موتور جستجو: DuckDuckGo (بدون API key) و در صورت خطا Bing."""
+    async def _engine(self, c, name: str, q: str):
+        """یک موتور جستجو → لیست URL. همه بدون API key."""
         out = []
-        q = f"{self.query} video"
         try:
-            r = await c.post("https://html.duckduckgo.com/html/", data={"q": q})
-            soup = BeautifulSoup(r.text, "html.parser")
-            for a in soup.select("a.result__a"):
-                href = a.get("href", "")
-                m = re.search(r"uddg=([^&]+)", href)
-                out.append(unquote(m.group(1)) if m else href)
-        except Exception as e:
-            log.warning("ddg fail: %s", e)
-        if len(out) < 5:
-            try:
+            if name == "ddg":
+                r = await c.post("https://html.duckduckgo.com/html/", data={"q": q})
+                for a in BeautifulSoup(r.text, "html.parser").select("a.result__a"):
+                    m = re.search(r"uddg=([^&]+)", a.get("href", ""))
+                    out.append(unquote(m.group(1)) if m else a.get("href", ""))
+            elif name == "bing":
                 for first in (1, 11):
                     r = await c.get("https://www.bing.com/search", params={"q": q, "first": first})
-                    soup = BeautifulSoup(r.text, "html.parser")
-                    out += [a["href"] for a in soup.select("li.b_algo h2 a[href]")]
-            except Exception as e:
-                log.warning("bing fail: %s", e)
-        seen, res = set(), []
-        for u in out:
-            if u.startswith("http") and u not in seen and not re.search(r"(duckduckgo|bing\.com|google\.)", u):
-                seen.add(u); res.append(u)
-        return res[:40]
+                    out += [a["href"] for a in BeautifulSoup(r.text, "html.parser").select("li.b_algo h2 a[href]")]
+            elif name == "yahoo":
+                r = await c.get("https://search.yahoo.com/search", params={"p": q})
+                for a in BeautifulSoup(r.text, "html.parser").select("div.algo h3 a[href], div.compTitle a[href]"):
+                    m = re.search(r"/RU=([^/]+)/", a["href"])
+                    out.append(unquote(m.group(1)) if m else a["href"])
+            elif name == "mojeek":
+                r = await c.get("https://www.mojeek.com/search", params={"q": q})
+                out += [a["href"] for a in BeautifulSoup(r.text, "html.parser").select("a.ob[href], ul.results-standard h2 a[href]")]
+        except Exception as e:
+            log.warning("%s fail: %s", name, e)
+        return out
+
+    async def _web_results(self, c):
+        """چند موتور × چند عبارت به‌صورت همزمان؛ نتایج بر اساس تکرار در موتورها و تطابق کلمات رتبه‌بندی می‌شوند."""
+        q = self.query
+        variants = [f"{q} video", f"{q} دانلود", f"{q} mp4 download", f'"{q}" watch online']
+        jobs = [self._engine(c, e, v) for v in variants for e in ("ddg", "bing", "yahoo", "mojeek")]
+        jobs.append(self._engine(c, "bing", f'intitle:"index of" mp4 {q}'))  # دایرکتوری‌های فایل مستقیم
+        score: dict[str, float] = {}
+        for res in await asyncio.gather(*jobs):
+            for rank, u in enumerate(res):
+                if not u.startswith("http") or re.search(r"(duckduckgo|bing\.com|google\.|yahoo\.com|mojeek|"
+                                                         r"wikipedia|facebook|instagram|twitter|x\.com|reddit|pinterest|"
+                                                         r"linkedin|amazon\.|imdb\.com)", u):
+                    continue
+                u = u.split("#")[0]
+                score[u] = score.get(u, 0) + 1 / (rank + 3)
+        for u in score:  # امتیاز بیشتر برای وجود کلمات در آدرس، ویدیوی مستقیم، و پلتفرم‌های ویدیو
+            low = unquote(u).lower()
+            score[u] += 0.3 * sum(w in low for w in self.words)
+            if VIDEO_EXT.search(u): score[u] += 1
+            if VIDEO_SITES.search(u): score[u] += 0.5
+        return sorted(score, key=score.get, reverse=True)[:60]
+
+    def _direct_item(self, u, found):
+        name = unquote(urlparse(u).path.rsplit("/", 1)[-1])
+        if self.words and not any(w in name.lower() for w in self.words):
+            return
+        i = vid_id(u)
+        VIDEOS.setdefault(i, {"title": re.sub(r"[._-]+", " ", name), "image": None, "page": u, "video": u, "ext": []})
+        if i not in self.sent:
+            self.sent.add(i); found.append(i)
+
+    def _related_links(self, html_url, html, dom, before):
+        """از صفحه‌ای که خودش ویدیو نداشت، لینک کارت‌ها/فایل‌های مرتبط با کلمه را درمی‌آورد (یک سطح عمق)."""
+        soup = BeautifulSoup(html, "html.parser")
+        rel = [k for k in CARD_HINTS if k not in before and
+               any(w in ((CARD_HINTS[k].get("title") or "") + unquote(k)).lower() for w in self.words)]
+        for a in soup.find_all("a", href=True):  # لیست فایل‌ها (index of) یا لینک‌های مستقیم
+            u = urljoin(html_url, a["href"])
+            if VIDEO_EXT.search(u) and any(w in unquote(u).lower() + a.get_text().lower() for w in self.words):
+                rel.insert(0, u)
+        return rel[:12]
 
     async def _prepare(self, c):
         if self.web:
@@ -405,11 +448,15 @@ class SearchCrawler:
         async with httpx.AsyncClient(headers=HEADERS, follow_redirects=True, timeout=25) as c:
             if not self.ready:
                 await self._prepare(c)
-            while self.queue and len(found) < BATCH:
+                self.depth = {u: 0 for u in self.queue}
+                self.searched_domains = set()
+            while self.queue and len(found) < BATCH and self.pages < 150:
                 url = self.queue.popleft()
                 if url in self.seen:
                     continue
                 self.seen.add(url)
+                if VIDEO_EXT.search(url) and not FILE_HOSTS.search(url):  # لینک مستقیم فایل
+                    self._direct_item(url, found); continue
                 self.pages += 1
                 try:
                     r = await c.get(url)
@@ -418,14 +465,33 @@ class SearchCrawler:
                 except Exception as e:
                     log.warning("fetch fail %s: %s", url, e)
                     continue
-                dom = urlparse(str(r.url)).netloc.removeprefix("www.")
-                await process_page(str(r.url), r.text, dom, self.sent, found,
-                                   self.words if self.web else None)
+                final = str(r.url)
+                dom = urlparse(final).netloc.removeprefix("www.")
+                n, hints_before = len(found), set(CARD_HINTS)
+                await process_page(final, r.text, dom, self.sent, found, self.words if self.web else None)
+                if self.web and len(found) == n and VIDEO_SITES.search(final):
+                    # یوتیوب/آپارات/... → yt-dlp تیتر و عکس را می‌دهد و دانلود هم با yt-dlp
+                    t, img = await ytdlp_info(final)
+                    if t:
+                        i = vid_id(final)
+                        VIDEOS.setdefault(i, {"title": t, "image": img, "page": final, "video": final, "ext": []})
+                        if i not in self.sent:
+                            self.sent.add(i); found.append(i)
+                if self.web and len(found) == n and self.depth.get(url, 0) == 0:
+                    # این صفحه خودش ویدیو نداشت: نتایج مرتبط داخلش + جستجوی داخلی همان سایت
+                    more = self._related_links(final, r.text, dom, hints_before)
+                    if dom not in self.searched_domains:
+                        self.searched_domains.add(dom)
+                        more += await self._site_results(c, f"{urlparse(final).scheme}://{urlparse(final).netloc}/")
+                    for m in more:
+                        if m not in self.seen and m not in self.depth:
+                            self.depth[m] = 1
+                            self.queue.appendleft(m)  # نتایج دقیق‌تر جلوتر بررسی شوند
         return found
 
     @property
     def done(self):
-        return self.ready and not self.queue
+        return self.ready and (not self.queue or self.pages >= 150)
 
 
 CRAWLERS: dict[int, Crawler] = {}  # chat_id -> وضعیت اسکن
