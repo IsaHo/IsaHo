@@ -47,7 +47,7 @@ ask BRAND       "Brand name shown in configs" "IsaHo"
 [[ -n $BOT_TOKEN && -n $ADMIN_IDS && -n $SERVER_IP && -n $DOMAIN ]] || die "Missing required values"
 
 for p in 443 2053 2096; do
-    owner=$(ss -Htlnp "sport = :$p" | head -1)
+    owner=$(ss -Htlnp "sport = :$p" | sed -n 1p || true)
     if [[ -n $owner && $owner != *xray* && $owner != *python* ]]; then
         die "Port $p is used by another program: $owner"
     fi
@@ -60,7 +60,7 @@ fi
 green "==> Installing Xray-core"
 bash -c "$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install -u root >/dev/null
 XRAY_BIN=/usr/local/bin/xray
-$XRAY_BIN version | head -1
+"$XRAY_BIN" version | sed -n 1p
 
 mkdir -p "$CONF_DIR" "$DATA_DIR" "$APP_DIR"
 chmod 700 "$CONF_DIR" "$DATA_DIR"
