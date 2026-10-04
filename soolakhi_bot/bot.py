@@ -427,8 +427,14 @@ async def http_download(url: str, referer: str, dest_dir: str, limit_mb: int, de
     اگر به‌جای فایل، صفحه HTML برگشت، لینک ویدیو را از آن درمی‌آورد."""
     hdr = {**HEADERS, "Referer": referer, "Accept": "*/*", "Accept-Language": "en-US,en;q=0.9,fa;q=0.8",
            "Origin": f"{urlparse(referer).scheme}://{urlparse(referer).netloc}"}
-    async with httpx.AsyncClient(headers=hdr, follow_redirects=True, timeout=httpx.Timeout(60, read=120)) as c:
-        async with c.stream("GET", url) as r:
+    async with httpx.AsyncClient(headers=hdr, follow_redirects=True, http2=True,
+                                 timeout=httpx.Timeout(60, read=120)) as c:
+        if depth == 0:
+            try:  # اول صفحه را باز کن تا کوکی‌های سایت (session/cloudflare) گرفته شود
+                await c.get(referer, headers={"Accept": "text/html"})
+            except Exception:
+                pass
+        async with c.stream("GET", url, headers={"Range": "bytes=0-"}) as r:
             r.raise_for_status()
             ctype = r.headers.get("content-type", "").lower()
             if "text/html" in ctype:
@@ -485,7 +491,7 @@ async def download_and_send(chat_id, v, ctx):
         except RuntimeError:
             raise
         except Exception as e:
-            errors.append(f"direct: {e}")
+            errors.append(f"direct: {type(e).__name__}: {e} | {v['video']}")
         for target in (v["video"], v["page"]):
             if path:
                 break
