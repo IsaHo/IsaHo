@@ -26,6 +26,7 @@ DL_PROXY = os.environ.get("DL_PROXY")  # e.g. http://127.0.0.1:8081/bot
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 FAV_FILE = os.path.join(BASE_DIR, "favorites.json")
 SITES_FILE = os.path.join(BASE_DIR, "sites.json")
+BLOCK_FILE = os.path.join(BASE_DIR, "blocked.json")
 
 VID_EXTS = "mp4|mkv|webm|mov|avi|m4v|m3u8|mpd|flv|wmv|3gp|ts|ogv|mpg|mpeg"
 IMG_EXTS = "jpg|jpeg|png|gif|webp|avif|bmp|svg|jfif"
@@ -72,6 +73,18 @@ if SITES is None:
     SITES = {}
     SITES[hashlib.md5(DEFAULT_URL.encode()).hexdigest()[:12]] = {"name": urlparse(DEFAULT_URL).netloc, "url": DEFAULT_URL}
     save_json(SITES_FILE, SITES)
+
+
+BLOCKED: list[str] = load_json(BLOCK_FILE, [])  # دامنه‌هایی که در جستجو نمی‌آیند
+
+
+def host_of(url: str) -> str:
+    return urlparse(url).netloc.lower().removeprefix("www.").removeprefix("m.")
+
+
+def is_blocked(url: str) -> bool:
+    h = host_of(url)
+    return any(h == b or h.endswith("." + b) for b in BLOCKED)
 
 
 def save_favs():
@@ -406,6 +419,8 @@ class SearchCrawler:
                                                          r"linkedin|amazon\.|imdb\.com)", u):
                     continue
                 u = u.split("#")[0]
+                if is_blocked(u):
+                    continue
                 score[u] = score.get(u, 0) + 1 / (rank + 3)
         for u in score:  # امتیاز بیشتر برای وجود کلمات در آدرس، ویدیوی مستقیم، و پلتفرم‌های ویدیو
             low = unquote(u).lower()
@@ -457,6 +472,8 @@ class SearchCrawler:
                 if url in self.seen:
                     continue
                 self.seen.add(url)
+                if is_blocked(url):
+                    continue
                 if VIDEO_EXT.search(url) and not FILE_HOSTS.search(url):  # لینک مستقیم فایل
                     self._direct_item(url, found); continue
                 self.pages += 1
@@ -515,6 +532,7 @@ def video_kb(i: str) -> InlineKeyboardMarkup:
         if site_id(root) not in SITES:
             rows.append([InlineKeyboardButton(f"💾 ذخیره سایت {urlparse(root).netloc.removeprefix('www.')[:25]}",
                                               callback_data=f"savedom:{i}")])
+        rows.append([InlineKeyboardButton(f"🚫 بلاک {host_of(root)[:25]}", callback_data=f"block:{i}")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -597,12 +615,20 @@ async def cmd_scan(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 def sites_kb():
     rows = [[InlineKeyboardButton(f"🔍 {v['name']}", callback_data=f"scan:{i}"),
              InlineKeyboardButton("🗑", callback_data=f"delsite:{i}")] for i, v in SITES.items()]
-    return InlineKeyboardMarkup(rows) if rows else None
+    rows.append([InlineKeyboardButton(f"🚫 سایت‌های بلاک‌شده ({len(BLOCKED)})", callback_data="blocklist:x")])
+    return InlineKeyboardMarkup(rows)
+
+
+def blocked_kb():
+    rows = [[InlineKeyboardButton(f"✅ آزاد کردن {d}", callback_data=f"unblock:{k}")] for k, d in enumerate(BLOCKED)]
+    rows.append([InlineKeyboardButton("➕ بلاک دستی (اسم سایت رو بفرست)", callback_data="blockadd:x")])
+    return InlineKeyboardMarkup(rows)
 
 
 async def show_sites(chat_id, ctx):
     if not SITES:
-        return await ctx.bot.send_message(chat_id, "هیچ سایتی ذخیره نشده. با «➕ افزودن سایت» اضافه کن.")
+        return await ctx.bot.send_message(chat_id, "هیچ سایتی ذخیره نشده. با «➕ افزودن سایت» اضافه کن.",
+                                          reply_markup=sites_kb())
     await ctx.bot.send_message(chat_id, "🌐 سایت‌های ذخیره‌شده (برای اسکن بزن، 🗑 برای حذف):", reply_markup=sites_kb())
 
 
@@ -619,6 +645,12 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not allowed(update):
         return
     chat_id, text = update.effective_chat.id, update.message.text.strip()
+    if ctx.user_data.pop("blocking", None) and re.match(r"^(https?://)?[\w.-]+\.[a-z]{2,}", text, re.I):
+        d = host_of(text if text.startswith("http") else "https://" + text)
+        if d not in BLOCKED:
+            BLOCKED.append(d)
+            save_json(BLOCK_FILE, BLOCKED)
+        return await update.message.reply_text(f"🚫 {d} بلاک شد.", reply_markup=blocked_kb())
     if text == BTN_SITES:
         ctx.user_data.pop("adding", None)
         await show_sites(chat_id, ctx)
@@ -824,6 +856,37 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         save_json(SITES_FILE, SITES)
         await q.answer(f"🗑 {site['name']} حذف شد" if site else "قبلاً حذف شده")
         return await q.edit_message_reply_markup(sites_kb())
+    if action == "block":
+        v = VIDEOS.get(i) or FAVS.get(i)
+        if not v:
+            return await q.answer("منقضی شده", show_alert=True)
+        d = host_of(v["page"])
+        if d not in BLOCKED:
+            BLOCKED.append(d)
+            save_json(BLOCK_FILE, BLOCKED)
+        if isinstance(CRAWLERS.get(chat_id), SearchCrawler):  # از صف جستجوی فعلی هم حذف شود
+            cr = CRAWLERS[chat_id]
+            cr.queue = deque(u for u in cr.queue if not is_blocked(u))
+        await q.answer(f"🚫 {d} بلاک شد و دیگه توی جستجو نمیاد", show_alert=True)
+        try:
+            return await q.message.delete()
+        except Exception:
+            return
+    if action == "blocklist":
+        await q.answer()
+        return await q.message.reply_text("🚫 سایت‌های بلاک‌شده:" if BLOCKED else "هیچ سایتی بلاک نشده.",
+                                          reply_markup=blocked_kb())
+    if action == "unblock":
+        k = int(i)
+        if k < len(BLOCKED):
+            d = BLOCKED.pop(k)
+            save_json(BLOCK_FILE, BLOCKED)
+            await q.answer(f"✅ {d} آزاد شد")
+        return await q.edit_message_reply_markup(blocked_kb())
+    if action == "blockadd":
+        ctx.user_data["blocking"] = True
+        await q.answer()
+        return await q.message.reply_text("اسم یا لینک سایتی که می‌خوای بلاک بشه رو بفرست (مثلاً youtube.com):")
     if action == "savedom":
         v = VIDEOS.get(i) or FAVS.get(i)
         if not v:
