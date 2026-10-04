@@ -21,8 +21,7 @@ MAX_PAGES = int(os.environ.get("MAX_PAGES", "5000"))
 BATCH = int(os.environ.get("BATCH", "10"))  # تعداد ویدیو در هر صفحه
 # اگر Local Bot API Server داری، آدرسش را بده تا محدودیت آپلود 50MB به 2GB برسد
 LOCAL_API = os.environ.get("LOCAL_API")
-# پروکسی برای دانلود (مثلاً سایت‌هایی که IP کشور سرور را بسته‌اند): socks5://user:pass@host:port یا http://...
-DL_PROXY = os.environ.get("DL_PROXY")  # e.g. http://127.0.0.1:8081/bot
+# (پروکسی حذف شد) (مثلاً سایت‌هایی که IP کشور سرور را بسته‌اند): socks5://user:pass@host:port یا http://...
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 FAV_FILE = os.path.join(BASE_DIR, "favorites.json")
 SITES_FILE = os.path.join(BASE_DIR, "sites.json")
@@ -46,9 +45,6 @@ EXTERNAL: dict[str, list] = {}  # page url -> لینک پلیرها/فایل‌�
 # فایل‌هاست‌ها: لینک .mp4 دارند ولی صفحه دانلود (کپچا/اشتراک) هستند نه فایل مستقیم
 FILE_HOSTS = re.compile(r"(nitroflare|rapidgator|uploaded|katfile|ddownload|turbobit|filefactory|mega\.nz|"
                         r"1fichier|uptobox|k2s|keep2share|fboom|alfafile|hitfile|mexa|clicknupload)\.", re.I)
-VIDEO_SITES = re.compile(r"(youtube\.com/watch|youtu\.be/|vimeo\.com/\d|dailymotion\.com/video|aparat\.com/v/|"
-                         r"ok\.ru/video|rumble\.com/v|bitchute\.com/video|namasha\.com/v|tiktok\.com/@[^/]+/video|"
-                         r"twitch\.tv/videos|streamable\.com/|archive\.org/details)", re.I)
 PLAYER_HINT = re.compile(r"(player|vid|embed|stream|watch|play|tube|dood|filemoon|voe|streamtape)", re.I)
 CARD_HINTS: dict[str, dict] = {}  # page url -> {title, image} از کارت‌های صفحه لیست
 
@@ -352,9 +348,9 @@ def norm_words(q: str):
 
 class SearchCrawler:
     """جستجو: اول صفحات نتیجه (داخل سایت‌ها یا موتور جستجو) را می‌گیرد، بعد فقط همان نتایج را باز می‌کند."""
-    def __init__(self, query: str, sites: list[str] | None, web: bool):
-        self.query, self.sites, self.web = query, sites or [], web
-        self.domain = "وب" if web else ("، ".join(urlparse(u).netloc.removeprefix("www.") for u in self.sites[:3])
+    def __init__(self, query: str, sites: list[str]):
+        self.query, self.sites = query, sites
+        self.domain = ("، ".join(urlparse(u).netloc.removeprefix("www.") for u in self.sites[:3])
                                         + (" ..." if len(self.sites) > 3 else ""))
         self.queue, self.seen, self.sent, self.pages, self.ready = deque(), set(), set(), 0, False
         self.words = norm_words(query)
@@ -380,84 +376,12 @@ class SearchCrawler:
                 return rel
         return []
 
-    async def _engine(self, c, name: str, q: str):
-        """یک موتور جستجو → لیست URL. همه بدون API key."""
-        out = []
-        try:
-            if name == "ddg":
-                r = await c.post("https://html.duckduckgo.com/html/", data={"q": q})
-                for a in BeautifulSoup(r.text, "html.parser").select("a.result__a"):
-                    m = re.search(r"uddg=([^&]+)", a.get("href", ""))
-                    out.append(unquote(m.group(1)) if m else a.get("href", ""))
-            elif name == "bing":
-                for first in (1, 11):
-                    r = await c.get("https://www.bing.com/search", params={"q": q, "first": first})
-                    out += [a["href"] for a in BeautifulSoup(r.text, "html.parser").select("li.b_algo h2 a[href]")]
-            elif name == "yahoo":
-                r = await c.get("https://search.yahoo.com/search", params={"p": q})
-                for a in BeautifulSoup(r.text, "html.parser").select("div.algo h3 a[href], div.compTitle a[href]"):
-                    m = re.search(r"/RU=([^/]+)/", a["href"])
-                    out.append(unquote(m.group(1)) if m else a["href"])
-            elif name == "mojeek":
-                r = await c.get("https://www.mojeek.com/search", params={"q": q})
-                out += [a["href"] for a in BeautifulSoup(r.text, "html.parser").select("a.ob[href], ul.results-standard h2 a[href]")]
-        except Exception as e:
-            log.warning("%s fail: %s", name, e)
-        return out
-
-    async def _web_results(self, c):
-        """چند موتور × چند عبارت به‌صورت همزمان؛ نتایج بر اساس تکرار در موتورها و تطابق کلمات رتبه‌بندی می‌شوند."""
-        q = self.query
-        variants = [f"{q} video", f"{q} دانلود", f"{q} mp4 download", f'"{q}" watch online']
-        jobs = [self._engine(c, e, v) for v in variants for e in ("ddg", "bing", "yahoo", "mojeek")]
-        jobs.append(self._engine(c, "bing", f'intitle:"index of" mp4 {q}'))  # دایرکتوری‌های فایل مستقیم
-        score: dict[str, float] = {}
-        for res in await asyncio.gather(*jobs):
-            for rank, u in enumerate(res):
-                if not u.startswith("http") or re.search(r"(duckduckgo|bing\.com|google\.|yahoo\.com|mojeek|"
-                                                         r"wikipedia|facebook|instagram|twitter|x\.com|reddit|pinterest|"
-                                                         r"linkedin|amazon\.|imdb\.com)", u):
-                    continue
-                u = u.split("#")[0]
-                if is_blocked(u):
-                    continue
-                score[u] = score.get(u, 0) + 1 / (rank + 3)
-        for u in score:  # امتیاز بیشتر برای وجود کلمات در آدرس، ویدیوی مستقیم، و پلتفرم‌های ویدیو
-            low = unquote(u).lower()
-            score[u] += 0.3 * sum(w in low for w in self.words)
-            if VIDEO_EXT.search(u): score[u] += 1
-            if VIDEO_SITES.search(u): score[u] += 0.5
-        return sorted(score, key=score.get, reverse=True)[:60]
-
-    def _direct_item(self, u, found):
-        name = unquote(urlparse(u).path.rsplit("/", 1)[-1])
-        if self.words and not any(w in name.lower() for w in self.words):
-            return
-        i = vid_id(u)
-        VIDEOS.setdefault(i, {"title": re.sub(r"[._-]+", " ", name), "image": None, "page": u, "video": u, "ext": []})
-        if i not in self.sent:
-            self.sent.add(i); found.append(i)
-
-    def _related_links(self, html_url, html, dom, before):
-        """از صفحه‌ای که خودش ویدیو نداشت، لینک کارت‌ها/فایل‌های مرتبط با کلمه را درمی‌آورد (یک سطح عمق)."""
-        soup = BeautifulSoup(html, "html.parser")
-        rel = [k for k in CARD_HINTS if k not in before and
-               any(w in ((CARD_HINTS[k].get("title") or "") + unquote(k)).lower() for w in self.words)]
-        for a in soup.find_all("a", href=True):  # لیست فایل‌ها (index of) یا لینک‌های مستقیم
-            u = urljoin(html_url, a["href"])
-            if VIDEO_EXT.search(u) and any(w in unquote(u).lower() + a.get_text().lower() for w in self.words):
-                rel.insert(0, u)
-        return rel[:12]
-
     async def _prepare(self, c):
-        if self.web:
-            self.queue.extend(await self._web_results(c))
-        else:
-            results = await asyncio.gather(*(self._site_results(c, s) for s in self.sites))
-            for k in range(max((len(r) for r in results), default=0)):  # ترکیب نوبتی نتایج سایت‌ها
-                for r in results:
-                    if k < len(r):
-                        self.queue.append(r[k])
+        results = await asyncio.gather(*(self._site_results(c, s) for s in self.sites))
+        for k in range(max((len(r) for r in results), default=0)):  # ترکیب نوبتی نتایج سایت‌ها
+            for r in results:
+                if k < len(r):
+                    self.queue.append(r[k])
         self.ready = True
 
     async def next_batch(self):
@@ -465,8 +389,6 @@ class SearchCrawler:
         async with httpx.AsyncClient(headers=HEADERS, follow_redirects=True, timeout=25) as c:
             if not self.ready:
                 await self._prepare(c)
-                self.depth = {u: 0 for u in self.queue}
-                self.searched_domains = set()
             while self.queue and len(found) < BATCH and self.pages < 150:
                 url = self.queue.popleft()
                 if url in self.seen:
@@ -474,8 +396,6 @@ class SearchCrawler:
                 self.seen.add(url)
                 if is_blocked(url):
                     continue
-                if VIDEO_EXT.search(url) and not FILE_HOSTS.search(url):  # لینک مستقیم فایل
-                    self._direct_item(url, found); continue
                 self.pages += 1
                 try:
                     r = await c.get(url)
@@ -486,26 +406,7 @@ class SearchCrawler:
                     continue
                 final = str(r.url)
                 dom = urlparse(final).netloc.removeprefix("www.")
-                n, hints_before = len(found), set(CARD_HINTS)
-                await process_page(final, r.text, dom, self.sent, found, self.words if self.web else None)
-                if self.web and len(found) == n and VIDEO_SITES.search(final):
-                    # یوتیوب/آپارات/... → yt-dlp تیتر و عکس را می‌دهد و دانلود هم با yt-dlp
-                    t, img = await ytdlp_info(final)
-                    if t:
-                        i = vid_id(final)
-                        VIDEOS.setdefault(i, {"title": t, "image": img, "page": final, "video": final, "ext": []})
-                        if i not in self.sent:
-                            self.sent.add(i); found.append(i)
-                if self.web and len(found) == n and self.depth.get(url, 0) == 0:
-                    # این صفحه خودش ویدیو نداشت: نتایج مرتبط داخلش + جستجوی داخلی همان سایت
-                    more = self._related_links(final, r.text, dom, hints_before)
-                    if dom not in self.searched_domains:
-                        self.searched_domains.add(dom)
-                        more += await self._site_results(c, f"{urlparse(final).scheme}://{urlparse(final).netloc}/")
-                    for m in more:
-                        if m not in self.seen and m not in self.depth:
-                            self.depth[m] = 1
-                            self.queue.appendleft(m)  # نتایج دقیق‌تر جلوتر بررسی شوند
+                await process_page(final, r.text, dom, self.sent, found)
         return found
 
     @property
@@ -683,19 +584,17 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         ctx.user_data["query"] = text[:100]
         await update.message.reply_text(f"🔎 جستجوی «{text[:100]}» کجا انجام بشه؟", reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("🌐 همه سایت‌های من", callback_data="sq:all")],
-            [InlineKeyboardButton("📌 انتخاب یک سایت", callback_data="sq:pick")],
-            [InlineKeyboardButton("🌍 جستجوی کلی در وب", callback_data="sq:web")]]))
+            [InlineKeyboardButton("📌 انتخاب یک سایت", callback_data="sq:pick")]]))
 
 
 CHUNK = 2 * 2**20  # هر تکه 2MB
 
 
-async def http_download(url: str, referer: str, dest_dir: str, limit_mb: int, depth=0, proxy=None):
+async def http_download(url: str, referer: str, dest_dir: str, limit_mb: int, depth=0):
     """دانلود مستقیم تکه‌تکه با Range (بعضی CDNها مثل takcdn اتصال طولانی را قطع می‌کنند
     ولی درخواست‌های کوچک Range را جواب می‌دهند). اگر HTML برگشت، لینک ویدیو را از آن درمی‌آورد."""
     hdr = {**HEADERS, "Referer": referer}
-    async with httpx.AsyncClient(headers=hdr, follow_redirects=True, timeout=httpx.Timeout(30, read=60),
-                                 proxy=proxy) as c:
+    async with httpx.AsyncClient(headers=hdr, follow_redirects=True, timeout=httpx.Timeout(30, read=60)) as c:
         r = await c.get(url, headers={"Range": "bytes=0-1023"})
         r.raise_for_status()
         ctype = r.headers.get("content-type", "").lower()
@@ -705,7 +604,7 @@ async def http_download(url: str, referer: str, dest_dir: str, limit_mb: int, de
             _, _, videos, _, _ = parse_page(str(r.url), r.text, urlparse(str(r.url)).netloc.removeprefix("www."))
             for u in videos:
                 if not re.search(r"\.(m3u8|mpd)(\?|$)", u, re.I):
-                    p = await http_download(u, str(r.url), dest_dir, limit_mb, depth + 1, proxy)
+                    p = await http_download(u, str(r.url), dest_dir, limit_mb, depth + 1)
                     if p:
                         return p
             return None
@@ -754,11 +653,11 @@ async def http_download(url: str, referer: str, dest_dir: str, limit_mb: int, de
         return path
 
 
-async def ytdlp_download(url: str, referer: str, dest_dir: str, proxy=None):
+async def ytdlp_download(url: str, referer: str, dest_dir: str):
     out = os.path.join(dest_dir, "video.%(ext)s")
     base = ["yt-dlp", "-q", "--no-playlist", "-f", "b[ext=mp4]/bv*+ba/b", "--merge-output-format", "mp4",
             "--user-agent", HEADERS["User-Agent"], "--referer", referer,
-            "--add-header", "Accept-Language:en-US,en;q=0.9", "--retries", "5", "-o", out] + (["--proxy", proxy] if proxy else [])
+            "--add-header", "Accept-Language:en-US,en;q=0.9", "--retries", "5", "-o", out]
     err = b""
     for extra in (["--impersonate", "chrome"], []):  # impersonate نیاز به curl_cffi دارد
         proc = await asyncio.create_subprocess_exec(*base, *extra, url, stdout=asyncio.subprocess.PIPE,
@@ -774,30 +673,25 @@ async def download_and_send(chat_id, v, ctx):
     limit = 2000 if LOCAL_API else 50
     with tempfile.TemporaryDirectory() as tmp:
         path, errors = None, []
-        # اول بدون پروکسی (سریع‌تر)؛ اگر نشد و DL_PROXY تنظیم شده، همه روش‌ها دوباره از پشت پروکسی
-        for proxy in [None] + ([DL_PROXY] if DL_PROXY else []):
-            tag = "proxy " if proxy else ""
-            for attempt in range(2):  # 1) دانلود مستقیم
-                try:
-                    path = await http_download(v["video"], v["page"], tmp, limit, proxy=proxy)
-                    break
-                except RuntimeError as e:
-                    if "محدودیت" in str(e):
-                        raise
-                    errors.append(f"{tag}direct: {e}")
-                    break
-                except Exception as e:
-                    errors.append(f"{tag}direct#{attempt + 1}: {type(e).__name__}: {e}")
-                    await asyncio.sleep(2)
-            for target in (v["video"], v["page"]):  # 2) yt-dlp روی لینک ویدیو، بعد روی صفحه
-                if path:
-                    break
-                try:
-                    path = await ytdlp_download(target, v["page"], tmp, proxy)
-                except Exception as e:
-                    errors.append(f"{tag}yt-dlp: {e}")
+        for attempt in range(2):  # 1) دانلود مستقیم
+            try:
+                path = await http_download(v["video"], v["page"], tmp, limit)
+                break
+            except RuntimeError as e:
+                if "محدودیت" in str(e):
+                    raise
+                errors.append(f"direct: {e}")
+                break
+            except Exception as e:
+                errors.append(f"direct#{attempt + 1}: {type(e).__name__}: {e}")
+                await asyncio.sleep(2)
+        for target in (v["video"], v["page"]):  # 2) yt-dlp روی لینک ویدیو، بعد روی صفحه
             if path:
                 break
+            try:
+                path = await ytdlp_download(target, v["page"], tmp)
+            except Exception as e:
+                errors.append(f"yt-dlp: {e}")
         if not path:
             raise RuntimeError("\n".join(errors)[-700:] or "دانلود ناموفق")
         size = os.path.getsize(path)
@@ -836,13 +730,13 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if action == "sqs":
             if i not in SITES:
                 return await q.edit_message_text("این سایت حذف شده.")
-            cr, where = SearchCrawler(query, [SITES[i]["url"]], False), SITES[i]["name"]
+            cr, where = SearchCrawler(query, [SITES[i]["url"]]), SITES[i]["name"]
         elif i == "all":
             if not SITES:
                 return await q.edit_message_text("هیچ سایتی ذخیره نشده.")
-            cr, where = SearchCrawler(query, [v["url"] for v in SITES.values()], False), "همه سایت‌های من"
+            cr, where = SearchCrawler(query, [v["url"] for v in SITES.values()]), "همه سایت‌های من"
         else:
-            cr, where = SearchCrawler(query, None, True), "کل وب"
+            return
         await q.edit_message_text(f"🔎 جستجوی «{query}» در {where} ...")
         CRAWLERS[chat_id] = cr
         return await send_batch(chat_id, ctx)
@@ -932,8 +826,7 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         else:
             msg = str(e)
             if re.search(r"(Redirection detected|require login|geo|not available in your country|403)", msg, re.I):
-                msg = ("این سایت دانلود رو از IP سرور (کشور سرور) بسته یا لاگین می‌خواد.\n"
-                       "راه‌حل: تنظیم پروکسی با DL_PROXY روی سرور.\n\n" + msg[-500:])
+                msg = "این سایت دانلود رو از IP سرور بسته یا لاگین می‌خواد.\n\n" + msg[-500:]
             await status.edit_text(f"❌ خطا: {msg}"[:4000])
 
 
