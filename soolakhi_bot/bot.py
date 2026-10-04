@@ -425,16 +425,16 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def http_download(url: str, referer: str, dest_dir: str, limit_mb: int, depth=0):
     """دانلود مستقیم با هدرهای مرورگر (خیلی از سایت‌ها yt-dlp را می‌بندند ولی مرورگر را نه).
     اگر به‌جای فایل، صفحه HTML برگشت، لینک ویدیو را از آن درمی‌آورد."""
-    hdr = {**HEADERS, "Referer": referer, "Accept": "*/*", "Accept-Language": "en-US,en;q=0.9,fa;q=0.8",
-           "Origin": f"{urlparse(referer).scheme}://{urlparse(referer).netloc}"}
-    async with httpx.AsyncClient(headers=hdr, follow_redirects=True, http2=True,
+    # هدر ساده (تست روی takcdn نشان داد هدرهای اضافه/HTTP2 باعث قطع اتصال می‌شود)
+    hdr = {**HEADERS, "Referer": referer}
+    async with httpx.AsyncClient(headers=hdr, follow_redirects=True,
                                  timeout=httpx.Timeout(60, read=120)) as c:
         if depth == 0:
             try:  # اول صفحه را باز کن تا کوکی‌های سایت (session/cloudflare) گرفته شود
                 await c.get(referer, headers={"Accept": "text/html"})
             except Exception:
                 pass
-        async with c.stream("GET", url, headers={"Range": "bytes=0-"}) as r:
+        async with c.stream("GET", url) as r:
             r.raise_for_status()
             ctype = r.headers.get("content-type", "").lower()
             if "text/html" in ctype:
@@ -486,12 +486,15 @@ async def download_and_send(chat_id, v, ctx):
     with tempfile.TemporaryDirectory() as tmp:
         path, errors = None, []
         # 1) دانلود مستقیم با هدر مرورگر  2) yt-dlp روی لینک ویدیو  3) yt-dlp روی خود صفحه
-        try:
-            path = await http_download(v["video"], v["page"], tmp, limit)
-        except RuntimeError:
-            raise
-        except Exception as e:
-            errors.append(f"direct: {type(e).__name__}: {e} | {v['video']}")
+        for attempt in range(3):
+            try:
+                path = await http_download(v["video"], v["page"], tmp, limit)
+                break
+            except RuntimeError:
+                raise
+            except Exception as e:
+                errors.append(f"direct#{attempt + 1}: {type(e).__name__}: {e}")
+                await asyncio.sleep(2)
         for target in (v["video"], v["page"]):
             if path:
                 break
