@@ -65,8 +65,8 @@ def main() -> None:
             "realitySettings": {"serverName": cfg.reality_sni, "fingerprint": "chrome",
                                 "publicKey": cfg.reality_public_key, "shortId": cfg.reality_short_id}}))
 
-    try_config("CDN XHTTP (through Cloudflare)", 30802, vless(
-        links.cdn_address(), cfg.cdn_port, u.uuid, stream={
+    try_config(f"CDN XHTTP (through Cloudflare, port {links.cdn_public_port()})", 30802, vless(
+        links.cdn_address(), links.cdn_public_port(), u.uuid, stream={
             "network": "xhttp", "security": "tls",
             "tlsSettings": {"serverName": cfg.domain, "fingerprint": "chrome", "alpn": ["h2", "http/1.1"]},
             "xhttpSettings": {"host": cfg.domain, "path": cfg.cdn_path, "mode": "packet-up"}}))

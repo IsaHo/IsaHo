@@ -11,6 +11,11 @@ def cdn_address() -> str:
     return db.get_setting("cdn_address") or cfg.domain
 
 
+def cdn_public_port() -> int:
+    """Port clients dial on Cloudflare. 443 needs an Origin Rule rewriting it to CDN_PORT."""
+    return int(db.get_setting("cdn_public_port") or cfg.cdn_port)
+
+
 def reality_link(u) -> str:
     q = urlencode({
         "encryption": "none", "flow": "xtls-rprx-vision", "security": "reality",
@@ -26,7 +31,7 @@ def cdn_link(u) -> str:
         "alpn": "h2,http/1.1", "type": "xhttp", "host": cfg.domain, "path": cfg.cdn_path,
         "mode": "packet-up",
     })
-    return f"vless://{u.uuid}@{cdn_address()}:{cfg.cdn_port}?{q}#{quote(f'{cfg.brand}-{u.name}-CDN')}"
+    return f"vless://{u.uuid}@{cdn_address()}:{cdn_public_port()}?{q}#{quote(f'{cfg.brand}-{u.name}-CDN')}"
 
 
 def all_links(u) -> list:

@@ -486,12 +486,13 @@ async def settings_menu(msg: Message):
         f"IP سرور: <code>{cfg.server_ip}</code>\n"
         f"دامنه: <code>{cfg.domain}</code>\n"
         f"Reality: پورت {cfg.reality_port} | SNI <code>{cfg.reality_sni}</code>\n"
-        f"CDN (XHTTP): پورت {cfg.cdn_port} | path <code>{cfg.cdn_path}</code>\n"
+        f"CDN (XHTTP): پورت کلادفلر {links.cdn_public_port()} → سرور {cfg.cdn_port} | path <code>{cfg.cdn_path}</code>\n"
         f"آدرس اتصال CDN: <code>{links.cdn_address()}</code>\n"
         f"سابسکریپشن: پورت {cfg.sub_port}"
     )
     await msg.answer(text, reply_markup=ikb([
         [("🌐 تنظیم IP تمیز کلادفلر", "set:cdn")],
+        [("🔌 پورت CDN: 443", "set:port:443"), (f"🔌 پورت CDN: {cfg.cdn_port}", f"set:port:{cfg.cdn_port}")],
         [("🔄 ریستارت Xray", "set:restart"), ("🛠 بازسازی کانفیگ", "set:rebuild")],
     ]))
 
@@ -509,6 +510,20 @@ async def settings_rebuild(cb: CallbackQuery):
         await cb.answer("✅ کانفیگ بازسازی و اعمال شد")
     except Exception as e:
         await cb.answer(f"❌ {e}"[:190], show_alert=True)
+
+
+@router.callback_query(F.data.startswith("set:port:"), admin)
+async def settings_port(cb: CallbackQuery):
+    port = cb.data.rsplit(":", 1)[1]
+    db.set_setting("cdn_public_port", "" if port == str(cfg.cdn_port) else port)
+    await cb.answer(f"✅ پورت CDN در لینک‌ها: {port}", show_alert=True)
+    if port == "443":
+        await cb.message.answer(
+            "⚠️ برای پورت 443 باید در کلادفلر یک Origin Rule بسازید:\n"
+            "Rules ← Origin Rules ← Create rule\n"
+            f"• Custom filter: Hostname equals <code>{cfg.domain}</code> AND Server Port equals <code>443</code>\n"
+            f"• Destination Port → Rewrite to <code>{cfg.cdn_port}</code>\n\n"
+            "بعد کاربران فقط سابسکریپشن را آپدیت کنند. تست: <code>isaho doctor</code>")
 
 
 @router.callback_query(F.data == "set:cdn", admin)
