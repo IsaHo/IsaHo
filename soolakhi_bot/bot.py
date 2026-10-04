@@ -39,6 +39,11 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 log = logging.getLogger("bot")
 
 VIDEOS: dict[str, dict] = {}  # id -> {title, image, page, video}
+EXTERNAL: dict[str, list] = {}  # page url -> لینک پلیرها/فایل‌هاست‌های خارجی
+# فایل‌هاست‌ها: لینک .mp4 دارند ولی صفحه دانلود (کپچا/اشتراک) هستند نه فایل مستقیم
+FILE_HOSTS = re.compile(r"(nitroflare|rapidgator|uploaded|katfile|ddownload|turbobit|filefactory|mega\.nz|"
+                        r"1fichier|uptobox|k2s|keep2share|fboom|alfafile|hitfile|mexa|clicknupload)\.", re.I)
+PLAYER_HINT = re.compile(r"(player|vid|embed|stream|watch|play|tube|dood|filemoon|voe|streamtape)", re.I)
 CARD_HINTS: dict[str, dict] = {}  # page url -> {title, image} از کارت‌های صفحه لیست
 
 
@@ -181,6 +186,17 @@ def parse_page(url: str, html: str, domain: str):
                 and not re.search(r"\.(pdf|zip|rar|css|js|xml|json)(\?|$)", u, re.I):
             links.add(u)
     videos = {v for v in videos if v.startswith("http")}
+    ext = [v for v in videos if FILE_HOSTS.search(v)]
+    videos -= set(ext)
+    for a in soup.find_all("a", href=True):  # دکمه‌های «پخش/دانلود» به سایت‌های دیگر
+        u = J(a["href"])
+        host = urlparse(u).netloc.removeprefix("www.")
+        if u.startswith("http") and host and host != domain and u not in ext and \
+                (FILE_HOSTS.search(u) or PLAYER_HINT.search(host) or
+                 re.search(r"(download|direct|player|play|دانلود|پخش)", " ".join(a.get("class", [])) + a.get_text(), re.I)):
+            if not re.search(r"(t\.me|telegram|instagram|twitter|x\.com|facebook|whatsapp|google)", host, re.I):
+                ext.append(u)
+    EXTERNAL[url] = ext[:6]
 
     # کارت‌های صفحه لیست: لینک + عکس بندانگشتی + عنوان هر ویدیو
     for a in soup.find_all("a", href=True):
@@ -280,9 +296,12 @@ class Crawler:
                     image = hint["image"]
                 if hint.get("title") and (not title or title == url or len(title) < 4):
                     title = hint["title"]
+                ext = EXTERNAL.pop(url, [])
+                if not videos and ext:
+                    videos = {url}  # فقط لینک پلیر/فایل‌هاست دارد → کارت با دکمه‌های لینک
                 for v in videos:
                     i = vid_id(v)
-                    VIDEOS.setdefault(i, {"title": title, "image": image, "page": url, "video": v})
+                    VIDEOS.setdefault(i, {"title": title, "image": image, "page": url, "video": v, "ext": ext})
                     if i not in self.sent:
                         self.sent.add(i)
                         found.append(i)
@@ -305,7 +324,11 @@ def allowed(update: Update) -> bool:
 def video_kb(i: str) -> InlineKeyboardMarkup:
     fav = InlineKeyboardButton("❌ حذف از ذخیره‌ها", callback_data=f"unfav:{i}") if i in FAVS \
         else InlineKeyboardButton("⭐ ذخیره", callback_data=f"fav:{i}")
-    return InlineKeyboardMarkup([[InlineKeyboardButton("⬇️ دانلود", callback_data=f"dl:{i}"), fav]])
+    rows = [[InlineKeyboardButton("⬇️ دانلود", callback_data=f"dl:{i}"), fav]]
+    v = VIDEOS.get(i) or FAVS.get(i) or {}
+    links = [InlineKeyboardButton(f"▶️ {urlparse(u).netloc.removeprefix('www.')[:20]}", url=u) for u in v.get("ext", [])]
+    rows += [links[k:k + 2] for k in range(0, len(links), 2)]
+    return InlineKeyboardMarkup(rows)
 
 
 async def fetch_image(url: str, referer: str):
@@ -599,7 +622,11 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await status.delete()
     except Exception as e:
         log.exception("download failed")
-        await status.edit_text(f"❌ خطا: {e}")
+        if v.get("ext"):
+            await status.edit_text("❌ این ویدیو فایل مستقیم نداره و فقط روی پلیر/فایل‌هاست خارجی هست.\n"
+                                   "از دکمه‌های ▶️ زیر عکس ویدیو استفاده کن.")
+        else:
+            await status.edit_text(f"❌ خطا: {e}"[:4000])
 
 
 async def cmd_debug(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
