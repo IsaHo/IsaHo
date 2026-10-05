@@ -112,7 +112,7 @@ WantedBy=multi-user.target
 UNIT
 
     SEND_PROXY=""
-    grep -q "send-proxy-v2" /etc/haproxy/haproxy.cfg 2>/dev/null && SEND_PROXY=" send-proxy-v2"
+    grep -q "send-proxy-v2" /etc/haproxy/haproxy.cfg 2>/dev/null && SEND_PROXY=" send-proxy-v2 check-send-proxy"
     [[ -f /etc/haproxy/haproxy.cfg.orig ]] || cp /etc/haproxy/haproxy.cfg /etc/haproxy/haproxy.cfg.orig 2>/dev/null || true
     {
         cat <<CFG
@@ -134,11 +134,15 @@ frontend vpn
 
 backend tunnels
     balance leastconn
+    # a plain TCP check would pass even when Xray on the far side is down (ssh accepts the local
+    # connection first); a TLS hello must get a real TLS answer back through the tunnel
+    option ssl-hello-chk
+    default-server on-marked-down shutdown-sessions
 CFG
-        for i in $(seq 1 "$TUNNELS"); do echo "    server t$i 127.0.0.1:1000$i check inter 10s fall 2 rise 1$SEND_PROXY"; done
+        for i in $(seq 1 "$TUNNELS"); do echo "    server t$i 127.0.0.1:1000$i check inter 5s fall 2 rise 2$SEND_PROXY"; done
         # extra foreign servers never get the PROXY header (only the main server reads it)
         for j in $(seq 1 $(( ${#FOREIGNS[@]} - 1 ))); do
-            for i in $(seq 1 "$TUNNELS"); do echo "    server n${j}_$i 127.0.0.1:$((12000 + j * 10 + i)) check inter 10s fall 2 rise 1"; done
+            for i in $(seq 1 "$TUNNELS"); do echo "    server n${j}_$i 127.0.0.1:$((12000 + j * 10 + i)) check inter 5s fall 2 rise 2"; done
         done
         cat <<CFG
 
@@ -268,7 +272,8 @@ if isinstance(want, bool) and want != report["proxy"]:
     out = []
     for line in lines:
         if line.strip().startswith("server t"):
-            line = line.replace(" send-proxy-v2", "") + (" send-proxy-v2" if want else "")
+            line = line.replace(" check-send-proxy", "").replace(" send-proxy-v2", "")
+            line += " send-proxy-v2 check-send-proxy" if want else ""
         out.append(line)
     open(path + ".new", "w").write("\n".join(out) + "\n")
     if subprocess.run(["haproxy", "-c", "-f", path + ".new"], capture_output=True).returncode == 0:
