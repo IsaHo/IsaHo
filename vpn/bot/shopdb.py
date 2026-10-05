@@ -1,4 +1,5 @@
 """Storage for the shop: plans, orders, discount codes and customers (wallet, referrals, resellers)."""
+import hashlib
 import time
 from dataclasses import dataclass
 from typing import Optional
@@ -37,6 +38,13 @@ CREATE TABLE IF NOT EXISTS discounts (
     max_uses INTEGER NOT NULL DEFAULT 0,
     used INTEGER NOT NULL DEFAULT 0,
     expires_at INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS sms_log (
+    hash TEXT PRIMARY KEY,
+    text TEXT NOT NULL,
+    at INTEGER NOT NULL,
+    order_id INTEGER,
+    result TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS customers (
     tg_id INTEGER PRIMARY KEY,
@@ -239,6 +247,50 @@ def decide_order(order_id: int, status: str, admin_id: int) -> bool:
         cur = c.execute("UPDATE orders SET status=?, decided_at=?, decided_by=? WHERE id=? AND status='pending'",
                         (status, int(time.time()), admin_id, order_id))
         return cur.rowcount == 1
+
+
+def auto_approve(order_id: int) -> bool:
+    """waiting/pending -> approved by SMS; False if already decided."""
+    with db.connect() as c:
+        cur = c.execute("UPDATE orders SET status='approved', decided_at=?, decided_by=0 "
+                        "WHERE id=? AND status IN ('waiting','pending')", (int(time.time()), order_id))
+        return cur.rowcount == 1
+
+
+def open_orders(since: int) -> list:
+    with db.connect() as c:
+        return [Order(**dict(r)) for r in c.execute(
+            "SELECT * FROM orders WHERE status IN ('waiting','pending') AND created_at>=? ORDER BY id", (since,))]
+
+
+def expire_waiting(before: int) -> list:
+    """Cancel unpaid orders (no receipt) older than `before`; returns them so wallets can be refunded."""
+    with db.connect() as c:
+        rows = [Order(**dict(r)) for r in c.execute(
+            "SELECT * FROM orders WHERE status='waiting' AND created_at<?", (before,))]
+        c.execute("UPDATE orders SET status='canceled' WHERE status='waiting' AND created_at<?", (before,))
+        return rows
+
+
+def log_sms(text: str) -> bool:
+    """Remember an SMS; False if this exact message was already processed."""
+    h = hashlib.sha256(text.encode()).hexdigest()
+    with db.connect() as c:
+        if c.execute("SELECT 1 FROM sms_log WHERE hash=?", (h,)).fetchone():
+            return False
+        c.execute("INSERT INTO sms_log (hash, text, at) VALUES (?, ?, ?)", (h, text[:1000], int(time.time())))
+        return True
+
+
+def sms_result(text: str, order_id, result: str) -> None:
+    h = hashlib.sha256(text.encode()).hexdigest()
+    with db.connect() as c:
+        c.execute("UPDATE sms_log SET order_id=?, result=? WHERE hash=?", (order_id, result, h))
+
+
+def last_sms(n: int = 5) -> list:
+    with db.connect() as c:
+        return [dict(r) for r in c.execute("SELECT * FROM sms_log ORDER BY at DESC LIMIT ?", (n,))]
 
 
 def pending_orders() -> list:

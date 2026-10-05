@@ -43,10 +43,26 @@ async def _relay_report(request: web.Request) -> web.Response:
     return web.json_response(relays.record(data))
 
 
+async def _pay_sms(request: web.Request) -> web.Response:
+    import shop
+    import smspay
+    if not request.query.get("key") or request.query.get("key") != db.get_setting("sms_key"):
+        raise web.HTTPNotFound()
+    if request.content_type == "application/json":
+        text = (await request.json()).get("text", "")
+    elif request.content_type in ("application/x-www-form-urlencoded", "multipart/form-data"):
+        text = (await request.post()).get("text", "")
+    else:
+        text = await request.text()
+    result = await shop.handle_sms(str(text)[:2000]) if smspay.enabled() else "disabled"
+    return web.Response(text=result)
+
+
 async def start() -> web.AppRunner:
     app = web.Application(client_max_size=64 * 1024)
     app.router.add_get("/sub/{token}", _sub)
     app.router.add_post("/relay/report", _relay_report)
+    app.router.add_post("/pay/sms", _pay_sms)
     runner = web.AppRunner(app, access_log=None)
     await runner.setup()
     ctx = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
