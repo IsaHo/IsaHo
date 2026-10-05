@@ -32,6 +32,7 @@ import time
 from datetime import datetime
 from urllib.parse import urljoin
 
+import requests
 from bs4 import BeautifulSoup
 from telegram import (
     InlineKeyboardButton,
@@ -53,7 +54,7 @@ from telegram.ext import (
     filters,
 )
 
-from scraper import SITE, Scraper
+from scraper import SITE, Scraper, Series
 
 logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s", level=logging.INFO
@@ -87,6 +88,9 @@ CATALOG_FILE = os.path.join(DATA_DIR, "catalog.json")
 FOLLOWS_FILE = os.path.join(DATA_DIR, "follows.json")
 ALLOWED_FILE = os.path.join(DATA_DIR, "allowed.json")
 META_FILE = os.path.join(DATA_DIR, "meta.json")   # کاور/خلاصه/تعداد قسمت هر داستان
+FAVS_FILE = os.path.join(DATA_DIR, "favs.json")   # علاقه‌مندی‌ها
+TG_FILE = os.path.join(DATA_DIR, "telegraph.json")  # توکن و صفحه‌های ساخته‌شدهٔ تلگراف
+TG_API = "https://api.telegra.ph"
 CATALOG_TTL = 6 * 3600
 CATALOG_VERSION = 4               # با تغییر ساختار کاتالوگ، کش قدیمی باطل می‌شود
 ENRICH_PAUSE = 3                  # مکث بین خواندن اطلاعات داستان‌ها در پس‌زمینه (ثانیه)
@@ -106,8 +110,10 @@ BTN_ALLSTORIES = "📚 همهٔ داستان‌ها"
 BTN_ALLLINKS = "🔗 لینک همهٔ قسمت‌ها"
 BTN_UPDATES = "🆕 بروزرسانی‌ها"
 BTN_FOLLOWS = "📖 دنبال‌شده‌ها"
+BTN_FAVS = "❤️ علاقه‌مندی‌ها"
 BTN_FOLLOW_EDIT = "🗑 حذف از دنبال‌شده‌ها"
 BTN_IDS = "👤 مدیریت آیدی‌ها"
+BTN_PRIVACY = "🧹 حریم خصوصی"  # منوی آن در لانچرِ مشترک (bot.py) است
 BTN_HOME = "🏠 منوی اصلی"  # در لانچرِ مشترک (bot.py) برای برگشت به انتخاب سرراست/سولاخی
 BTN_NEXT = "صفحهٔ بعد ▶️"
 BTN_PREV = "◀️ صفحهٔ قبل"
@@ -115,7 +121,7 @@ BTN_BACK = "⬅️ بازگشت"
 
 # همهٔ دکمه‌های کیبوردِ این بخش (لانچر از این برای تشخیص بخش استفاده می‌کند)
 MENU_BUTTONS = {BTN_CONTINUE, BTN_SEARCH, BTN_CATS, BTN_CAT_FRESH, BTN_CAT_NEW, BTN_CAT_LONG,
-                BTN_ALLSTORIES, BTN_ALLLINKS, BTN_UPDATES, BTN_FOLLOWS, BTN_FOLLOW_EDIT, BTN_IDS}
+                BTN_ALLSTORIES, BTN_ALLLINKS, BTN_UPDATES, BTN_FOLLOWS, BTN_FOLLOW_EDIT, BTN_IDS, BTN_FAVS}
 
 scraper = Scraper()
 _lock = threading.Lock()
@@ -258,6 +264,70 @@ def del_follow(uid, url):
             _write(FOLLOWS_FILE, d)
 
 
+# favs: {uid: {series_url: {title, ts}}}
+def is_fav(uid, url) -> bool:
+    return url in (_read(FAVS_FILE) or {}).get(str(uid), {})
+
+
+def toggle_fav(uid, url, title) -> bool:
+    """علاقه‌مندی را برعکس می‌کند؛ True = الان در علاقه‌مندی‌هاست."""
+    with _lock:
+        d = _read(FAVS_FILE) or {}
+        u = d.setdefault(str(uid), {})
+        if url in u:
+            u.pop(url)
+            now = False
+        else:
+            u[url] = {"title": title, "ts": time.time()}
+            now = True
+        _write(FAVS_FILE, d)
+    return now
+
+
+def list_favs(uid):
+    items = list((_read(FAVS_FILE) or {}).get(str(uid), {}).items())
+    items.sort(key=lambda kv: kv[1].get("ts", 0), reverse=True)
+    return items
+
+
+# ----------------------------- telegraph (خواندن داخل تلگرام) -----------------------------
+
+def _tg(method: str, **params):
+    r = requests.post(f"{TG_API}/{method}", data=params, timeout=30)
+    j = r.json()
+    if not j.get("ok"):
+        raise RuntimeError(j.get("error") or "telegraph error")
+    return j["result"]
+
+
+def telegraph_page(series_title: str, series_url: str, ch) -> str:
+    """یک صفحهٔ تلگراف با همهٔ صفحه‌های قسمت می‌سازد (فقط آدرس عکس‌ها؛ هیچ دانلودی نیست).
+    صفحه‌های ساخته‌شده کش می‌شوند تا دوباره ساخته نشوند."""
+    d = _read(TG_FILE) or {}
+    cached = d.get("pages", {}).get(ch.url)
+    if cached:
+        return cached
+    imgs = scraper.get_images(ch.url)
+    if not imgs:
+        raise RuntimeError("صفحه‌ای برای این قسمت پیدا نشد")
+    token = d.get("token") or _tg("createAccount", short_name="sarrast", author_name="سرراست")["access_token"]
+    content = [{"tag": "img", "attrs": {"src": u}} for u in imgs]
+    content.append({"tag": "p", "children": [
+        {"tag": "a", "attrs": {"href": ch.url}, "children": ["🌐 نسخهٔ سایت"]}]})
+    url = _tg("createPage", access_token=token, title=f"{series_title} — {ch.label}"[:256],
+              author_name="سرراست", author_url=series_url,
+              content=json.dumps(content, ensure_ascii=False), return_content="false")["url"]
+    with _lock:
+        d = _read(TG_FILE) or {}
+        d["token"] = token
+        pages = d.setdefault("pages", {})
+        pages[ch.url] = url
+        while len(pages) > 5000:
+            pages.pop(next(iter(pages)))
+        _write(TG_FILE, d)
+    return url
+
+
 # ----------------------------- catalog / search -----------------------------
 
 async def ensure_catalog(context, chat_id):
@@ -293,9 +363,10 @@ def main_kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         [[BTN_CONTINUE],
          [BTN_SEARCH, BTN_CATS],
-         [BTN_ALLSTORIES, BTN_FOLLOWS],
-         [BTN_ALLLINKS, BTN_UPDATES],
-         [BTN_IDS, BTN_HOME]],
+         [BTN_FAVS, BTN_FOLLOWS],
+         [BTN_ALLSTORIES, BTN_ALLLINKS],
+         [BTN_UPDATES, BTN_IDS],
+         [BTN_PRIVACY, BTN_HOME]],
         resize_keyboard=True, is_persistent=True,
         input_field_placeholder="اسم داستان، شمارهٔ قسمت، یا لینک رو بفرست",
     )
@@ -413,6 +484,27 @@ async def show_follows(context, chat_id, ud):
         reply_markup=ReplyKeyboardMarkup(rows, resize_keyboard=True, is_persistent=True))
 
 
+async def show_favs(context, chat_id, ud):
+    favs = list_favs(ud["uid"])
+    if not favs:
+        await context.bot.send_message(
+            chat_id, "🤍 هنوز علاقه‌مندی نداری.\nروی کارت هر داستان «🤍 علاقه‌مندی» رو بزن.", reply_markup=main_kb())
+        return
+    follows = dict(list_follows(ud["uid"]))
+    ud["pick_map"] = {}
+    rows = []
+    for url, info in favs:
+        last = (follows.get(url) or {}).get("last_num")
+        label = _uniq(f"❤️ {info['title']}" + (f" (تا قسمت {last})" if last else ""), ud["pick_map"])
+        ud["pick_map"][label] = url
+        rows.append([KeyboardButton(label)])
+    rows.append([KeyboardButton(BTN_BACK)])
+    ud["await_pick"] = True
+    await context.bot.send_message(
+        chat_id, f"❤️ علاقه‌مندی‌هات ({len(favs)}):\n(برای حذف، روی کارت داستان «❤️» رو بزن)",
+        reply_markup=ReplyKeyboardMarkup(rows, resize_keyboard=True, is_persistent=True))
+
+
 async def show_follow_edit(context, chat_id, ud, edit_msg=None):
     items = list_follows(ud["uid"])
     if not items:
@@ -497,18 +589,25 @@ def card_caption(series, last_num) -> str:
     return "\n".join(lines)[:1020]
 
 
-def card_kb(series, last_num) -> InlineKeyboardMarkup:
+def tg_cb(slug: str, idx: int) -> str:
+    return _cb(f"s.tg:{slug}:{idx}", f"s.tg::{idx}")
+
+
+def card_kb(series, last_num, fav: bool = False) -> InlineKeyboardMarkup:
     chapters, slug = series.chapters, slug_of(series.url)
     nxt = _next_idx(chapters, last_num)
     if nxt is None:
-        first = InlineKeyboardButton("🎉 همه رو خوندی — از اول", callback_data=ch_cb(slug, 0))
+        i, read = 0, "🎉 همه رو خوندی — از اول (داخل تلگرام)"
     elif last_num is None:
-        first = InlineKeyboardButton(f"▶️ شروع از {chapters[0].label}", callback_data=ch_cb(slug, 0))
+        i, read = 0, f"📖 شروع {chapters[0].label} داخل تلگرام"
     else:
-        first = InlineKeyboardButton(f"▶️ ادامه از {chapters[nxt].label}", callback_data=ch_cb(slug, nxt))
+        i, read = nxt, f"📖 ادامه {chapters[nxt].label} داخل تلگرام"
     return InlineKeyboardMarkup([
-        [first],
-        [InlineKeyboardButton(f"🆕 آخرین ({chapters[-1].label})", callback_data=ch_cb(slug, len(chapters) - 1)),
+        [InlineKeyboardButton(read, callback_data=tg_cb(slug, i))],
+        [InlineKeyboardButton(f"🔗 لینک {chapters[i].label}", callback_data=ch_cb(slug, i)),
+         InlineKeyboardButton(f"🆕 آخرین ({chapters[-1].label})", callback_data=ch_cb(slug, len(chapters) - 1))],
+        [InlineKeyboardButton("❤️ در علاقه‌مندی‌ها" if fav else "🤍 علاقه‌مندی",
+                              callback_data=_cb(f"s.fav:{slug}", "s.fav:")),
          InlineKeyboardButton("🔗 همهٔ لینک‌ها", callback_data=_cb(f"s.all:{slug}", "s.all:"))],
         [InlineKeyboardButton("🌐 صفحهٔ داستان در سایت", url=series.url)],
     ])
@@ -544,7 +643,7 @@ async def open_series(context, chat_id, ud, any_url, status_msg=None):
         except Exception:
             pass
     await send_with_cover(context, chat_id, series.cover, card_caption(series, last_num),
-                          card_kb(series, last_num))
+                          card_kb(series, last_num, is_fav(ud["uid"], series.url)))
     await context.bot.send_message(chat_id, "✏️ یا شمارهٔ قسمت رو بفرست.", reply_markup=main_kb())
     return True
 
@@ -591,7 +690,8 @@ async def do_continue(context, chat_id, ud, url=None):
 
 
 def chapter_link_markup(idx, total, url, slug=""):
-    rows = [[InlineKeyboardButton("🌐 باز کردن در مرورگر", url=url)]]
+    rows = [[InlineKeyboardButton("📖 خواندن داخل تلگرام", callback_data=tg_cb(slug, idx)),
+             InlineKeyboardButton("🌐 مرورگر", url=url)]]
     nav = []
     if idx > 0:
         nav.append(InlineKeyboardButton("⬅️ قسمت قبل", callback_data=ch_cb(slug, idx - 1) if slug else f"go:{idx-1}"))
@@ -611,6 +711,42 @@ async def send_chapter_link(context, chat_id, ud, idx):
         chat_id, f"🔗 {ch.label} از {len(chapters)} — «{ud['title']}»\n{ch.url}",
         reply_markup=chapter_link_markup(idx, len(chapters), ch.url, slug_of(ud["series_url"])),
         disable_web_page_preview=True)
+
+
+def reader_kb(slug, idx, total, url) -> InlineKeyboardMarkup:
+    nav = []
+    if idx > 0:
+        nav.append(InlineKeyboardButton("⬅️ قسمت قبل", callback_data=tg_cb(slug, idx - 1)))
+    if idx + 1 < total:
+        nav.append(InlineKeyboardButton("قسمت بعد ➡️", callback_data=tg_cb(slug, idx + 1)))
+    return InlineKeyboardMarkup(([nav] if nav else []) + [[InlineKeyboardButton("🌐 نسخهٔ سایت", url=url)]])
+
+
+async def send_reader(context, chat_id, ud, idx):
+    """خواندن داخل تلگرام: صفحهٔ تلگراف (Instant View) با همهٔ صفحه‌های قسمت."""
+    chapters = ud["chapters"]
+    ch = chapters[idx]
+    status = await context.bot.send_message(chat_id, f"⏳ آماده‌سازی {ch.label} برای خواندن داخل تلگرام...")
+    try:
+        url = await asyncio.to_thread(telegraph_page, ud["title"], ud["series_url"], ch)
+    except Exception as e:
+        log.warning("telegraph %s: %s", ch.url, e)
+        try:
+            await status.edit_text(
+                f"❌ نشد صفحهٔ خواندن رو بسازم ({e}).\nاز نسخهٔ سایت بخون:",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🌐 باز کردن در مرورگر", url=ch.url)]]))
+        except Exception:
+            pass
+        return
+    follow_story(ud["uid"], ud["series_url"], ud["title"], len(chapters),
+                 last_num=int(ch.num) if ch.num == int(ch.num) else ch.num)
+    try:
+        await status.delete()
+    except Exception:
+        pass
+    await context.bot.send_message(
+        chat_id, f"📖 {ch.label} از {len(chapters)} — «{ud['title']}»\n{url}",
+        reply_markup=reader_kb(slug_of(ud["series_url"]), idx, len(chapters), ch.url))
 
 
 async def send_all_links(context, chat_id, ud):
@@ -646,7 +782,7 @@ async def check_updates(app, notify_chat=None):
 
     # قسمت‌های جدیدِ داستان‌های دنبال‌شده
     follows = load_follows()
-    chapter_updates = {}  # uid -> [(title, new_count, old_count, url)]
+    chapter_updates = {}  # uid -> [(series, old_count)]
     for uid, d in follows.items():
         for url, info in list(d.items()):
             try:
@@ -656,32 +792,56 @@ async def check_updates(app, notify_chat=None):
             update_meta(sr)
             new_count = len(sr.chapters)
             if new_count > info.get("count", 0):
-                chapter_updates.setdefault(uid, []).append(
-                    (sr.title, new_count, info.get("count", 0), url))
+                chapter_updates.setdefault(uid, []).append((sr, info.get("count", 0)))
             info["count"] = new_count
             info["title"] = sr.title
     save_follows(follows)
 
     targets = [str(t) for t in all_allowed()] or list(follows.keys())
 
-    # اطلاع‌رسانی داستان‌های جدید (در اجرای اول خبر نمی‌دهیم تا اسپم نشود)
+    ctx = _BotCtx(app.bot)
+    # اطلاع‌رسانی داستان‌های جدید با کارت (در اجرای اول خبر نمی‌دهیم تا اسپم نشود)
     if new_series and not first_run:
-        head = f"🆕 {len(new_series)} داستان جدید به سایت اضافه شد:"
-        body = "\n".join(f"• {it['title']}\n{it['url']}" for it in new_series[:20])
         for t in targets:
+            for it in new_series[:5]:
+                cap = f"🆕 داستان جدید در سایت\n📖 {it['title']}" + (
+                    f"\n📚 {it['latest']} قسمت" if it.get("latest") else "")
+                kb = InlineKeyboardMarkup([
+                    [InlineKeyboardButton("📖 باز کردن کارت داستان", callback_data=_cb(f"s.open:{it['slug']}", "s.open:"))],
+                    [InlineKeyboardButton("🌐 صفحهٔ داستان", url=it["url"])]])
+                try:
+                    await send_with_cover(ctx, int(t), it.get("cover"), cap, kb)
+                except Exception:
+                    pass
+            if len(new_series) > 5:
+                rest = "\n".join(f"• {it['title']}\n{it['url']}" for it in new_series[5:25])
+                try:
+                    await app.bot.send_message(int(t), f"🆕 و {len(new_series) - 5} داستان جدید دیگه:\n{rest}",
+                                               disable_web_page_preview=True)
+                except Exception:
+                    pass
+
+    # اطلاع‌رسانی قسمت‌های جدید با کارت (کاور + دکمهٔ خواندن همان قسمت)
+    for uid, ups in chapter_updates.items():
+        for sr, old in ups[:8]:
+            slug, n = slug_of(sr.url), len(sr.chapters)
+            i = min(old, n - 1)
+            cap = (("❤️ " if is_fav(uid, sr.url) else "") +
+                   f"🔔 قسمت جدید!\n📖 {sr.title}\n📚 {n - old} قسمت جدید — حالا {n} قسمت")
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton(f"📖 خواندن {sr.chapters[i].label} داخل تلگرام", callback_data=tg_cb(slug, i))],
+                [InlineKeyboardButton(f"🔗 لینک {sr.chapters[i].label}", callback_data=ch_cb(slug, i)),
+                 InlineKeyboardButton("🌐 سایت", url=sr.chapters[i].url)]])
             try:
-                await app.bot.send_message(int(t), head + "\n" + body, disable_web_page_preview=True)
+                await send_with_cover(ctx, int(uid), sr.cover, cap, kb)
             except Exception:
                 pass
-
-    # اطلاع‌رسانی قسمت‌های جدید
-    for uid, ups in chapter_updates.items():
-        msg = "📣 قسمت‌های جدید:\n" + "\n".join(
-            f"• «{t}»: {n - o} قسمت جدید (الان {n} قسمت)\n{u}" for t, n, o, u in ups)
-        try:
-            await app.bot.send_message(int(uid), msg, disable_web_page_preview=True)
-        except Exception:
-            pass
+        if len(ups) > 8:
+            rest = "\n".join(f"• «{sr.title}»: حالا {len(sr.chapters)} قسمت" for sr, _ in ups[8:])
+            try:
+                await app.bot.send_message(int(uid), "📣 قسمت جدید در داستان‌های دیگه:\n" + rest)
+            except Exception:
+                pass
 
     if notify_chat:
         n_new = 0 if first_run else len(new_series)
@@ -692,6 +852,12 @@ async def check_updates(app, notify_chat=None):
             f"داستان‌های دارای قسمت جدید: {n_ch}"
             + ("\n(اجرای اول بود؛ فهرست ذخیره شد و از این به بعد تغییرات خبر داده می‌شه.)" if first_run else ""),
             reply_markup=main_kb())
+
+
+class _BotCtx:
+    """برای فراخوانی توابعی که context.bot می‌خواهند، از داخل حلقه‌های پس‌زمینه."""
+    def __init__(self, bot):
+        self.bot = bot
 
 
 async def updater_loop(app):
@@ -754,6 +920,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📚 سرراست\n\n"
         "🔎 اسم داستان رو بفرست تا توی کل سایت بگردم\n"
         "▶️ «ادامهٔ خواندن» = قسمت بعدیِ آخرین داستانی که خوندی\n"
+        "📖 هر قسمت رو داخل خود تلگرام بخون (بدون مرورگر و تبلیغ)\n"
+        "❤️ داستان‌های محبوبت رو توی علاقه‌مندی‌ها نگه دار\n"
         "🗂 «دسته‌بندی‌ها» = تازه آپدیت‌شده / تازه اضافه‌شده / پرقسمت‌ترین\n"
         "🔔 قسمت جدیدِ داستان‌هات و داستان‌های جدید سایت خودکار خبر داده می‌شه\n\n"
         "💡 توی هر چتی بنویس @" + (context.bot.username or "bot") + " و اسم داستان، تا سریع پیداش کنی.",
@@ -882,6 +1050,9 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     if text == BTN_CONTINUE:
         await do_continue(context, chat_id, ud)
+        return
+    if text == BTN_FAVS:
+        await show_favs(context, chat_id, ud)
         return
     if text == BTN_CATS:
         ud["await_pick"] = False
@@ -1023,6 +1194,37 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             idx = int(idx)
             if 0 <= idx < len(ud["chapters"]):
                 await send_chapter_link(context, chat_id, ud, idx)
+        return
+    if data.startswith("s.tg:"):
+        slug, _, idx = data[5:].rpartition(":")
+        await q.answer()
+        if slug and not await ensure_series(context, chat_id, ud, slug):
+            return
+        if not ud.get("chapters"):
+            await context.bot.send_message(chat_id, "داستان رو دوباره باز کن.", reply_markup=main_kb())
+            return
+        idx = int(idx)
+        if 0 <= idx < len(ud["chapters"]):
+            await send_reader(context, chat_id, ud, idx)
+        return
+    if data.startswith("s.fav:"):
+        slug = data[6:] or slug_of(ud.get("series_url") or "")
+        if not slug or not await ensure_series(context, chat_id, ud, slug):
+            await q.answer("داستان رو دوباره باز کن.", show_alert=True)
+            return
+        now = toggle_fav(ud["uid"], ud["series_url"], ud["title"])
+        await q.answer("❤️ به علاقه‌مندی‌ها اضافه شد" if now else "از علاقه‌مندی‌ها حذف شد")
+        last = dict(list_follows(ud["uid"])).get(ud["series_url"], {}).get("last_num")
+        sr = Series(title=ud["title"], url=ud["series_url"], chapters=ud["chapters"])
+        try:
+            await q.message.edit_reply_markup(card_kb(sr, last, now))
+        except Exception:
+            pass
+        return
+    if data.startswith("s.open:"):
+        await q.answer()
+        if data[7:]:
+            await open_series(context, chat_id, ud, series_url_of(data[7:]))
         return
     if data.startswith("s.all:"):
         await q.answer()

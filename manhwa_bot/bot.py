@@ -7,6 +7,7 @@ bot.py — لانچرِ مشترک: «سرراست» و «سولاخی» داخ�
     پس پیام‌های قدیمی بعد از عوض‌کردن بخش هم کار می‌کنند.
   • دسترسی هر دو بخش با همان «👤 مدیریت آیدی‌ها»ی سرراست کنترل می‌شود.
   • اعلان‌های خودکار هر دو (بروزرسانی سرراست + ویدیوی جدید سولاخی) فعال‌اند.
+  • 🧹 حریم خصوصی (برای کل چت): پاک شدن خودکار پیام‌ها + «همین الان پاک کن».
 
 کد هر ربات دست‌نخورده در فایل خودش است:
   manhwa_bot/sarrast.py        ← ربات سرراست
@@ -17,28 +18,34 @@ bot.py — لانچرِ مشترک: «سرراست» و «سولاخی» داخ�
 
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import json
 import logging
 import os
 import sys
 
-from telegram import BotCommand, ReplyKeyboardMarkup, Update
+from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, Update
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
+    ExtBot,
     InlineQueryHandler,
     MessageHandler,
     filters,
 )
+from telegram.request import HTTPXRequest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 # سرراست اول لود می‌شود تا .env (BOT_TOKEN) را در محیط بگذارد؛ سولاخی هنگام import به آن نیاز دارد.
 import sarrast  # noqa: E402
+import privacy  # noqa: E402
+
+privacy.init(sarrast.DATA_DIR)
 
 
 def _load_module(name: str, path: str):
@@ -56,13 +63,14 @@ log = logging.getLogger("launcher")
 BTN_SARRAST = "📚 سرراست"
 BTN_SOOLAKHI = "🎬 سولاخی"
 BTN_HOME = sarrast.BTN_HOME
-ROOT_KB = ReplyKeyboardMarkup([[BTN_SARRAST, BTN_SOOLAKHI]], resize_keyboard=True, is_persistent=True)
+BTN_PRIVACY = sarrast.BTN_PRIVACY
+ROOT_KB = ReplyKeyboardMarkup([[BTN_SARRAST, BTN_SOOLAKHI], [BTN_PRIVACY]], resize_keyboard=True, is_persistent=True)
 
 # دسترسی یکپارچه: سولاخی هم از لیست آیدی‌های سرراست (مدیر + اضافه‌شده‌ها) پیروی کند
 soolakhi.allowed = lambda update: sarrast.authorized(update)
 # دکمهٔ برگشت به منوی اصلی در منوی سولاخی
 soolakhi.MENU = ReplyKeyboardMarkup(
-    [list(r) for r in soolakhi.MENU.keyboard] + [[BTN_HOME]], resize_keyboard=True)
+    [list(r) for r in soolakhi.MENU.keyboard] + [[BTN_PRIVACY, BTN_HOME]], resize_keyboard=True)
 
 # دکمه‌هایی که فقط مال یک بخش‌اند (برای وقتی که بعد از ری‌استارت حالت معلوم نیست)
 _SARRAST_BTNS = set(sarrast.MENU_BUTTONS)
@@ -106,6 +114,93 @@ def set_mode(uid, mode: str | None) -> None:
     os.replace(tmp, MODE_FILE)
 
 
+# ---------- ربات با ثبت پیام‌ها (برای پاک‌سازی حریم خصوصی) ----------
+
+class TrackingBot(ExtBot):
+    """همان ربات معمولی؛ فقط آیدی هر پیامی که می‌فرستد را برای پاک‌سازی بعدی ثبت می‌کند."""
+
+    async def send_message(self, *a, **k):
+        return _tracked(await super().send_message(*a, **k))
+
+    async def send_photo(self, *a, **k):
+        return _tracked(await super().send_photo(*a, **k))
+
+    async def send_document(self, *a, **k):
+        return _tracked(await super().send_document(*a, **k))
+
+    async def send_video(self, *a, **k):
+        return _tracked(await super().send_video(*a, **k))
+
+    async def send_animation(self, *a, **k):
+        return _tracked(await super().send_animation(*a, **k))
+
+    async def send_audio(self, *a, **k):
+        return _tracked(await super().send_audio(*a, **k))
+
+    async def send_media_group(self, *a, **k):
+        msgs = await super().send_media_group(*a, **k)
+        for m in msgs:
+            _tracked(m)
+        return msgs
+
+
+def _tracked(msg):
+    privacy.track_message(msg)
+    return msg
+
+
+def privacy_text(chat_id) -> str:
+    d = privacy.get_delay(chat_id)
+    return ("🧹 حریم خصوصی\n\n"
+            f"⏱ پاک شدن خودکار پیام‌ها: {privacy.delay_label(d)}\n"
+            "(هم پیام‌های ربات، هم پیام‌هایی که تو فرستادی — در هر دو بخش)\n\n"
+            "🧹 «همین الان پاک کن» همهٔ پیام‌های این چت از ۴۸ ساعت اخیر رو پاک می‌کنه.\n"
+            "ℹ️ تلگرام به ربات اجازهٔ پاک کردن پیام‌های قدیمی‌تر از ۴۸ ساعت رو نمی‌ده.")
+
+
+def privacy_kb(chat_id) -> InlineKeyboardMarkup:
+    d = privacy.get_delay(chat_id)
+    opts = [InlineKeyboardButton(("✅ " if sec == d else "") + label, callback_data=f"p.ad:{sec}")
+            for sec, label in privacy.DELAYS]
+    return InlineKeyboardMarkup([opts[:2], opts[2:], [InlineKeyboardButton("🧹 همین الان پاک کن", callback_data="p.clean")]])
+
+
+async def on_privacy_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    if not sarrast.authorized(update):
+        return await q.answer("⛔ دسترسی ندارید", show_alert=True)
+    chat_id = q.message.chat_id
+    if q.data.startswith("p.ad:"):
+        sec = int(q.data[5:])
+        privacy.set_delay(chat_id, sec)
+        await q.answer(f"⏱ پاک شدن خودکار: {privacy.delay_label(sec)}")
+        try:
+            await q.message.edit_text(privacy_text(chat_id), reply_markup=privacy_kb(chat_id))
+        except Exception:
+            pass
+        return
+    if q.data == "p.clean":
+        await q.answer("🧹 در حال پاک کردن...")
+        ids = privacy.pop_all(chat_id)
+        if q.message.message_id not in ids:
+            ids.append(q.message.message_id)
+        n = await privacy.delete_ids(context.bot, chat_id, ids)
+        mode = get_mode(update.effective_user.id)
+        kb = sarrast.main_kb() if mode == "sarrast" else soolakhi.MENU if mode == "soolakhi" else ROOT_KB
+        await context.bot.send_message(chat_id, f"🧹 چت پاک شد ({n} پیام).", reply_markup=kb)
+
+
+async def autodelete_loop(app: Application):
+    """هر ۳۰ ثانیه پیام‌هایی که وقت پاک شدنشان رسیده را پاک می‌کند."""
+    while True:
+        await asyncio.sleep(30)
+        try:
+            for chat_id, ids in privacy.pop_due().items():
+                await privacy.delete_ids(app.bot, chat_id, ids)
+        except Exception:
+            log.exception("autodelete")
+
+
 # ---------- handlers ----------
 
 async def show_root(update: Update, text: str = None):
@@ -122,6 +217,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not sarrast.authorized(update):
         await update.message.reply_text("⛔ این ربات خصوصی است.")
         return
+    privacy.track_message(update.message)
     set_mode(update.effective_user.id, None)
     await show_root(update)
 
@@ -140,7 +236,11 @@ async def route_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     uid = update.effective_user.id
     t = (update.message.text or "").strip()
+    privacy.track_message(update.message)
 
+    if t == BTN_PRIVACY:
+        chat_id = update.effective_chat.id
+        return await update.message.reply_text(privacy_text(chat_id), reply_markup=privacy_kb(chat_id))
     if t == BTN_SARRAST:
         return await enter(update, context, "sarrast")
     if t == BTN_SOOLAKHI:
@@ -167,6 +267,8 @@ async def route_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def route_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     d = update.callback_query.data or ""
+    if d.startswith("p."):
+        return await on_privacy_callback(update, context)
     if d in _SARRAST_CB_EXACT or d.startswith(_SARRAST_CB_PREFIXES):
         return await sarrast.on_callback(update, context)
     return await soolakhi.on_button(update, context)
@@ -175,6 +277,7 @@ async def route_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def post_init(app: Application):
     sarrast.start_background(app)          # بروزرسانی‌ها + جمع‌کردن اطلاعات داستان‌ها
     app.create_task(soolakhi.watch_loop(app))
+    app.create_task(autodelete_loop(app))
     for fn, txt in ((app.bot.set_my_short_description, "📚 سرراست + 🎬 سولاخی — مانهوا و ویدیو در یک ربات"),
                     (app.bot.set_my_description,
                      "📚 سرراست: جستجو، کارت داستان، ادامهٔ خواندن، دسته‌بندی و اعلان قسمت جدید\n"
@@ -195,10 +298,13 @@ async def post_init(app: Application):
 def main():
     if not sarrast.BOT_TOKEN:
         raise SystemExit("BOT_TOKEN تنظیم نشده (در manhwa_bot/.env).")
-    b = Application.builder().token(sarrast.BOT_TOKEN).concurrent_updates(True)
+    extra = {}
     if soolakhi.LOCAL_API:  # سرور Local Bot API برای آپلود تا 2GB (اختیاری)
-        b = b.base_url(soolakhi.LOCAL_API).local_mode(True)
-    app = b.post_init(post_init).build()
+        extra = {"base_url": soolakhi.LOCAL_API, "local_mode": True}
+    bot = TrackingBot(sarrast.BOT_TOKEN,
+                      request=HTTPXRequest(connection_pool_size=256),
+                      get_updates_request=HTTPXRequest(connection_pool_size=1), **extra)
+    app = Application.builder().bot(bot).concurrent_updates(True).post_init(post_init).build()
 
     app.add_handler(CommandHandler(["start", "help"], cmd_start))
     # سرراست
