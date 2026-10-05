@@ -1,6 +1,2 @@
-favorites.json
-sites.json
-blocked.json
-settings.json
+*.json
 __pycache__/
-seen.json

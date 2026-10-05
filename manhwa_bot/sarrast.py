@@ -90,6 +90,8 @@ ALLOWED_FILE = os.path.join(DATA_DIR, "allowed.json")
 META_FILE = os.path.join(DATA_DIR, "meta.json")   # کاور/خلاصه/تعداد قسمت هر داستان
 FAVS_FILE = os.path.join(DATA_DIR, "favs.json")   # علاقه‌مندی‌ها
 SHELVES_FILE = os.path.join(DATA_DIR, "shelves.json")  # قفسه‌ها: دارم می‌خونم / تمومش کردم / بعداً
+RATINGS_FILE = os.path.join(DATA_DIR, "ratings.json")  # امتیاز شخصی ۱ تا ۵ ستاره
+NOTIFY_FILE = os.path.join(DATA_DIR, "notify.json")    # تنظیم اعلان‌های هر کاربر
 CATALOG_TTL = 6 * 3600
 CATALOG_VERSION = 4               # با تغییر ساختار کاتالوگ، کش قدیمی باطل می‌شود
 ENRICH_PAUSE = 3                  # مکث بین خواندن اطلاعات داستان‌ها در پس‌زمینه (ثانیه)
@@ -117,6 +119,10 @@ SHELF_BY_LABEL = {v: k for k, v in SHELVES}
 SHELF_SHORT = {"r": "📖 می‌خونم", "d": "✅ تموم شد", "l": "🕒 بعداً"}
 BTN_FOLLOW_EDIT = "🗑 حذف از دنبال‌شده‌ها"
 BTN_IDS = "👤 مدیریت آیدی‌ها"
+BTN_NOTIFY = "🔔 اعلان‌ها"
+NOTIFY_MODES = [("all", "🔔 همه: قسمت جدیدِ همهٔ دنبال‌شده‌ها + داستان‌های جدید سایت"),
+                ("fav", "❤️ فقط قسمت جدیدِ علاقه‌مندی‌ها"),
+                ("off", "🔕 خاموش")]
 BTN_PRIVACY = "🧹 حریم خصوصی"  # منوی آن در لانچرِ مشترک (bot.py) است
 BTN_HOME = "🏠 منوی اصلی"  # در لانچرِ مشترک (bot.py) برای برگشت به انتخاب سرراست/سولاخی
 BTN_NEXT = "صفحهٔ بعد ▶️"
@@ -126,7 +132,7 @@ BTN_BACK = "⬅️ بازگشت"
 # همهٔ دکمه‌های کیبوردِ این بخش (لانچر از این برای تشخیص بخش استفاده می‌کند)
 MENU_BUTTONS = {BTN_CONTINUE, BTN_SEARCH, BTN_CATS, BTN_CAT_FRESH, BTN_CAT_NEW, BTN_CAT_LONG,
                 BTN_ALLSTORIES, BTN_ALLLINKS, BTN_UPDATES, BTN_FOLLOWS, BTN_FOLLOW_EDIT, BTN_IDS, BTN_FAVS,
-                BTN_SHELVES, *SHELF_LABEL.values()}
+                BTN_SHELVES, BTN_NOTIFY, *SHELF_LABEL.values()}
 
 scraper = Scraper()
 _lock = threading.Lock()
@@ -317,6 +323,109 @@ def list_shelf(uid, shelf):
     return items
 
 
+# ratings: {uid: {series_url: {r: 1..5, title, ts}}}
+def get_rating(uid, url) -> int:
+    return int(((_read(RATINGS_FILE) or {}).get(str(uid), {}).get(url) or {}).get("r") or 0)
+
+
+def set_rating(uid, url, title, r: int) -> None:
+    with _lock:
+        d = _read(RATINGS_FILE) or {}
+        u = d.setdefault(str(uid), {})
+        if r:
+            u[url] = {"r": int(r), "title": title, "ts": time.time()}
+        else:
+            u.pop(url, None)
+        _write(RATINGS_FILE, d)
+
+
+def ratings_of(uid) -> dict:
+    return {url: int(i.get("r") or 0) for url, i in (_read(RATINGS_FILE) or {}).get(str(uid), {}).items()}
+
+
+def stars(r: int) -> str:
+    return "⭐" * r if r else ""
+
+
+def by_rating(uid, items):
+    """[(url, info), ...] → امتیاز بالاتر اول؛ ترتیب قبلی (جدیدترین) بین هم‌امتیازها حفظ می‌شود."""
+    rt = ratings_of(uid)
+    return sorted(items, key=lambda kv: -rt.get(kv[0], 0))
+
+
+# notify: {uid: "all" | "fav" | "off"}
+def get_notify(uid) -> str:
+    return (_read(NOTIFY_FILE) or {}).get(str(uid), "all")
+
+
+def set_notify(uid, mode: str) -> None:
+    with _lock:
+        d = _read(NOTIFY_FILE) or {}
+        d[str(uid)] = mode
+        _write(NOTIFY_FILE, d)
+
+
+def notify_kb(uid) -> InlineKeyboardMarkup:
+    cur = get_notify(uid)
+    return InlineKeyboardMarkup([[InlineKeyboardButton(("✅ " if cur == k else "") + label, callback_data=f"s.nt:{k}")]
+                                 for k, label in NOTIFY_MODES])
+
+
+# ----------------------------- 🎯 داستان بعدی -----------------------------
+
+def suggest_next(uid, exclude_url=None, n=3) -> list[tuple[str, dict]]:
+    """پیشنهاد داستان بعدی از بین داستان‌هایی که هنوز باز نکردی:
+    🕒 قفسهٔ «بعداً می‌خونم»، 🔥 تازه آپدیت‌شده، 📈 پرقسمت، ✨ تازه اضافه‌شده."""
+    items = load_catalog_items()
+    by_slug = {it["slug"]: it for it in items}
+    # «خونده‌شده» = لینک حداقل یک قسمتش رو گرفتی، یا توی قفسهٔ «می‌خونم/تموم شد» هست (مقایسه با slug)
+    seen = {slug_of(u) for u, i in list_follows(uid) if i.get("last_num") is not None}
+    shelved = (_read(SHELVES_FILE) or {}).get(str(uid), {})
+    seen |= {slug_of(u) for u, i in shelved.items() if i.get("shelf") in ("r", "d")}
+    if exclude_url:
+        seen.add(slug_of(exclude_url))
+    meta = load_meta()
+    out, used = [], set()
+
+    def take(tag, it):
+        if it and it["slug"] not in seen and it["slug"] not in used and len(out) < n:
+            used.add(it["slug"])
+            out.append((tag, it))
+            return True
+        return False
+
+    for u, _ in list_shelf(uid, "l"):           # چیزی که خودت گذاشتی برای بعد
+        it = by_slug.get(slug_of(u)) or {"slug": slug_of(u), "url": u, "title": shelved[u].get("title", "")}
+        if take("🕒 گذاشته بودی برای بعد", it):
+            break
+    fresh = sorted((it for it in items if it.get("fresh")), key=lambda x: x.get("rank", 0))
+    longest = sorted(items, key=lambda x: -((meta.get(x["slug"]) or {}).get("count") or x.get("latest") or 0))
+    newest = sorted(items, key=lambda x: -x.get("first_seen", 0))
+    for tag, lst in (("🔥 تازه آپدیت شده", fresh), ("📈 پرقسمت", longest), ("✨ تازه اضافه شده", newest)):
+        for it in lst:
+            if take(tag, it):
+                break
+    for it in sorted(items, key=lambda x: x.get("rank", 0)):   # اگر هنوز کم بود
+        if len(out) >= n:
+            break
+        take("📚 از سایت", it)
+    return out
+
+
+async def send_suggestions(context, chat_id, uid, exclude_url=None, header="🎯 داستان بعدی چی بخونی؟"):
+    sug = suggest_next(uid, exclude_url)
+    if not sug:
+        await context.bot.send_message(chat_id, "🎯 فعلاً پیشنهادی ندارم؛ فهرست سایت هنوز کامل نشده.")
+        return
+    meta = load_meta()
+    lines, rows = [header, ""], []
+    for tag, it in sug:
+        cnt = (meta.get(it["slug"]) or {}).get("count") or it.get("latest")
+        lines.append(f"{tag}: «{it['title']}»" + (f" — {cnt} قسمت" if cnt else ""))
+        rows.append([InlineKeyboardButton(f"📖 {it['title']}"[:60], callback_data=_cb(f"s.open:{it['slug']}", "s.open:"))])
+    await context.bot.send_message(chat_id, "\n".join(lines), reply_markup=InlineKeyboardMarkup(rows))
+
+
 # ----------------------------- لینک اختصاصی هر داستان -----------------------------
 
 BOT_USERNAME = ""   # در start_background پر می‌شود
@@ -372,7 +481,7 @@ def main_kb() -> ReplyKeyboardMarkup:
          [BTN_SEARCH, BTN_CATS],
          [BTN_FAVS, BTN_SHELVES, BTN_FOLLOWS],
          [BTN_ALLSTORIES, BTN_ALLLINKS],
-         [BTN_UPDATES, BTN_IDS],
+         [BTN_UPDATES, BTN_NOTIFY, BTN_IDS],
          [BTN_PRIVACY, BTN_HOME]],
         resize_keyboard=True, is_persistent=True,
         input_field_placeholder="اسم داستان، شمارهٔ قسمت، یا لینک رو بفرست",
@@ -492,23 +601,25 @@ async def show_follows(context, chat_id, ud):
 
 
 async def show_favs(context, chat_id, ud):
-    favs = list_favs(ud["uid"])
+    favs = by_rating(ud["uid"], list_favs(ud["uid"]))
     if not favs:
         await context.bot.send_message(
             chat_id, "🤍 هنوز علاقه‌مندی نداری.\nروی کارت هر داستان «🤍 علاقه‌مندی» رو بزن.", reply_markup=main_kb())
         return
     follows = dict(list_follows(ud["uid"]))
+    rt = ratings_of(ud["uid"])
     ud["pick_map"] = {}
     rows = []
     for url, info in favs:
         last = (follows.get(url) or {}).get("last_num")
-        label = _uniq(f"❤️ {info['title']}" + (f" (تا قسمت {last})" if last else ""), ud["pick_map"])
+        label = _uniq(f"❤️ {info['title']}" + (f" (تا قسمت {last})" if last else "")
+                      + (f" {stars(rt[url])}" if rt.get(url) else ""), ud["pick_map"])
         ud["pick_map"][label] = url
         rows.append([KeyboardButton(label)])
     rows.append([KeyboardButton(BTN_BACK)])
     ud["await_pick"] = True
     await context.bot.send_message(
-        chat_id, f"❤️ علاقه‌مندی‌هات ({len(favs)}):\n(برای حذف، روی کارت داستان «❤️» رو بزن)",
+        chat_id, f"❤️ علاقه‌مندی‌هات ({len(favs)}) — امتیاز بالاتر اول:\n(برای حذف، روی کارت داستان «❤️» رو بزن)",
         reply_markup=ReplyKeyboardMarkup(rows, resize_keyboard=True, is_persistent=True))
 
 
@@ -596,7 +707,7 @@ def card_caption(series, last_num) -> str:
     return "\n".join(lines)[:1020]
 
 
-def card_kb(series, last_num, fav: bool = False, shelf=None) -> InlineKeyboardMarkup:
+def card_kb(series, last_num, fav: bool = False, shelf=None, rating: int = 0) -> InlineKeyboardMarkup:
     chapters, slug = series.chapters, slug_of(series.url)
     nxt = _next_idx(chapters, last_num)
     if nxt is None:
@@ -615,8 +726,11 @@ def card_kb(series, last_num, fav: bool = False, shelf=None) -> InlineKeyboardMa
          InlineKeyboardButton("🔗 همهٔ لینک‌ها", callback_data=_cb(f"s.all:{slug}", "s.all:"))],
         [InlineKeyboardButton(("✓ " if shelf == k else "") + SHELF_SHORT[k],
                               callback_data=_cb(f"s.sh:{k}:{slug}", f"s.sh:{k}:")) for k, _ in SHELVES],
+        [InlineKeyboardButton("⭐" if k <= rating else "☆", callback_data=_cb(f"s.rt:{k}:{slug}", f"s.rt:{k}:"))
+         for k in range(1, 6)],
         [InlineKeyboardButton("❤️ در علاقه‌مندی‌ها" if fav else "🤍 علاقه‌مندی",
-                              callback_data=_cb(f"s.fav:{slug}", "s.fav:"))],
+                              callback_data=_cb(f"s.fav:{slug}", "s.fav:")),
+         InlineKeyboardButton("🎯 بعدی چی بخونم؟", callback_data=_cb(f"s.nx:{slug}", "s.nx:"))],
         last_row,
     ])
 
@@ -627,7 +741,8 @@ async def _refresh_card(q, ud):
     last = dict(list_follows(uid)).get(url, {}).get("last_num")
     sr = Series(title=ud["title"], url=url, chapters=ud["chapters"])
     try:
-        await q.message.edit_reply_markup(card_kb(sr, last, is_fav(uid, url), get_shelf(uid, url)))
+        await q.message.edit_reply_markup(card_kb(sr, last, is_fav(uid, url), get_shelf(uid, url),
+                                                  get_rating(uid, url)))
     except Exception:
         pass
 
@@ -663,7 +778,7 @@ async def open_series(context, chat_id, ud, any_url, status_msg=None):
             pass
     await send_with_cover(context, chat_id, series.cover, card_caption(series, last_num),
                           card_kb(series, last_num, is_fav(ud["uid"], series.url),
-                                  get_shelf(ud["uid"], series.url)))
+                                  get_shelf(ud["uid"], series.url), get_rating(ud["uid"], series.url)))
     await context.bot.send_message(chat_id, "✏️ یا شمارهٔ قسمت رو بفرست.", reply_markup=main_kb())
     return True
 
@@ -705,12 +820,16 @@ async def do_continue(context, chat_id, ud, url=None):
         await context.bot.send_message(
             chat_id, f"🎉 «{ud['title']}» رو تا آخر ({ud['chapters'][-1].label}) خوندی.\n"
                      f"قسمت جدید که بیاد خبرت می‌کنم.", reply_markup=main_kb())
+        await send_suggestions(context, chat_id, ud["uid"], ud["series_url"])
         return
     await send_chapter_link(context, chat_id, ud, idx)
 
 
 def chapter_link_markup(idx, total, url, slug=""):
     rows = [[InlineKeyboardButton("🌐 باز کردن در مرورگر", url=url)]]
+    if idx + 1 >= total:   # آخرین قسمت
+        rows.append([InlineKeyboardButton("✅ تمومش کردم", callback_data=_cb(f"s.sh:d:{slug}", "s.sh:d:")),
+                     InlineKeyboardButton("🎯 داستان بعدی", callback_data=_cb(f"s.nx:{slug}", "s.nx:"))])
     nav = []
     if idx > 0:
         nav.append(InlineKeyboardButton("⬅️ قسمت قبل", callback_data=ch_cb(slug, idx - 1) if slug else f"go:{idx-1}"))
@@ -783,6 +902,15 @@ async def check_updates(app, notify_chat=None):
     save_follows(follows)
 
     targets = [str(t) for t in all_allowed()] or list(follows.keys())
+    targets = [t for t in targets if get_notify(t) == "all"]       # داستان جدید فقط برای حالت «همه»
+    for uid in list(chapter_updates):
+        mode = get_notify(uid)
+        if mode == "off":
+            chapter_updates.pop(uid)
+        elif mode == "fav":
+            chapter_updates[uid] = [(sr, old) for sr, old in chapter_updates[uid] if is_fav(uid, sr.url)]
+            if not chapter_updates[uid]:
+                chapter_updates.pop(uid)
 
     ctx = _BotCtx(app.bot)
     # اطلاع‌رسانی داستان‌های جدید با کارت (در اجرای اول خبر نمی‌دهیم تا اسپم نشود)
@@ -1051,15 +1179,21 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     if text in SHELF_BY_LABEL:
         k = SHELF_BY_LABEL[text]
-        items = list_shelf(ud["uid"], k)
+        items = by_rating(ud["uid"], list_shelf(ud["uid"], k))
         if not items:
             await update.message.reply_text(f"{text}: خالیه.", reply_markup=main_kb())
             return
         follows = dict(list_follows(ud["uid"]))
+        rt = ratings_of(ud["uid"])
         await show_picker(context, chat_id, ud, [
             {"title": info["title"] + (f" (تا قسمت {(follows.get(u) or {}).get('last_num')})"
-                                       if (follows.get(u) or {}).get("last_num") else ""),
-             "slug": slug_of(u), "url": u} for u, info in items], f"{text} ({len(items)}):")
+                                       if (follows.get(u) or {}).get("last_num") else "")
+                      + (f" {stars(rt[u])}" if rt.get(u) else ""),
+             "slug": slug_of(u), "url": u} for u, info in items], f"{text} ({len(items)}) — امتیاز بالاتر اول:")
+        return
+    if text == BTN_NOTIFY:
+        await update.message.reply_text(
+            "🔔 اعلان‌ها — کدوم خبرها برات بیاد؟\n(هر ۲ ساعت سایت چک می‌شه)", reply_markup=notify_kb(ud["uid"]))
         return
     if text == BTN_CATS:
         ud["await_pick"] = False
@@ -1217,10 +1351,44 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if k not in SHELF_LABEL or not slug or not await ensure_series(context, chat_id, ud, slug):
             await q.answer("داستان رو دوباره باز کن.", show_alert=True)
             return
-        new = None if get_shelf(ud["uid"], ud["series_url"]) == k else k
+        cur = get_shelf(ud["uid"], ud["series_url"])
+        rm = getattr(q.message, "reply_markup", None)
+        from_link = bool(rm) and not any(       # دکمهٔ زیر لینکِ آخرین قسمت (نه کارت داستان)
+            (b.callback_data or "").startswith("s.rt:") for row in rm.inline_keyboard for b in row)
+        new = k if from_link else (None if cur == k else k)   # دکمهٔ «تمومش کردم» زیر لینک فقط علامت می‌زند
         set_shelf(ud["uid"], ud["series_url"], ud["title"], new)
         await q.answer(f"🗄 {SHELF_LABEL[new]}" if new else "از قفسه برداشته شد")
+        if not from_link:
+            await _refresh_card(q, ud)
+        if new == "d" and cur != "d":
+            await send_suggestions(context, chat_id, ud["uid"], ud["series_url"],
+                                   header=f"✅ «{ud['title']}» رفت توی قفسهٔ تموم‌شده‌ها.\n🎯 حالا چی بخونی؟")
+        return
+    if data.startswith("s.rt:"):
+        k, _, slug = data[5:].partition(":")
+        slug = slug or slug_of(ud.get("series_url") or "")
+        if not k.isdigit() or not slug or not await ensure_series(context, chat_id, ud, slug):
+            await q.answer("داستان رو دوباره باز کن.", show_alert=True)
+            return
+        r = 0 if get_rating(ud["uid"], ud["series_url"]) == int(k) else int(k)
+        set_rating(ud["uid"], ud["series_url"], ud["title"], r)
+        await q.answer(f"{stars(r)} امتیاز ثبت شد" if r else "امتیاز برداشته شد")
         await _refresh_card(q, ud)
+        return
+    if data.startswith("s.nx:"):
+        await q.answer()
+        url = series_url_of(data[5:]) if data[5:] else ud.get("series_url")
+        await send_suggestions(context, chat_id, ud["uid"], url)
+        return
+    if data.startswith("s.nt:"):
+        mode = data[5:]
+        if mode in dict(NOTIFY_MODES):
+            set_notify(ud["uid"], mode)
+        await q.answer("✅ ذخیره شد")
+        try:
+            await q.message.edit_reply_markup(notify_kb(ud["uid"]))
+        except Exception:
+            pass
         return
     if data.startswith("s.open:"):
         await q.answer()

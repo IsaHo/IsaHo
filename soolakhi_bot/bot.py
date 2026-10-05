@@ -58,7 +58,8 @@ FILE_HOSTS = re.compile(r"(nitroflare|rapidgator|uploaded|katfile|ddownload|turb
 CAPTCHA_HOSTS = re.compile(r"(ouo\.(io|press)|shrinkme|shrink\.|adf\.ly|linkvertise|exe\.io|exey\.io|"
                            r"shorte\.st|bc\.vc|clk\.sh|cuty\.io|gplinks|droplink|za\.gl|fc\.lc)", re.I)
 PLAYER_HINT = re.compile(r"(player|vid|embed|stream|watch|play|tube|dood|filemoon|voe|streamtape)", re.I)
-CARD_HINTS: dict[str, dict] = {}  # page url -> {title, image} از کارت‌های صفحه لیست
+CARD_HINTS: dict[str, dict] = {}  # page url -> {title, image, dur, q} از کارت‌های صفحه لیست
+PAGE_META: dict[str, dict] = {}  # page url -> {dur, q}: مدت (ثانیه) و کیفیت ویدیوی صفحه
 
 
 def load_json(path, default):
@@ -108,9 +109,104 @@ WATCH_PAGES = int(os.environ.get("WATCH_PAGES", "40"))  # صفحات بررسی�
 WATCH_MAX_SEND = 15  # حداکثر ویدیوی جدید ارسالی برای هر سایت در هر دور
 
 
+# 👁 دیده‌شده‌ها: id -> {"k": "d" (دانلود شده) | "s" (علامت دیدم), "t": زمان}
+VIEWED_FILE = os.path.join(BASE_DIR, "viewed.json")
+VIEWED: dict[str, dict] = load_json(VIEWED_FILE, {})
+VIEWED_MAX = 20000
+HIDE_SEEN = bool(_settings.get("hide_seen", False))       # دیده‌شده‌ها در اسکن‌های بعدی نیایند
+DUR_FILTER = _settings.get("dur_filter", "all")           # all / short / long
+DUR_SPLIT = 10 * 60                                        # مرز کوتاه/بلند: ۱۰ دقیقه
+DUR_LABEL = {"all": "همه", "short": "کوتاه ≤۱۰ دقیقه", "long": "بلند >۱۰ دقیقه"}
+
+# 🗂 پوشه‌های ذخیره‌ها: {"next": n, "names": {fid: name}}؛ پوشهٔ هر ویدیو در FAVS[i]["folder"]
+FOLDERS_FILE = os.path.join(BASE_DIR, "folders.json")
+FOLDERS: dict = load_json(FOLDERS_FILE, {})
+FOLDERS.setdefault("next", 1)
+FOLDERS.setdefault("names", {})
+
+
 def save_settings():
     save_json(SETTINGS_FILE, {"batch": BATCH, "concurrency": CONCURRENCY, "watch_on": WATCH["on"],
-                              "watch_hours": WATCH["hours"], "watch_chat": WATCH["chat"], "watch_last": WATCH["last"]})
+                              "watch_hours": WATCH["hours"], "watch_chat": WATCH["chat"], "watch_last": WATCH["last"],
+                              "hide_seen": HIDE_SEEN, "dur_filter": DUR_FILTER})
+
+
+def mark_viewed(i: str, kind: str = "s"):
+    import time
+    old = VIEWED.get(i, {})
+    VIEWED[i] = {"k": "d" if "d" in (kind, old.get("k")) else "s", "t": time.time()}
+    if len(VIEWED) > VIEWED_MAX:
+        for k, _ in sorted(VIEWED.items(), key=lambda kv: kv[1].get("t", 0))[:len(VIEWED) - VIEWED_MAX]:
+            VIEWED.pop(k, None)
+    save_json(VIEWED_FILE, VIEWED)
+
+
+def unmark_viewed(i: str):
+    if VIEWED.pop(i, None) is not None:
+        save_json(VIEWED_FILE, VIEWED)
+
+
+def parse_dur(val) -> int | None:
+    """مدت ویدیو به ثانیه از «PT12M30S»، «12:30»، «1:02:03» یا عدد ثانیه."""
+    if val is None:
+        return None
+    if isinstance(val, (int, float)):
+        sec = int(val)
+    else:
+        t = str(val).strip()
+        m = re.fullmatch(r"P(?:(\d+)D)?T?(?:(\d+)H)?(?:(\d+)M)?(?:([\d.]+)S)?", t, re.I)
+        if m and any(m.groups()):
+            d, h, mi, se = (float(x or 0) for x in m.groups())
+            sec = int(d * 86400 + h * 3600 + mi * 60 + se)
+        elif re.fullmatch(r"\d{1,2}(:\d{2}){1,2}", t):
+            sec = 0
+            for part in t.split(":"):
+                sec = sec * 60 + int(part)
+        elif re.fullmatch(r"\d+(\.\d+)?", t):
+            sec = int(float(t))
+        else:
+            return None
+    return sec if 0 < sec < 24 * 3600 else None
+
+
+def fmt_dur(sec) -> str:
+    h, rem = divmod(int(sec), 3600)
+    m, s_ = divmod(rem, 60)
+    return f"{h}:{m:02d}:{s_:02d}" if h else f"{m}:{s_:02d}"
+
+
+QUALITY_RE = re.compile(r"[_\-/.](2160|1440|1080|720|480|360|240)p?(?=[_\-/.]|$)", re.I)   # داخل مسیر لینک
+CARD_Q_RE = re.compile(r"(?<![\d])(2160|1440|1080|720|480|360)p(?![\d])|\b(4K|UHD|FHD|HD)\b", re.I)  # برچسب کارت
+
+
+def quality_of(urls, height=None) -> str | None:
+    """کیفیت از ارتفاع ویدیو (متاتگ/JSON-LD) یا از عدد داخل لینک فایل (مثل video_720p.mp4)."""
+    try:
+        h = int(str(height).strip()) if height else 0
+    except ValueError:
+        h = 0
+    if not h:
+        found = [int(m.group(1)) for u in urls for m in QUALITY_RE.finditer(urlparse(u).path)]
+        h = max(found, default=0)
+    return ("4K" if h >= 2160 else f"{h}p") if h >= 240 else None
+
+
+def visible(i: str) -> bool:
+    """فیلترهای کاربر: مخفی کردن دیده‌شده‌ها و فیلتر مدت (ویدیوهای بی‌مدت همیشه نمایش داده می‌شوند)."""
+    if HIDE_SEEN and i in VIEWED:
+        return False
+    d = (VIDEOS.get(i) or {}).get("dur")
+    if DUR_FILTER != "all" and d:
+        return d <= DUR_SPLIT if DUR_FILTER == "short" else d > DUR_SPLIT
+    return True
+
+
+def save_folders():
+    save_json(FOLDERS_FILE, FOLDERS)
+
+
+def folder_name(fid) -> str | None:
+    return FOLDERS["names"].get(str(fid)) if fid else None
 
 
 def save_favs():
@@ -151,6 +247,7 @@ def parse_page(url: str, html: str, domain: str):
 
     title = image = None
     videos = set()
+    dur = height = None
 
     # 1) JSON-LD (VideoObject) — دقیق‌ترین منبع تیتر/عکس/ویدیو
     for sc in soup.find_all("script", type="application/ld+json"):
@@ -168,6 +265,8 @@ def parse_page(url: str, html: str, domain: str):
             stack.extend(v for v in d.values() if isinstance(v, (dict, list)))
             if "VideoObject" in str(d.get("@type")):
                 title = title or d.get("name")
+                dur = dur or parse_dur(d.get("duration"))
+                height = height or d.get("height") or d.get("videoQuality")
                 th = d.get("thumbnailUrl") or d.get("thumbnail")
                 if isinstance(th, list): th = th[0] if th else None
                 if isinstance(th, dict): th = th.get("url") or th.get("contentUrl")
@@ -186,6 +285,11 @@ def parse_page(url: str, html: str, domain: str):
             image = cand
     for p in ("og:video", "og:video:url", "og:video:secure_url", "twitter:player:stream"):
         if meta(p): videos.add(J(meta(p)))
+    dur = dur or parse_dur(meta("video:duration") or meta("og:video:duration"))
+    if not dur:
+        it = soup.find(attrs={"itemprop": "duration"})
+        dur = parse_dur(it.get("content") or it.get_text(strip=True)) if it else None
+    height = height or meta("og:video:height")
 
     # 3) تگ‌های video/source/a و هر attribute با پسوند ویدیو
     for v in soup.find_all(["video", "source", "track", "embed", "object"]):
@@ -272,8 +376,17 @@ def parse_page(url: str, html: str, domain: str):
             t = alt if len(alt) > 3 else ""
         if thumb or t:
             old = CARD_HINTS.get(u, {})
-            CARD_HINTS[u] = {"title": old.get("title") or clean_title(t or "", site_name), "image": old.get("image") or thumb}
+            # مدت/کیفیت روی خود کارت (مثل «12:30» و «HD»)؛ فقط از متن کوتاه همان کارت
+            box_txt = a.get_text(" ", strip=True)
+            if a.parent is not None and len(a.parent.get_text(" ", strip=True)) < 300:
+                box_txt = a.parent.get_text(" ", strip=True)
+            mdur = re.search(r"(?<![\d:])(\d{1,2}:\d{2}(?::\d{2})?)(?![\d:])", box_txt)
+            mq = CARD_Q_RE.search(box_txt)
+            CARD_HINTS[u] = {"title": old.get("title") or clean_title(t or "", site_name), "image": old.get("image") or thumb,
+                             "dur": old.get("dur") or (parse_dur(mdur.group(1)) if mdur else None),
+                             "q": old.get("q") or ((f"{mq.group(1)}p" if mq.group(1) else mq.group(2).upper()) if mq else None)}
     image = J(image) if image else None
+    PAGE_META[url] = {"dur": dur, "q": quality_of(videos, height)}
     return clean_title(title, site_name)[:300], image, videos, iframes, links
 
 
@@ -304,6 +417,9 @@ async def ytdlp_info(url: str):
             return None, None
         if proc.returncode == 0:
             d = json.loads(out)
+            pm = PAGE_META.setdefault(url, {})
+            pm["dur"] = pm.get("dur") or parse_dur(d.get("duration"))
+            pm["q"] = pm.get("q") or quality_of([], d.get("height"))
             return d.get("title"), d.get("thumbnail")
     except Exception:
         pass
@@ -389,6 +505,8 @@ async def process_page(url, html, domain, sent: set, found: list, query_words=No
                         t2, img2 = await ytdlp_info(url)
                         title, image = t2 or title, img2 or image
                 hint = CARD_HINTS.pop(url, {})
+                pm = PAGE_META.pop(url, {})
+                dur, q = pm.get("dur") or hint.get("dur"), pm.get("q") or hint.get("q")
                 if hint.get("image") and (not image or looks_generic(image)):
                     image = hint["image"]
                 if hint.get("title") and (not title or title == url or len(title) < 4):
@@ -400,7 +518,8 @@ async def process_page(url, html, domain, sent: set, found: list, query_words=No
                     videos = set()  # نتیجه جستجو به کلمه ربطی ندارد
                 for v in videos:
                     i = vid_id(v)
-                    VIDEOS.setdefault(i, {"title": title, "image": image, "page": url, "video": v, "ext": ext})
+                    VIDEOS.setdefault(i, {"title": title, "image": image, "page": url, "video": v, "ext": ext,
+                                          "dur": dur, "q": q})
                     if i not in sent:
                         sent.add(i)
                         found.append(i)
@@ -494,7 +613,13 @@ def allowed(update: Update) -> bool:
 def video_kb(i: str) -> InlineKeyboardMarkup:
     fav = InlineKeyboardButton("❌ حذف از ذخیره‌ها", callback_data=f"unfav:{i}") if i in FAVS \
         else InlineKeyboardButton("⭐ ذخیره", callback_data=f"fav:{i}")
-    rows = [[InlineKeyboardButton("⬇️ دانلود", callback_data=f"dl:{i}"), fav]]
+    seen = InlineKeyboardButton("✅ دیده‌شده", callback_data=f"unseen:{i}") if i in VIEWED \
+        else InlineKeyboardButton("👁 دیدمش", callback_data=f"seen:{i}")
+    rows = [[InlineKeyboardButton("⬇️ دانلود", callback_data=f"dl:{i}"), fav, seen]]
+    if i in FAVS:
+        name = folder_name(FAVS[i].get("folder"))
+        rows.append([InlineKeyboardButton(f"🗂 پوشه: {name}" if name else "🗂 گذاشتن در پوشه",
+                                          callback_data=f"fold:{i}")])
     v = VIDEOS.get(i) or FAVS.get(i) or {}
     links = [InlineKeyboardButton(f"▶️ {urlparse(u).netloc.removeprefix('www.')[:20]}", url=u) for u in v.get("ext", [])]
     rows += [links[k:k + 2] for k in range(0, len(links), 2)]
@@ -528,8 +653,31 @@ async def fetch_image(url: str, referer: str):
     return buf
 
 
+def folder_kb(i: str) -> InlineKeyboardMarkup:
+    """انتخاب پوشه برای یک ویدیوی ذخیره‌شده (روی همان کارت)."""
+    cur = str((FAVS.get(i) or {}).get("folder") or "")
+    rows = [[InlineKeyboardButton(("✓ " if cur == fid else "") + f"📁 {name}", callback_data=f"mvf:{i}:{fid}")]
+            for fid, name in FOLDERS["names"].items()]
+    rows.append([InlineKeyboardButton(("✓ " if not cur else "") + "📂 بدون پوشه", callback_data=f"mvf:{i}:0")])
+    rows.append([InlineKeyboardButton("➕ پوشهٔ جدید", callback_data=f"newfold:{i}"),
+                 InlineKeyboardButton("⬅️ برگشت", callback_data=f"vkb:{i}")])
+    return InlineKeyboardMarkup(rows)
+
+
+def card_caption(i, v) -> str:
+    info = " • ".join(x for x in (fmt_dur(v["dur"]) if v.get("dur") else None, v.get("q")) if x)
+    seen = (VIEWED.get(i) or {}).get("k")
+    lines = [f"🎬 {v['title']}"]
+    if info:
+        lines.append(f"⏱ {info}")
+    if seen:
+        lines.append("📥 قبلاً دانلود کردی" if seen == "d" else "👁 قبلاً دیدی")
+    lines.append(f"🌐 {urlparse(v.get('page', '')).netloc.removeprefix('www.')}")
+    return "\n".join(lines)[:1000]
+
+
 async def send_card(chat_id, i, v, ctx):
-    cap = f"🎬 {v['title']}\n🌐 {urlparse(v.get('page', '')).netloc.removeprefix('www.')}"[:1000]
+    cap = card_caption(i, v)
     if v.get("image"):
         try:  # 1) تلگرام مستقیم از URL
             return await ctx.bot.send_photo(chat_id, v["image"], caption=cap, reply_markup=video_kb(i))
@@ -555,17 +703,25 @@ async def send_batch(chat_id, ctx: ContextTypes.DEFAULT_TYPE):
         return
     stop_kb = InlineKeyboardMarkup([[InlineKeyboardButton("⏹ توقف", callback_data="stop:x")]])
     msg = await ctx.bot.send_message(chat_id, f"🔄 در حال اسکن {cr.domain} ...", reply_markup=stop_kb)
-    task = asyncio.create_task(cr.next_batch())
-    last = None
-    while not task.done():
-        await asyncio.wait({task}, timeout=3)
-        if not task.done() and cr.pages != last and CRAWLERS.get(chat_id) is cr:
-            last = cr.pages
-            try:
-                await msg.edit_text(f"🔄 در حال اسکن {cr.domain}\n📄 {cr.pages} صفحه بررسی شد ...", reply_markup=stop_kb)
-            except Exception:
-                pass
-    found = task.result()
+    found, hidden, rounds, last = [], 0, 0, None
+    while True:  # اگر فیلترها بیشتر نتایج را رد کردند، کمی جلوتر هم اسکن می‌شود
+        task = asyncio.create_task(cr.next_batch())
+        while not task.done():
+            await asyncio.wait({task}, timeout=3)
+            if not task.done() and cr.pages != last and CRAWLERS.get(chat_id) is cr:
+                last = cr.pages
+                try:
+                    await msg.edit_text(f"🔄 در حال اسکن {cr.domain}\n📄 {cr.pages} صفحه بررسی شد ...",
+                                        reply_markup=stop_kb)
+                except Exception:
+                    pass
+        got = task.result()
+        vis = [i for i in got if visible(i)]
+        found += vis
+        hidden += len(got) - len(vis)
+        rounds += 1
+        if len(found) >= max(1, BATCH // 2) or cr.done or rounds >= 4 or CRAWLERS.get(chat_id) is not cr:
+            break
     try:
         await msg.delete()
     except Exception:
@@ -582,10 +738,13 @@ async def send_batch(chat_id, ctx: ContextTypes.DEFAULT_TYPE):
         if isinstance(cr, SearchCrawler) and not cr.sent:
             await ctx.bot.send_message(chat_id, f"😕 برای «{cr.query}» ویدیویی پیدا نشد.")
         else:
-            await ctx.bot.send_message(chat_id, f"✅ تمام شد ({cr.pages} صفحه بررسی شد).")
+            await ctx.bot.send_message(chat_id, f"✅ تمام شد ({cr.pages} صفحه بررسی شد)."
+                                       + (f"\n🙈 {hidden} ویدیو با فیلترها رد شد (⚙️ پنل)" if hidden else ""))
     else:
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("➡️ صفحه بعد", callback_data="next")]])
-        await ctx.bot.send_message(chat_id, f"{len(found)} ویدیو. ({cr.pages} صفحه اسکن شد)", reply_markup=kb)
+        await ctx.bot.send_message(chat_id, f"{len(found)} ویدیو. ({cr.pages} صفحه اسکن شد)"
+                                   + (f"\n🙈 {hidden} ویدیو با فیلترها رد شد (⚙️ پنل)" if hidden else ""),
+                                   reply_markup=kb)
 
 
 async def start_scan(chat_id, url, ctx):
@@ -650,6 +809,8 @@ def panel_text():
             f"💾 فضای خالی دیسک: {disk.free // 2**30} GB\n⏱ مدت روشن بودن: {fmt_uptime()}\n"
             f"📤 حداکثر حجم ارسال: {'2 GB' if LOCAL_API else '50 MB'}\n\n"
             f"📦 ویدیو در هر صفحه: {BATCH}\n⚡ صفحات همزمان: {CONCURRENCY}\n\n"
+            f"👁 دیده‌شده‌ها: {len(VIEWED)} — {'مخفی می‌شن' if HIDE_SEEN else 'با علامت نمایش داده می‌شن'}\n"
+            f"⏱ فیلتر مدت: {DUR_LABEL.get(DUR_FILTER, 'همه')}\n\n"
             f"🔔 خبر ویدیوی جدید: {'روشن ✅' if WATCH['on'] else 'خاموش ❌'} (هر {WATCH['hours']} ساعت)\n"
             f"🕒 آخرین بررسی: {fmt_ago(WATCH['last'])}")
 
@@ -668,6 +829,11 @@ def panel_kb():
         [InlineKeyboardButton(mark(BATCH, n), callback_data=f"setbatch:{n}") for n in (5, 10, 20)],
         [InlineKeyboardButton("⚡ همزمانی:", callback_data="noop:x")] +
         [InlineKeyboardButton(mark(CONCURRENCY, n), callback_data=f"setconc:{n}") for n in (4, 8, 16)],
+        [InlineKeyboardButton("👁 دیده‌شده‌ها: " + ("🙈 مخفی" if HIDE_SEEN else "✓ نمایش با علامت"),
+                              callback_data="hideseen:x")],
+        [InlineKeyboardButton("⏱ مدت:", callback_data="noop:x")] +
+        [InlineKeyboardButton(("✅ " if DUR_FILTER == k else "") + lbl, callback_data=f"setdur:{k}")
+         for k, lbl in (("all", "همه"), ("short", "کوتاه"), ("long", "بلند"))],
         [InlineKeyboardButton("🔔 خاموش کردن خبر" if WATCH["on"] else "🔔 روشن کردن خبر ویدیوی جدید",
                               callback_data="watch:toggle")],
         [InlineKeyboardButton("⏰ هر:", callback_data="noop:x")] +
@@ -676,29 +842,62 @@ def panel_kb():
         [InlineKeyboardButton("📤 پشتیبان (سایت‌ها و ذخیره‌ها)", callback_data="backup:x")],
         [InlineKeyboardButton("⬆️ آپدیت yt-dlp", callback_data="upytdlp:x"),
          InlineKeyboardButton("🧹 خالی کردن حافظه", callback_data="clearmem:x")],
+        [InlineKeyboardButton("🧽 پاک کردن سابقهٔ دیده‌شده‌ها", callback_data="clrseen:x")],
         [InlineKeyboardButton("🔄 بروزرسانی آمار", callback_data="panel:x")],
     ])
 
 
-async def show_favs(chat_id, ctx, page=0):
-    if not FAVS:
-        return await ctx.bot.send_message(chat_id, "هنوز چیزی ذخیره نکردی.")
-    items = list(FAVS.items())[::-1]  # جدیدترین اول
+def fav_menu_kb() -> InlineKeyboardMarkup:
+    count = lambda fid: sum(1 for v in FAVS.values() if str(v.get("folder") or "") == fid)
+    rows = [[InlineKeyboardButton(f"📂 همه ({len(FAVS)})", callback_data="fdir:all")]]
+    rows += [[InlineKeyboardButton(f"📁 {name} ({count(fid)})", callback_data=f"fdir:{fid}")]
+             for fid, name in FOLDERS["names"].items()]
+    if FOLDERS["names"]:
+        rows.append([InlineKeyboardButton(f"📂 بدون پوشه ({count('')})", callback_data="fdir:none")])
+    rows.append([InlineKeyboardButton("➕ پوشهٔ جدید", callback_data="newfold:x")] +
+                ([InlineKeyboardButton("🗑 حذف پوشه", callback_data="fmng:x")] if FOLDERS["names"] else []))
+    return InlineKeyboardMarkup(rows)
+
+
+async def show_fav_menu(chat_id, ctx):
+    if not FAVS and not FOLDERS["names"]:
+        return await ctx.bot.send_message(chat_id, "هنوز چیزی ذخیره نکردی. روی کارت هر ویدیو «⭐ ذخیره» رو بزن.")
+    await ctx.bot.send_message(chat_id, f"⭐ ذخیره‌ها ({len(FAVS)} ویدیو) — کدوم پوشه؟", reply_markup=fav_menu_kb())
+
+
+async def show_favs(chat_id, ctx, page=0, folder="all"):
+    items = [(i, v) for i, v in list(FAVS.items())[::-1]  # جدیدترین اول
+             if folder == "all" or str(v.get("folder") or "") == ("" if folder == "none" else folder)]
+    name = {"all": "همه", "none": "بدون پوشه"}.get(folder) or folder_name(folder) or "?"
+    if not items:
+        return await ctx.bot.send_message(chat_id, f"📂 «{name}» خالیه.")
     chunk = items[page * PAGE:(page + 1) * PAGE]
     if page == 0:
-        await ctx.bot.send_message(chat_id, f"⭐ {len(FAVS)} ویدیو ذخیره شده:")
+        await ctx.bot.send_message(chat_id, f"⭐ {name}: {len(items)} ویدیو")
     for i, v in chunk:
         await send_card(chat_id, i, v, ctx)
         await asyncio.sleep(0.4)
     if (page + 1) * PAGE < len(items):
         await ctx.bot.send_message(chat_id, f"{(page + 1) * PAGE} از {len(items)}", reply_markup=InlineKeyboardMarkup(
-            [[InlineKeyboardButton("➡️ ادامه ذخیره‌ها", callback_data=f"favpg:{page + 1}")]]))
+            [[InlineKeyboardButton("➡️ ادامه ذخیره‌ها", callback_data=f"favpg:{folder}.{page + 1}")]]))
 
 
 async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not allowed(update):
         return
     chat_id, text = update.effective_chat.id, update.message.text.strip()
+    target = ctx.user_data.pop("newfolder", None)
+    if target and text not in (BTN_SITES, BTN_NEW, BTN_FAVS, BTN_STOP, BTN_SEARCH, BTN_PANEL):
+        name = re.sub(r"\s+", " ", text)[:30]
+        fid = str(FOLDERS["next"])
+        FOLDERS["next"] += 1
+        FOLDERS["names"][fid] = name
+        save_folders()
+        if target in FAVS:
+            FAVS[target]["folder"] = fid
+            save_favs()
+            return await update.message.reply_text(f"📁 پوشهٔ «{name}» ساخته شد و ویدیو داخلش رفت.")
+        return await update.message.reply_text(f"📁 پوشهٔ «{name}» ساخته شد.", reply_markup=fav_menu_kb())
     if ctx.user_data.pop("blocking", None) and re.match(r"^(https?://)?[\w.-]+\.[a-z]{2,}", text, re.I):
         d = host_of(text if text.startswith("http") else "https://" + text)
         if d not in BLOCKED:
@@ -731,7 +930,7 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("لینک سایت رو بفرست. اگه بخوای اسم هم بذاری، بعد از لینک با فاصله بنویس:\n"
                                         "https://example.com اسم دلخواه")
     elif text == BTN_FAVS:
-        await show_favs(chat_id, ctx)
+        await show_fav_menu(chat_id, ctx)
     elif text == BTN_SEARCH:
         await update.message.reply_text("🔎 کلمه یا عبارت مورد نظرت رو بنویس:")
     elif text == BTN_PANEL:
@@ -763,7 +962,7 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 CHUNK = 2 * 2**20  # هر تکه 2MB
 
 
-async def http_download(url: str, referer: str, dest_dir: str, limit_mb: int, depth=0):
+async def http_download(url: str, referer: str, dest_dir: str, limit_mb: int, depth=0, prog=None):
     """دانلود مستقیم تکه‌تکه با Range (بعضی CDNها مثل takcdn اتصال طولانی را قطع می‌کنند
     ولی درخواست‌های کوچک Range را جواب می‌دهند). اگر HTML برگشت، لینک ویدیو را از آن درمی‌آورد."""
     hdr = {**HEADERS, "Referer": referer}
@@ -777,7 +976,7 @@ async def http_download(url: str, referer: str, dest_dir: str, limit_mb: int, de
             _, _, videos, _, _ = parse_page(str(r.url), r.text, urlparse(str(r.url)).netloc.removeprefix("www."))
             for u in videos:
                 if not re.search(r"\.(m3u8|mpd)(\?|$)", u, re.I):
-                    p = await http_download(u, str(r.url), dest_dir, limit_mb, depth + 1)
+                    p = await http_download(u, str(r.url), dest_dir, limit_mb, depth + 1, prog)
                     if p:
                         return p
             return None
@@ -790,6 +989,8 @@ async def http_download(url: str, referer: str, dest_dir: str, limit_mb: int, de
             raise RuntimeError(f"حجم فایل {total // 2**20}MB بیشتر از محدودیت {limit_mb}MB تلگرام است")
         ext = (re.search(rf"\.({VID_EXTS})(\?|$)", final, re.I) or [None, "mp4"])[1]
         path = os.path.join(dest_dir, f"video.{ext}")
+        if prog is not None:
+            prog.update(done=0, total=total)
 
         if r.status_code == 200 and total and len(r.content) >= total:  # فایل کوچک، یکجا آمد
             with open(path, "wb") as f:
@@ -819,6 +1020,8 @@ async def http_download(url: str, referer: str, dest_dir: str, limit_mb: int, de
                     return path
                 f.write(data)
                 done += len(data)
+                if prog is not None:
+                    prog["done"] = done
                 if done > limit_mb * 2**20:
                     raise RuntimeError(f"حجم فایل بیشتر از محدودیت {limit_mb}MB تلگرام است")
                 if not data or (not total and len(data) < end - (done - len(data)) + 1):
@@ -826,29 +1029,61 @@ async def http_download(url: str, referer: str, dest_dir: str, limit_mb: int, de
         return path
 
 
-async def ytdlp_download(url: str, referer: str, dest_dir: str):
+PROG_LINE = re.compile(rb"P ([\d.]+|NA) ([\d.]+|NA) ([\d.]+|NA)")
+
+
+async def _run_ytdlp(args, prog):
+    """yt-dlp را اجرا می‌کند و پیشرفت دانلود را (اگر prog داده شود) لحظه‌به‌لحظه در prog می‌نویسد."""
+    proc = await asyncio.create_subprocess_exec(*args, stdout=asyncio.subprocess.PIPE,
+                                                stderr=asyncio.subprocess.PIPE)
+    err = bytearray()
+
+    async def read(stream, keep):
+        async for line in stream:
+            m = PROG_LINE.search(line)
+            if m:
+                if prog is not None:
+                    d, t, te = (None if x == b"NA" else int(float(x)) for x in m.groups())
+                    prog.update(done=d or 0, total=t or te or 0)
+            elif keep:
+                err.extend(line)
+    try:
+        await asyncio.gather(read(proc.stdout, False), read(proc.stderr, True))
+        await proc.wait()
+    except asyncio.CancelledError:
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
+        raise
+    return proc.returncode, bytes(err)
+
+
+async def ytdlp_download(url: str, referer: str, dest_dir: str, prog=None):
     out = os.path.join(dest_dir, "video.%(ext)s")
-    base = ["yt-dlp", "-q", "--no-playlist", "-f", "b[ext=mp4]/bv*+ba/b", "--merge-output-format", "mp4",
+    base = ["yt-dlp", "-q", "--progress", "--newline", "--progress-template",
+            "download:P %(progress.downloaded_bytes)s %(progress.total_bytes)s %(progress.total_bytes_estimate)s",
+            "--no-playlist", "-f", "b[ext=mp4]/bv*+ba/b", "--merge-output-format", "mp4",
             "--user-agent", HEADERS["User-Agent"], "--referer", referer,
             "--add-header", "Accept-Language:en-US,en;q=0.9", "--retries", "5", "-o", out]
     err = b""
     for extra in (["--impersonate", "chrome"], []):  # impersonate نیاز به curl_cffi دارد
-        proc = await asyncio.create_subprocess_exec(*base, *extra, url, stdout=asyncio.subprocess.PIPE,
-                                                    stderr=asyncio.subprocess.PIPE)
-        _, err = await proc.communicate()
+        code, err = await _run_ytdlp([*base, *extra, url], prog)
         files = [f for f in os.listdir(dest_dir) if not f.endswith((".part", ".ytdl"))]
-        if proc.returncode == 0 and files:
+        if code == 0 and files:
             return os.path.join(dest_dir, files[0])
     raise RuntimeError(err.decode(errors="ignore")[-400:] or "دانلود ناموفق")
 
 
-async def download_and_send(chat_id, v, ctx):
+async def download_and_send(chat_id, v, ctx, prog=None):
     limit = 2000 if LOCAL_API else 50
+    prog = prog if prog is not None else {}
+    prog["phase"] = "dl"
     with tempfile.TemporaryDirectory() as tmp:
         path, errors = None, []
         for attempt in range(2):  # 1) دانلود مستقیم
             try:
-                path = await http_download(v["video"], v["page"], tmp, limit)
+                path = await http_download(v["video"], v["page"], tmp, limit, prog=prog)
                 break
             except RuntimeError as e:
                 if "محدودیت" in str(e):
@@ -862,7 +1097,7 @@ async def download_and_send(chat_id, v, ctx):
             if path:
                 break
             try:
-                path = await ytdlp_download(target, v["page"], tmp)
+                path = await ytdlp_download(target, v["page"], tmp, prog)
             except Exception as e:
                 errors.append(f"yt-dlp: {e}")
         # 3) لینک‌های خارجی (ریدایرکت ساده یا صفحه دانلودی که لینک فایل داخلش هست).
@@ -873,7 +1108,7 @@ async def download_and_send(chat_id, v, ctx):
             if CAPTCHA_HOSTS.search(u) or FILE_HOSTS.search(u):
                 continue
             try:
-                path = await http_download(u, v["page"], tmp, limit)
+                path = await http_download(u, v["page"], tmp, limit, prog=prog)
             except RuntimeError as e:
                 if "محدودیت" in str(e):
                     raise
@@ -884,10 +1119,142 @@ async def download_and_send(chat_id, v, ctx):
         size = os.path.getsize(path)
         if size > limit * 2**20:
             raise RuntimeError(f"حجم فایل {size // 2**20}MB بیشتر از محدودیت {limit}MB تلگرام است")
+        prog.update(phase="up", done=size, total=size)
         with open(path, "rb") as f:  # فایل استریم می‌شود، کل آن در RAM لود نمی‌شود
             await ctx.bot.send_video(chat_id, f, caption=v["title"][:1000], supports_streaming=True,
                                      read_timeout=1800, write_timeout=1800)
     # با خروج از with، پوشه موقت و فایل حذف شده‌اند
+
+
+# ----------------------------- 📥 صف دانلود -----------------------------
+# هر چت یک صف دارد؛ دانلودها پشت سر هم انجام می‌شوند و یک پیام وضعیت با درصد پیشرفت بروز می‌شود.
+# در این مدت بقیهٔ ربات آزاد است (اسکن، جستجو، ذخیره‌ها ...).
+DLQ: dict[int, dict] = {}  # chat_id -> {items: deque, cur, task, worker, msg, prog, text}
+
+
+class _Ctx:
+    def __init__(self, bot):
+        self.bot = bot
+
+
+def _bar(pct: float) -> str:
+    n = max(0, min(10, round(pct / 10)))
+    return "▰" * n + "▱" * (10 - n)
+
+
+def dlq_text(q) -> str:
+    lines = ["📥 صف دانلود"]
+    if q.get("cur"):
+        v = VIDEOS.get(q["cur"]) or FAVS.get(q["cur"]) or {}
+        p = q.get("prog") or {}
+        lines.append(f"\n⏳ {v.get('title', '')[:60]}")
+        if p.get("phase") == "up":
+            lines.append("📤 در حال ارسال به تلگرام ...")
+        elif p.get("total"):
+            pct = 100 * p.get("done", 0) / p["total"]
+            lines.append(f"{_bar(pct)} {pct:.0f}%  •  {p.get('done', 0) / 2**20:.1f} از {p['total'] / 2**20:.1f} MB")
+        elif p.get("done"):
+            lines.append(f"⬇️ {p['done'] / 2**20:.1f} MB دانلود شد ...")
+        else:
+            lines.append("🔎 در حال پیدا کردن فایل ...")
+    if q["items"]:
+        lines.append(f"\n🕒 در انتظار ({len(q['items'])}):")
+        for n, i in enumerate(list(q["items"])[:8], 1):
+            lines.append(f"{n}. {(VIDEOS.get(i) or FAVS.get(i) or {}).get('title', '')[:50]}")
+        if len(q["items"]) > 8:
+            lines.append(f"… و {len(q['items']) - 8} تای دیگه")
+    lines.append("\n(در این مدت می‌تونی بقیهٔ ربات رو استفاده کنی)")
+    return "\n".join(lines)
+
+
+def dlq_kb(q) -> InlineKeyboardMarkup:
+    row = [InlineKeyboardButton("⏹ لغو دانلود فعلی", callback_data="dlq:cur")]
+    if q["items"]:
+        row.append(InlineKeyboardButton("🗑 خالی کردن صف", callback_data="dlq:clr"))
+    return InlineKeyboardMarkup([row])
+
+
+async def dlq_refresh(chat_id, bot, resend=False):
+    q = DLQ.get(chat_id)
+    if not q:
+        return
+    txt = dlq_text(q)
+    if resend and q.get("msg"):  # پیام وضعیت بیاید پایین چت
+        try:
+            await q["msg"].delete()
+        except Exception:
+            pass
+        q["msg"] = None
+    if q.get("msg"):
+        if txt == q.get("text"):
+            return
+        try:
+            await q["msg"].edit_text(txt, reply_markup=dlq_kb(q))
+            q["text"] = txt
+            return
+        except Exception as e:
+            if "not modified" in str(e).lower():
+                return
+    try:
+        q["msg"] = await bot.send_message(chat_id, txt, reply_markup=dlq_kb(q))
+        q["text"] = txt
+    except Exception:
+        log.warning("queue status message failed")
+
+
+async def dlq_add(chat_id, i, bot) -> int:
+    """یک ویدیو را به صف اضافه می‌کند؛ جایگاهش در صف را برمی‌گرداند (۰ = تکراری)."""
+    q = DLQ.setdefault(chat_id, {"items": deque(), "cur": None, "task": None, "worker": None,
+                                 "msg": None, "prog": {}, "text": ""})
+    if i == q["cur"] or i in q["items"]:
+        return 0
+    q["items"].append(i)
+    if not q["worker"] or q["worker"].done():
+        q["worker"] = asyncio.create_task(dlq_worker(chat_id, bot))
+    await dlq_refresh(chat_id, bot, resend=True)
+    return len(q["items"]) + (1 if q["cur"] else 0)
+
+
+async def dlq_worker(chat_id, bot):
+    q = DLQ[chat_id]
+    try:
+        while q["items"]:
+            i = q["items"].popleft()
+            v = VIDEOS.get(i) or FAVS.get(i)
+            if not v:
+                continue
+            q["cur"], q["prog"] = i, {}
+            q["task"] = asyncio.create_task(download_and_send(chat_id, v, _Ctx(bot), q["prog"]))
+            while not q["task"].done():
+                await asyncio.wait({q["task"]}, timeout=4)
+                await dlq_refresh(chat_id, bot)
+            try:
+                q["task"].result()
+                mark_viewed(i, "d")
+            except asyncio.CancelledError:
+                await bot.send_message(chat_id, f"⏹ دانلود لغو شد: {v['title'][:80]}")
+            except Exception as e:
+                log.warning("download failed: %s", e)
+                await bot.send_message(chat_id, download_error_text(v, e)[:4000])
+            q["cur"], q["task"] = None, None
+            await dlq_refresh(chat_id, bot)
+    finally:
+        DLQ.pop(chat_id, None)
+        if q.get("msg"):
+            try:
+                await q["msg"].delete()
+            except Exception:
+                pass
+
+
+def download_error_text(v, e) -> str:
+    if v.get("ext"):
+        return (f"❌ «{v['title'][:60]}» فایل مستقیم نداره و فقط روی پلیر/فایل‌هاست خارجی هست.\n"
+                "از دکمه‌های ▶️ زیر عکس ویدیو استفاده کن.")
+    msg = str(e)
+    if re.search(r"(Redirection detected|require login|geo|not available in your country|403)", msg, re.I):
+        msg = "این سایت دانلود رو از IP سرور بسته یا لاگین می‌خواد.\n\n" + msg[-500:]
+    return f"❌ دانلود «{v['title'][:60]}» نشد: {msg}"
 
 
 async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -934,7 +1301,7 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text(f"🔎 جستجوی «{query}» در {where} ...")
         CRAWLERS[chat_id] = cr
         return await send_batch(chat_id, ctx)
-    global BATCH, CONCURRENCY
+    global BATCH, CONCURRENCY, HIDE_SEEN, DUR_FILTER
     if action == "noop":
         return await q.answer()
     if action == "sitespg":
@@ -943,7 +1310,61 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if action == "favpg":
         await q.answer()
         await q.edit_message_reply_markup(None)
-        return await show_favs(chat_id, ctx, int(i))
+        folder, _, pg = i.rpartition(".")
+        return await show_favs(chat_id, ctx, int(pg), folder or "all")
+    if action == "fdir":
+        await q.answer()
+        return await show_favs(chat_id, ctx, 0, i)
+    if action == "newfold":
+        ctx.user_data["newfolder"] = i
+        await q.answer()
+        return await q.message.reply_text("📁 اسم پوشهٔ جدید رو بفرست (مثلاً: «بهترین‌ها»):")
+    if action == "fmng":
+        await q.answer()
+        rows = [[InlineKeyboardButton(f"🗑 {name}", callback_data=f"delfold:{fid}")]
+                for fid, name in FOLDERS["names"].items()]
+        rows.append([InlineKeyboardButton("⬅️ برگشت", callback_data="fmenu:x")])
+        return await q.edit_message_text("کدوم پوشه حذف بشه؟ (ویدیوهاش پاک نمی‌شن، میرن «بدون پوشه»)",
+                                         reply_markup=InlineKeyboardMarkup(rows))
+    if action == "delfold":
+        name = FOLDERS["names"].pop(i, None)
+        save_folders()
+        for v in FAVS.values():
+            if str(v.get("folder") or "") == i:
+                v.pop("folder", None)
+        save_favs()
+        await q.answer(f"🗑 «{name}» حذف شد" if name else "قبلاً حذف شده")
+        return await q.edit_message_text(f"⭐ ذخیره‌ها ({len(FAVS)} ویدیو) — کدوم پوشه؟", reply_markup=fav_menu_kb())
+    if action == "fmenu":
+        await q.answer()
+        return await q.edit_message_text(f"⭐ ذخیره‌ها ({len(FAVS)} ویدیو) — کدوم پوشه؟", reply_markup=fav_menu_kb())
+    if action == "dlq":
+        dq = DLQ.get(chat_id)
+        if not dq:
+            return await q.answer("صف دانلود خالیه")
+        if i == "clr":
+            dq["items"].clear()
+            await q.answer("🗑 صف خالی شد")
+        elif dq.get("task") and not dq["task"].done():
+            dq["task"].cancel()
+            await q.answer("⏹ لغو شد")
+        else:
+            await q.answer()
+        return await dlq_refresh(chat_id, ctx.bot)
+    if action in ("hideseen", "setdur", "clrseen"):
+        if action == "hideseen":
+            HIDE_SEEN = not HIDE_SEEN
+        elif action == "setdur" and i in DUR_LABEL:
+            DUR_FILTER = i
+        elif action == "clrseen":
+            VIEWED.clear()
+            save_json(VIEWED_FILE, VIEWED)
+        save_settings()
+        await q.answer("✅ ذخیره شد")
+        try:
+            return await q.edit_message_text(panel_text(), reply_markup=panel_kb())
+        except Exception:
+            return
     if action == "watch" and i == "now":
         await q.answer("🔍 بررسی شروع شد")
         await q.message.reply_text(f"🔍 در حال بررسی {len(SITES)} سایت برای ویدیوی جدید... (ممکنه چند دقیقه طول بکشه)")
@@ -983,7 +1404,7 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             return
     if action == "backup":
         await q.answer()
-        for path in (SITES_FILE, FAV_FILE, BLOCK_FILE):
+        for path in (SITES_FILE, FAV_FILE, BLOCK_FILE, FOLDERS_FILE):
             if os.path.exists(path):
                 with open(path, "rb") as f:
                     await ctx.bot.send_document(chat_id, f, filename=os.path.basename(path))
@@ -1056,36 +1477,48 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await q.answer("💾 ذخیره شد" if url else "منقضی شده")
         return await q.edit_message_text("✅ سایت ذخیره شد.")
 
+    if action == "mvf":
+        vid, _, fid = i.partition(":")
+        if vid not in FAVS:
+            return await q.answer("این ویدیو دیگه توی ذخیره‌ها نیست", show_alert=True)
+        if fid != "0" and fid not in FOLDERS["names"]:
+            return await q.answer("این پوشه حذف شده", show_alert=True)
+        FAVS[vid]["folder"] = None if fid == "0" else fid
+        save_favs()
+        await q.answer(f"📁 رفت توی «{folder_name(fid)}»" if fid != "0" else "📂 بدون پوشه")
+        return await q.edit_message_reply_markup(video_kb(vid))
+
     v = VIDEOS.get(i) or FAVS.get(i)
     if not v:
         return await q.answer("منقضی شده؛ دوباره اسکن کن", show_alert=True)
 
     if action == "fav":
-        FAVS[i] = v
+        FAVS[i] = {**v, "folder": (FAVS.get(i) or {}).get("folder")}
         save_favs()
-        await q.answer("⭐ ذخیره شد")
+        await q.answer("⭐ ذخیره شد" + (" — با «🗂» بذارش توی پوشه" if FOLDERS["names"] else ""))
         return await q.edit_message_reply_markup(video_kb(i))
     if action == "unfav":
         FAVS.pop(i, None)
         save_favs()
         await q.answer("حذف شد")
         return await q.edit_message_reply_markup(video_kb(i))
+    if action in ("seen", "unseen"):
+        mark_viewed(i) if action == "seen" else unmark_viewed(i)
+        await q.answer("👁 علامت خورد" + (" (از اسکن‌های بعدی مخفی می‌شه)" if HIDE_SEEN else "")
+                       if action == "seen" else "علامت برداشته شد")
+        return await q.edit_message_reply_markup(video_kb(i))
+    if action == "fold":
+        if i not in FAVS:
+            return await q.answer("اول ⭐ ذخیره‌ش کن", show_alert=True)
+        await q.answer()
+        return await q.edit_message_reply_markup(folder_kb(i))
+    if action == "vkb":
+        await q.answer()
+        return await q.edit_message_reply_markup(video_kb(i))
 
-    await q.answer("در حال دانلود...")
-    status = await q.message.reply_text(f"⏳ دانلود: {v['title']}")
-    try:
-        await download_and_send(chat_id, v, ctx)
-        await status.delete()
-    except Exception as e:
-        log.exception("download failed")
-        if v.get("ext"):
-            await status.edit_text("❌ این ویدیو فایل مستقیم نداره و فقط روی پلیر/فایل‌هاست خارجی هست.\n"
-                                   "از دکمه‌های ▶️ زیر عکس ویدیو استفاده کن.")
-        else:
-            msg = str(e)
-            if re.search(r"(Redirection detected|require login|geo|not available in your country|403)", msg, re.I):
-                msg = "این سایت دانلود رو از IP سرور بسته یا لاگین می‌خواد.\n\n" + msg[-500:]
-            await status.edit_text(f"❌ خطا: {msg}"[:4000])
+    pos = await dlq_add(chat_id, i, ctx.bot)
+    await q.answer("این ویدیو الان توی صفه" if not pos else
+                   "⬇️ دانلود شروع شد" if pos == 1 else f"📥 به صف اضافه شد (نفر {pos})")
 
 
 async def cmd_debug(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -1108,10 +1541,20 @@ async def on_document(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     doc = update.message.document
     targets = {"sites.json": (SITES, SITES_FILE), "favorites.json": (FAVS, FAV_FILE), "blocked.json": (BLOCKED, BLOCK_FILE)}
-    if doc.file_name not in targets or doc.file_size > 5 * 2**20:
-        return await update.message.reply_text("فقط فایل‌های پشتیبان sites.json، favorites.json یا blocked.json قبول میشه.")
+    if doc.file_name not in targets and doc.file_name != "folders.json" or doc.file_size > 5 * 2**20:
+        return await update.message.reply_text(
+            "فقط فایل‌های پشتیبان sites.json، favorites.json، blocked.json یا folders.json قبول میشه.")
     f = await doc.get_file()
     data = json.loads(bytes(await f.download_as_bytearray()).decode("utf-8"))
+    if doc.file_name == "folders.json":
+        if not isinstance(data, dict) or not isinstance(data.get("names"), dict):
+            return await update.message.reply_text("فرمت فایل درست نیست.")
+        before = len(FOLDERS["names"])
+        FOLDERS["names"].update({str(k): str(n)[:30] for k, n in data["names"].items()})
+        FOLDERS["next"] = max([FOLDERS["next"], int(data.get("next") or 1)] +
+                              [int(k) + 1 for k in FOLDERS["names"] if k.isdigit()])
+        save_folders()
+        return await update.message.reply_text(f"✅ {len(FOLDERS['names']) - before} پوشهٔ جدید اضافه شد.")
     store, path = targets[doc.file_name]
     before = len(store)
     if isinstance(store, dict) and isinstance(data, dict):
@@ -1153,7 +1596,7 @@ async def check_new_videos(app, chat_id, manual=False):
             total_new += len(new)
             await app.bot.send_message(chat_id, f"🔔 {len(new)} ویدیوی جدید از {site['name']}"
                                        + (f" (نمایش {WATCH_MAX_SEND} تای اول)" if len(new) > WATCH_MAX_SEND else ""))
-            for i in new[:WATCH_MAX_SEND]:
+            for i in [i for i in new if visible(i)][:WATCH_MAX_SEND]:
                 await send_card(chat_id, i, VIDEOS[i], app)
                 await asyncio.sleep(0.4)
         save_json(SEEN_FILE, SEEN)
