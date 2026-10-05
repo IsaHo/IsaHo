@@ -461,6 +461,67 @@ class SearchCrawler:
         return self.ready and (not self.queue or self.pages >= 150)
 
 
+# ---------------- جستجو در X (توییتر) ----------------
+# X بدون لاگین اجازه جستجو نمی‌دهد → کوکی یک حساب X لازم است (ترجیحاً حساب فرعی).
+# X_COOKIES="auth_token=...; ct0=..."
+X_COOKIES = os.environ.get("X_COOKIES", "").strip()
+_X_API = None
+
+
+async def x_api():
+    global _X_API
+    if _X_API is None:
+        from twscrape import API
+        _X_API = API(os.path.join(BASE_DIR, "x_accounts.db"))
+        accs = await _X_API.pool.get_all()
+        if not accs:
+            await _X_API.pool.add_account("bot_account", "-", "-", "-", cookies=X_COOKIES)
+    return _X_API
+
+
+class XSearch:
+    """جستجوی ویدیوهای X؛ هر بار BATCH ویدیو. لینک ویدیو مستقیم از video.twimg.com است."""
+    def __init__(self, query: str):
+        self.query, self.domain = query, "X"
+        self.sent, self.pages, self.finished, self.gen = set(), 0, False, None
+
+    @staticmethod
+    def _best(video):
+        mp4 = [v for v in video.variants if "mp4" in (v.contentType or "")]
+        return max(mp4, key=lambda v: v.bitrate or 0).url if mp4 else None
+
+    async def next_batch(self):
+        found = []
+        if self.gen is None:
+            api = await x_api()
+            self.gen = api.search(f"{self.query} filter:native_video", limit=500, kv={"product": "Media"})
+        try:
+            while len(found) < BATCH:
+                tw = await asyncio.wait_for(self.gen.__anext__(), 60)
+                self.pages += 1
+                vids = (tw.media.videos if tw.media else []) or []
+                for k, vd in enumerate(vids):
+                    url = self._best(vd)
+                    if not url:
+                        continue
+                    i = vid_id(url)
+                    text = re.sub(r"https://t\.co/\S+", "", tw.rawContent or "").strip()
+                    VIDEOS.setdefault(i, {"title": f"{text[:200]}\n👤 @{tw.user.username}" if text else f"@{tw.user.username}",
+                                          "image": vd.thumbnailUrl, "page": tw.url, "video": url, "ext": [tw.url, url]})
+                    if i not in self.sent:
+                        self.sent.add(i); found.append(i)
+        except (StopAsyncIteration, asyncio.TimeoutError):
+            self.finished = True
+        except Exception as e:
+            log.warning("x search fail: %s", e)
+            self.finished = True
+        return found
+
+    @property
+    def done(self):
+        return self.finished
+
+
 CRAWLERS: dict[int, Crawler] = {}  # chat_id -> وضعیت اسکن
 
 
@@ -475,7 +536,7 @@ def video_kb(i: str) -> InlineKeyboardMarkup:
     v = VIDEOS.get(i) or FAVS.get(i) or {}
     links = [InlineKeyboardButton(f"▶️ {urlparse(u).netloc.removeprefix('www.')[:20]}", url=u) for u in v.get("ext", [])]
     rows += [links[k:k + 2] for k in range(0, len(links), 2)]
-    if v.get("page", "").startswith("http"):
+    if v.get("page", "").startswith("http") and host_of(v["page"]) not in ("x.com", "twitter.com"):
         root = site_root(v["page"])
         if site_id(root) not in SITES:
             rows.append([InlineKeyboardButton(f"💾 ذخیره سایت {urlparse(root).netloc.removeprefix('www.')[:25]}",
@@ -540,7 +601,7 @@ async def send_batch(chat_id, ctx: ContextTypes.DEFAULT_TYPE):
         await asyncio.sleep(0.4)  # جلوگیری از flood limit تلگرام
     if cr.done:
         CRAWLERS.pop(chat_id, None)
-        if isinstance(cr, SearchCrawler) and not cr.sent:
+        if isinstance(cr, (SearchCrawler, XSearch)) and not cr.sent:
             await ctx.bot.send_message(chat_id, f"😕 برای «{cr.query}» ویدیویی پیدا نشد.")
         else:
             await ctx.bot.send_message(chat_id, f"✅ تمام شد ({cr.pages} صفحه بررسی شد).")
@@ -649,7 +710,8 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         ctx.user_data["query"] = text[:100]
         await update.message.reply_text(f"🔎 جستجوی «{text[:100]}» کجا انجام بشه؟", reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("🌐 همه سایت‌های من", callback_data="sq:all")],
-            [InlineKeyboardButton("📌 انتخاب یک سایت", callback_data="sq:pick")]]))
+            [InlineKeyboardButton("📌 انتخاب یک سایت", callback_data="sq:pick")]]
+            + ([[InlineKeyboardButton("🐦 جستجو در X (توییتر)", callback_data="sq:x")]] if X_COOKIES else [])))
 
 
 CHUNK = 2 * 2**20  # هر تکه 2MB
@@ -814,6 +876,8 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             if not SITES:
                 return await q.edit_message_text("هیچ سایتی ذخیره نشده.")
             cr, where = SearchCrawler(query, [v["url"] for v in SITES.values()]), "همه سایت‌های من"
+        elif i == "x":
+            cr, where = XSearch(query), "X"
         else:
             return
         await q.edit_message_text(f"🔎 جستجوی «{query}» در {where} ...")
