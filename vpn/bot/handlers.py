@@ -22,6 +22,7 @@ from aiogram.types import (BufferedInputFile, CallbackQuery, FSInputFile, Inline
 import db
 import fmt
 import links
+import devices
 import relays
 import tunnels
 import xray
@@ -64,6 +65,8 @@ class Edit(StatesGroup):
     broadcast = State()
     add_admin = State()
     bulk_days = State()
+    ip_limit = State()
+    ip_default = State()
     bulk_gb = State()
     support = State()
     reply = State()
@@ -111,6 +114,7 @@ def user_kb(u) -> InlineKeyboardMarkup:
         [("⏳ تمدید", f"ren:{u.id}"), ("📦 افزایش حجم", f"addt:{u.id}")],
         [("♻️ ریست مصرف", f"rst:{u.id}"), ("🔑 تغییر UUID", f"uuid:{u.id}")],
         [toggle, ("📝 یادداشت", f"note:{u.id}")],
+        [("📱 محدودیت دستگاه", f"ipl:{u.id}")],
         [("🗑 حذف", f"del:{u.id}"), ("🔄 بروزرسانی", f"u:{u.id}")],
         [("🔙 لیست کاربران", "list:0")],
     ])
@@ -181,8 +185,15 @@ async def maybe_reactivate(u):
     return u
 
 
+def device_line(u) -> str:
+    if db.get_setting("real_ip") != "1":
+        return ""
+    limit = u.ip_limit or int(db.get_setting("ip_limit_default", "0") or 0)
+    return f"\n📱 دستگاه‌های فعال: {devices.count(u.name)} | حد: {limit or 'نامحدود'}"
+
+
 async def show_user(target, u, edit: bool = True):
-    text = fmt.user_card(u)
+    text = fmt.user_card(u) + device_line(u)
     if edit and isinstance(target, CallbackQuery):
         try:
             await target.message.edit_text(text, reply_markup=user_kb(u))
@@ -447,6 +458,108 @@ async def user_del(cb: CallbackQuery):
     await cb.message.edit_text(f"🗑 کاربر <b>{html.escape(u.name if u else '')}</b> حذف شد.")
 
 
+@router.callback_query(F.data.startswith("ipl:"), admin)
+async def ip_limit_ask(cb: CallbackQuery, state: FSMContext):
+    await cb.answer()
+    await state.set_state(Edit.ip_limit)
+    await state.update_data(uid=int(cb.data[4:]))
+    note = "" if db.get_setting("real_ip") == "1" else (
+        "\n⚠️ «IP واقعی کاربران» خاموش است؛ تا روشنش نکنید این محدودیت اعمال نمی‌شود "
+        "(⚙️ تنظیمات ← 📱 محدودیت دستگاه).")
+    await cb.message.answer("📱 حداکثر چند دستگاه هم‌زمان؟ (۰ = طبق پیش‌فرض)" + note, reply_markup=CANCEL_KB)
+
+
+@router.message(Edit.ip_limit, admin)
+async def ip_limit_set(msg: Message, state: FSMContext):
+    v = parse_number(msg.text)
+    if v is None:
+        await msg.answer("❌ یک عدد بفرستید.")
+        return
+    uid = (await state.get_data())["uid"]
+    await state.clear()
+    db.update(uid, ip_limit=int(v))
+    await msg.answer("✅ ذخیره شد.", reply_markup=ADMIN_KB)
+    await show_user(msg, db.get(uid), edit=False)
+
+
+def devices_view():
+    on = db.get_setting("real_ip") == "1"
+    default = int(db.get_setting("ip_limit_default", "0") or 0)
+    action = db.get_setting("ip_limit_action", "warn")
+    text = (
+        "📱 <b>محدودیت دستگاه</b>\n\n"
+        f"IP واقعی کاربران: {'🟢 روشن' if on else '🔴 خاموش'}\n"
+        f"حد پیش‌فرض: {default or 'نامحدود'} دستگاه\n"
+        f"وقتی کاربر از حد رد شد: {'⛔ ۱۵ دقیقه قطع + پیام' if action == 'disable' else '⚠️ فقط هشدار'}\n\n"
+        "دستگاه = IPهای متفاوتی که در ۳ دقیقه‌ی اخیر وصل شده‌اند. گوشی‌ای که بین وای‌فای و دیتا "
+        "جابه‌جا می‌شود ممکن است چند دقیقه دو دستگاه حساب شود؛ برای همین حد ۲ برای یک نفر امن‌تر است.\n"
+        "روشن کردن IP واقعی حدود یک دقیقه اتصال کاربران را قطع و وصل می‌کند.")
+    kb = ikb([
+        [(("🔴 خاموش کردن IP واقعی" if on else "🟢 روشن کردن IP واقعی"), "dev:toggle")],
+        [("🔢 حد پیش‌فرض", "dev:default"),
+         (("⚠️ فقط هشدار" if action == "disable" else "⛔ قطع موقت"), "dev:action")],
+    ])
+    return text, kb
+
+
+@router.callback_query(F.data == "dev:menu", admin)
+async def devices_menu(cb: CallbackQuery):
+    await cb.answer()
+    text, kb = devices_view()
+    await cb.message.answer(text, reply_markup=kb)
+
+
+@router.callback_query(F.data == "dev:toggle", admin)
+async def devices_toggle(cb: CallbackQuery):
+    turning_on = db.get_setting("real_ip") != "1"
+    if turning_on:
+        ok, reason = relays.ready_for_real_ip()
+        if not ok:
+            await cb.answer(f"❌ {reason}", show_alert=True)
+            return
+    db.set_setting("real_ip", "1" if turning_on else "")
+    if turning_on and not xray.split_relay_inbound():
+        db.set_setting("real_ip", "")
+        await cb.answer("❌ IP عمومی سرور روی کارت شبکه نیست؛ این قابلیت روی این سرور ممکن نیست", show_alert=True)
+        return
+    try:
+        await xray.apply_all()
+    except Exception as e:
+        db.set_setting("real_ip", "" if turning_on else "1")
+        await xray.apply_all()
+        await cb.answer(f"❌ {e}"[:190], show_alert=True)
+        return
+    await cb.answer("✅ انجام شد؛ سرورهای ایران ظرف یک دقیقه هماهنگ می‌شوند", show_alert=True)
+    text, kb = devices_view()
+    await cb.message.edit_text(text, reply_markup=kb)
+
+
+@router.callback_query(F.data == "dev:action", admin)
+async def devices_action(cb: CallbackQuery):
+    db.set_setting("ip_limit_action", "warn" if db.get_setting("ip_limit_action") == "disable" else "disable")
+    await cb.answer("✅")
+    text, kb = devices_view()
+    await cb.message.edit_text(text, reply_markup=kb)
+
+
+@router.callback_query(F.data == "dev:default", admin)
+async def devices_default_ask(cb: CallbackQuery, state: FSMContext):
+    await cb.answer()
+    await state.set_state(Edit.ip_default)
+    await cb.message.answer("🔢 حد پیش‌فرض دستگاه برای همه‌ی کاربران؟ (۰ = نامحدود)", reply_markup=CANCEL_KB)
+
+
+@router.message(Edit.ip_default, admin)
+async def devices_default_set(msg: Message, state: FSMContext):
+    v = parse_number(msg.text)
+    if v is None:
+        await msg.answer("❌ یک عدد بفرستید.")
+        return
+    await state.clear()
+    db.set_setting("ip_limit_default", str(int(v)))
+    await msg.answer("✅ ذخیره شد.", reply_markup=ADMIN_KB)
+
+
 @router.callback_query(F.data.startswith(("ren:", "addt:", "note:")), admin)
 async def user_edit_ask(cb: CallbackQuery, state: FSMContext):
     await cb.answer()
@@ -535,6 +648,7 @@ async def settings_menu(msg: Message):
     await msg.answer(text, reply_markup=ikb([
         [("🔗 لینک‌های سابسکریپشن", "lt:menu"), ("👮 مدیران", "adm:menu")],
         [("🛰 سرورهای ایران", "rl:menu"), ("📦 کانال بکاپ", "set:bchat")],
+        [("📱 محدودیت دستگاه", "dev:menu")],
         [("🇮🇷 سرور واسط", "set:relays"), ("🌐 تنظیم IP تمیز کلادفلر", "set:cdn")],
         [("🧪 دستور تست سرور واسط", "set:relaytest")],
         [("🔌 پورت CDN: 443", "set:port:443"), (f"🔌 پورت CDN: {cfg.cdn_port}", f"set:port:{cfg.cdn_port}")],

@@ -102,6 +102,8 @@ RestartSec=3
 WantedBy=multi-user.target
 UNIT
 
+    SEND_PROXY=""
+    grep -q "send-proxy-v2" /etc/haproxy/haproxy.cfg 2>/dev/null && SEND_PROXY=" send-proxy-v2"
     [[ -f /etc/haproxy/haproxy.cfg.orig ]] || cp /etc/haproxy/haproxy.cfg /etc/haproxy/haproxy.cfg.orig 2>/dev/null || true
     {
         cat <<CFG
@@ -124,7 +126,7 @@ frontend vpn
 backend tunnels
     balance leastconn
 CFG
-        for i in $(seq 1 "$TUNNELS"); do echo "    server t$i 127.0.0.1:1000$i check inter 10s fall 2 rise 1"; done
+        for i in $(seq 1 "$TUNNELS"); do echo "    server t$i 127.0.0.1:1000$i check inter 10s fall 2 rise 1$SEND_PROXY"; done
         cat <<CFG
 
 frontend sub
@@ -200,6 +202,8 @@ report = {
     "rx": rx, "tx": tx,
     "uptime": int(float(open("/proc/uptime").read().split()[0])),
     "last": sh("tail -n 1 /var/log/isaho-update.log 2>/dev/null"),
+    "agent": 2,
+    "proxy": "send-proxy-v2" in open("/etc/haproxy/haproxy.cfg").read(),
 }
 opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 req = urllib.request.Request("http://127.0.0.1:2096/relay/report", data=json.dumps(report).encode(),
@@ -208,6 +212,21 @@ try:
     reply = json.load(opener.open(req, timeout=15))
 except Exception as e:
     raise SystemExit(f"report failed: {e}")
+
+# the foreign server tells us whether it expects the PROXY header (real client IPs)
+want = reply.get("proxy")
+if isinstance(want, bool) and want != report["proxy"]:
+    path = "/etc/haproxy/haproxy.cfg"
+    lines = open(path).read().splitlines()
+    out = []
+    for line in lines:
+        if line.strip().startswith("server t"):
+            line = line.replace(" send-proxy-v2", "") + (" send-proxy-v2" if want else "")
+        out.append(line)
+    open(path + ".new", "w").write("\n".join(out) + "\n")
+    if subprocess.run(["haproxy", "-c", "-f", path + ".new"], capture_output=True).returncode == 0:
+        os.replace(path + ".new", path)
+        sh("systemctl reload haproxy")
 
 action, ref = reply.get("action"), reply.get("ref", "")
 if action == "restart":

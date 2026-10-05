@@ -59,6 +59,7 @@ class User:
     warned: int
     note: str
     pending_days: int = 0  # >0: validity starts at first use
+    ip_limit: int = 0      # max simultaneous devices (distinct IPs); 0 = use the default
 
     @property
     def used(self) -> int:
@@ -86,6 +87,8 @@ def init() -> None:
         cols = {r["name"] for r in c.execute("PRAGMA table_info(users)")}
         if "pending_days" not in cols:
             c.execute("ALTER TABLE users ADD COLUMN pending_days INTEGER NOT NULL DEFAULT 0")
+        if "ip_limit" not in cols:
+            c.execute("ALTER TABLE users ADD COLUMN ip_limit INTEGER NOT NULL DEFAULT 0")
 
 
 def _row(r) -> Optional[User]:

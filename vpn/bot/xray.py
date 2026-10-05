@@ -12,7 +12,26 @@ from config import cfg
 log = logging.getLogger(__name__)
 
 REALITY_TAG = "reality"
+RELAY_TAG = "reality-relay"
+ACCESS_LOG = "/var/log/xray/access.log"
 CDN_TAG = "cdn"
+
+
+def split_relay_inbound() -> bool:
+    """Serve relays on 127.0.0.1:443 with PROXY protocol (real client IPs) and the public on the
+    server IP. Turned on from the bot once relays are ready (they switch HAProxy to send the
+    PROXY header in step), and only possible when the public IP sits on a local interface."""
+    if db.get_setting("real_ip") != "1":
+        return False
+    try:
+        import psutil
+        return any(a.address == cfg.server_ip for addrs in psutil.net_if_addrs().values() for a in addrs)
+    except Exception:
+        return False
+
+
+def all_tags() -> tuple:
+    return (REALITY_TAG, RELAY_TAG, CDN_TAG) if split_relay_inbound() else (REALITY_TAG, CDN_TAG)
 _lock = asyncio.Lock()
 last_rate = 0.0  # users' bytes/s over the last stats interval
 _last_flush = 0.0
@@ -30,7 +49,7 @@ def _clients(users, flow: str = "") -> list:
 
 def _inbounds(users) -> list:
     sniffing = {"enabled": True, "destOverride": ["http", "tls", "quic"], "routeOnly": True}
-    return [
+    inbounds = [
         {
             "tag": REALITY_TAG,
             "listen": "0.0.0.0",
@@ -71,16 +90,25 @@ def _inbounds(users) -> list:
             "sniffing": sniffing,
         },
     ]
+    if split_relay_inbound():
+        reality = inbounds[0]
+        reality["listen"] = cfg.server_ip
+        relay = json.loads(json.dumps(reality))
+        relay["tag"], relay["listen"] = RELAY_TAG, "127.0.0.1"
+        relay["streamSettings"]["sockopt"]["acceptProxyProtocol"] = True
+        inbounds.append(relay)
+    return inbounds
 
 
 def build_config(users) -> dict:
     api_host, api_port = cfg.api_addr.rsplit(":", 1)
     return {
-        "log": {"loglevel": "warning", "access": "none"},
+        # the access log is only useful (and only kept) when relays pass real client IPs
+        "log": {"loglevel": "warning", "access": ACCESS_LOG if split_relay_inbound() else "none"},
         "api": {"tag": "api", "services": ["HandlerService", "StatsService"]},
         "stats": {},
         "policy": {
-            "levels": {"0": {"statsUserUplink": True, "statsUserDownlink": True,
+            "levels": {"0": {"statsUserUplink": True, "statsUserDownlink": True, "statsUserOnline": True,
                              "handshake": 4, "connIdle": 300, "bufferSize": 64}},
             "system": {"statsInboundUplink": True, "statsInboundDownlink": True},
         },
@@ -122,6 +150,7 @@ async def _run(*args, timeout: int = 15) -> tuple:
 async def write_config() -> None:
     """Write the full config for all enabled users, validating it before replacing."""
     conf = build_config(db.active_users())
+    os.makedirs(os.path.dirname(ACCESS_LOG), exist_ok=True)
     path = cfg.xray_config
     os.makedirs(os.path.dirname(path), exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), suffix=".json")
@@ -203,7 +232,7 @@ async def _api_add(user) -> bool:
 
 async def _api_remove(name: str) -> bool:
     ok = True
-    for tag in (REALITY_TAG, CDN_TAG):
+    for tag in all_tags():
         code, out, err = await _run(cfg.xray_bin, "api", "rmu", f"--server={cfg.api_addr}",
                                     f"-tag={tag}", name)
         ok = ok and code == 0 and "error" not in (out + err).lower()

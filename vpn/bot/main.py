@@ -12,6 +12,7 @@ from aiogram.types import BotCommand
 import db
 import fmt
 import handlers
+import devices
 import sub_server
 import tunnels
 import xray
@@ -77,6 +78,38 @@ async def check_tunnels(bot: Bot) -> None:
                                      "روی سرور ایران بررسی کنید: <code>systemctl status 'isaho-tunnel@*'</code>")
 
 
+_device_warned = {}  # name -> last warning time
+DEVICE_BAN = 15 * 60
+
+
+async def check_devices(bot: Bot) -> None:
+    now = time.time()
+    # lift temporary device-limit suspensions
+    for u in db.all_users():
+        if not u.enabled and u.disabled_reason.startswith("iplimit:") and now >= int(u.disabled_reason[8:]):
+            db.update(u.id, enabled=1, disabled_reason="")
+            await xray.sync_user(db.get(u.id), True)
+    if db.get_setting("real_ip") != "1":
+        return
+    devices.scan()
+    default = int(db.get_setting("ip_limit_default", "0") or 0)
+    action = db.get_setting("ip_limit_action", "warn")
+    for u in db.active_users():
+        limit = u.ip_limit or default
+        n = devices.count(u.name)
+        if not limit or n <= limit:
+            continue
+        name = html.escape(u.name)
+        if action == "disable":
+            db.update(u.id, enabled=0, disabled_reason=f"iplimit:{int(now + DEVICE_BAN)}")
+            await xray.sync_user(u, False)
+            await notify(bot, u, f"⛔ اکانت <b>{name}</b> با {n} دستگاه هم‌زمان (حد: {limit}) "
+                                 "استفاده شد و ۱۵ دقیقه قطع شد.")
+        elif now - _device_warned.get(u.name, 0) > 1800:
+            _device_warned[u.name] = now
+            await notify(bot, u, f"⚠️ اکانت <b>{name}</b> روی {n} دستگاه هم‌زمان استفاده می‌شود (حد: {limit}).")
+
+
 async def notify_admins(bot: Bot, text: str) -> None:
     for chat_id in db.admin_ids():
         try:
@@ -91,6 +124,7 @@ async def monitor(bot: Bot) -> None:
             await xray.flush_stats()
             await check_users(bot)
             await check_tunnels(bot)
+            await check_devices(bot)
             last = int(db.get_setting("last_backup", "0"))
             if time.time() - last > db.DAY:
                 db.set_setting("last_backup", str(int(time.time())))

@@ -64,7 +64,10 @@ def user_card(u) -> str:
         f"📅 ساخته شده: {time.strftime('%Y-%m-%d', time.localtime(u.created_at))}",
     ]
     if not u.enabled and u.disabled_reason:
-        lines.append(f"⛔ علت غیرفعال: {html.escape(u.disabled_reason)}")
+        reason = {"expired": "تاریخ انقضا رسید", "traffic": "حجم تمام شد", "manual": "دستی"}.get(
+            u.disabled_reason, "استفاده روی دستگاه‌های زیاد (موقت)" if u.disabled_reason.startswith("iplimit:")
+            else u.disabled_reason)
+        lines.append(f"⛔ علت غیرفعال: {html.escape(reason)}")
     if u.tg_id:
         lines.append(f"👤 تلگرام: <code>{u.tg_id}</code>")
     if u.note:
