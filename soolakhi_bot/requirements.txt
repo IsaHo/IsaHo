@@ -5,4 +5,3 @@ yt-dlp
 Pillow
 curl_cffi
 lxml
-twscrape

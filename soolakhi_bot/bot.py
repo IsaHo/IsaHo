@@ -34,8 +34,11 @@ IMG_EXT = re.compile(rf"\.({IMG_EXTS})(\?|$)", re.I)
 HEADERS = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124 Safari/537.36"}
 
 BTN_SITES, BTN_NEW, BTN_FAVS = "🌐 سایت‌های من", "➕ افزودن سایت", "⭐ ذخیره‌ها"
-BTN_STOP, BTN_SEARCH = "⏹ توقف", "🔎 جستجو"
-MENU = ReplyKeyboardMarkup([[BTN_SEARCH], [BTN_SITES, BTN_NEW], [BTN_FAVS, BTN_STOP]], resize_keyboard=True)
+BTN_STOP, BTN_SEARCH, BTN_PANEL = "⏹ توقف", "🔎 جستجو", "⚙️ پنل"
+MENU = ReplyKeyboardMarkup([[BTN_SEARCH], [BTN_SITES, BTN_NEW], [BTN_FAVS, BTN_PANEL], [BTN_STOP]],
+                           resize_keyboard=True)
+PAGE = 10  # تعداد آیتم در هر صفحه لیست‌ها
+START_TIME = __import__("time").time()
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("bot")
@@ -90,6 +93,15 @@ def host_of(url: str) -> str:
 def is_blocked(url: str) -> bool:
     h = host_of(url)
     return any(h == b or h.endswith("." + b) for b in BLOCKED)
+
+
+SETTINGS_FILE = os.path.join(BASE_DIR, "settings.json")
+_settings = load_json(SETTINGS_FILE, {})
+BATCH = int(_settings.get("batch", BATCH))
+
+
+def save_settings():
+    save_json(SETTINGS_FILE, {"batch": BATCH, "concurrency": CONCURRENCY})
 
 
 def save_favs():
@@ -289,7 +301,7 @@ async def ytdlp_info(url: str):
     return None, None
 
 
-CONCURRENCY = int(os.environ.get("CONCURRENCY", "8"))  # تعداد صفحات همزمان
+CONCURRENCY = int(_settings.get("concurrency", os.environ.get("CONCURRENCY", "8")))  # صفحات همزمان
 # صفحاتی که معمولاً ویدیو ندارند (اول بقیه بررسی می‌شوند، این‌ها آخر صف)
 LOW_PRIORITY = re.compile(r"/(tag|tags|category|categories|author|page|archive|date|search|label|cat|actors?|"
                           r"models?|pornstars?|channels?)(/|\?|$)|[?&](page|paged|p)=\d", re.I)
@@ -461,67 +473,6 @@ class SearchCrawler:
         return self.ready and (not self.queue or self.pages >= 150)
 
 
-# ---------------- جستجو در X (توییتر) ----------------
-# X بدون لاگین اجازه جستجو نمی‌دهد → کوکی یک حساب X لازم است (ترجیحاً حساب فرعی).
-# X_COOKIES="auth_token=...; ct0=..."
-X_COOKIES = os.environ.get("X_COOKIES", "").strip()
-_X_API = None
-
-
-async def x_api():
-    global _X_API
-    if _X_API is None:
-        from twscrape import API
-        _X_API = API(os.path.join(BASE_DIR, "x_accounts.db"))
-        accs = await _X_API.pool.get_all()
-        if not accs:
-            await _X_API.pool.add_account("bot_account", "-", "-", "-", cookies=X_COOKIES)
-    return _X_API
-
-
-class XSearch:
-    """جستجوی ویدیوهای X؛ هر بار BATCH ویدیو. لینک ویدیو مستقیم از video.twimg.com است."""
-    def __init__(self, query: str):
-        self.query, self.domain = query, "X"
-        self.sent, self.pages, self.finished, self.gen = set(), 0, False, None
-
-    @staticmethod
-    def _best(video):
-        mp4 = [v for v in video.variants if "mp4" in (v.contentType or "")]
-        return max(mp4, key=lambda v: v.bitrate or 0).url if mp4 else None
-
-    async def next_batch(self):
-        found = []
-        if self.gen is None:
-            api = await x_api()
-            self.gen = api.search(f"{self.query} filter:native_video", limit=500, kv={"product": "Media"})
-        try:
-            while len(found) < BATCH:
-                tw = await asyncio.wait_for(self.gen.__anext__(), 60)
-                self.pages += 1
-                vids = (tw.media.videos if tw.media else []) or []
-                for k, vd in enumerate(vids):
-                    url = self._best(vd)
-                    if not url:
-                        continue
-                    i = vid_id(url)
-                    text = re.sub(r"https://t\.co/\S+", "", tw.rawContent or "").strip()
-                    VIDEOS.setdefault(i, {"title": f"{text[:200]}\n👤 @{tw.user.username}" if text else f"@{tw.user.username}",
-                                          "image": vd.thumbnailUrl, "page": tw.url, "video": url, "ext": [tw.url, url]})
-                    if i not in self.sent:
-                        self.sent.add(i); found.append(i)
-        except (StopAsyncIteration, asyncio.TimeoutError):
-            self.finished = True
-        except Exception as e:
-            log.warning("x search fail: %s", e)
-            self.finished = True
-        return found
-
-    @property
-    def done(self):
-        return self.finished
-
-
 CRAWLERS: dict[int, Crawler] = {}  # chat_id -> وضعیت اسکن
 
 
@@ -536,7 +487,7 @@ def video_kb(i: str) -> InlineKeyboardMarkup:
     v = VIDEOS.get(i) or FAVS.get(i) or {}
     links = [InlineKeyboardButton(f"▶️ {urlparse(u).netloc.removeprefix('www.')[:20]}", url=u) for u in v.get("ext", [])]
     rows += [links[k:k + 2] for k in range(0, len(links), 2)]
-    if v.get("page", "").startswith("http") and host_of(v["page"]) not in ("x.com", "twitter.com"):
+    if v.get("page", "").startswith("http"):
         root = site_root(v["page"])
         if site_id(root) not in SITES:
             rows.append([InlineKeyboardButton(f"💾 ذخیره سایت {urlparse(root).netloc.removeprefix('www.')[:25]}",
@@ -591,9 +542,25 @@ async def send_batch(chat_id, ctx: ContextTypes.DEFAULT_TYPE):
     cr = CRAWLERS.get(chat_id)
     if not cr:
         return
-    msg = await ctx.bot.send_message(chat_id, f"در حال اسکن {cr.domain} ...")
-    found = await cr.next_batch()
-    await msg.delete()
+    stop_kb = InlineKeyboardMarkup([[InlineKeyboardButton("⏹ توقف", callback_data="stop:x")]])
+    msg = await ctx.bot.send_message(chat_id, f"🔄 در حال اسکن {cr.domain} ...", reply_markup=stop_kb)
+    task = asyncio.create_task(cr.next_batch())
+    last = None
+    while not task.done():
+        await asyncio.wait({task}, timeout=3)
+        if not task.done() and cr.pages != last and CRAWLERS.get(chat_id) is cr:
+            last = cr.pages
+            try:
+                await msg.edit_text(f"🔄 در حال اسکن {cr.domain}\n📄 {cr.pages} صفحه بررسی شد ...", reply_markup=stop_kb)
+            except Exception:
+                pass
+    found = task.result()
+    try:
+        await msg.delete()
+    except Exception:
+        pass
+    if CRAWLERS.get(chat_id) is not cr:
+        return
     for i in found:
         if CRAWLERS.get(chat_id) is not cr:  # در این حین توقف یا اسکن جدید زده شده
             return
@@ -601,7 +568,7 @@ async def send_batch(chat_id, ctx: ContextTypes.DEFAULT_TYPE):
         await asyncio.sleep(0.4)  # جلوگیری از flood limit تلگرام
     if cr.done:
         CRAWLERS.pop(chat_id, None)
-        if isinstance(cr, (SearchCrawler, XSearch)) and not cr.sent:
+        if isinstance(cr, SearchCrawler) and not cr.sent:
             await ctx.bot.send_message(chat_id, f"😕 برای «{cr.query}» ویدیویی پیدا نشد.")
         else:
             await ctx.bot.send_message(chat_id, f"✅ تمام شد ({cr.pages} صفحه بررسی شد).")
@@ -621,9 +588,24 @@ async def cmd_scan(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await start_scan(update.effective_chat.id, url, ctx)
 
 
-def sites_kb():
+def pager(prefix, page, total):
+    pages = max(1, -(-total // PAGE))
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("◀️ قبلی", callback_data=f"{prefix}:{page - 1}"))
+    if pages > 1:
+        nav.append(InlineKeyboardButton(f"{page + 1}/{pages}", callback_data="noop:x"))
+    if page < pages - 1:
+        nav.append(InlineKeyboardButton("بعدی ▶️", callback_data=f"{prefix}:{page + 1}"))
+    return [nav] if nav else []
+
+
+def sites_kb(page=0):
+    items = list(SITES.items())
+    page = max(0, min(page, (len(items) - 1) // PAGE if items else 0))
     rows = [[InlineKeyboardButton(f"🔍 {v['name']}", callback_data=f"scan:{i}"),
-             InlineKeyboardButton("🗑", callback_data=f"delsite:{i}")] for i, v in SITES.items()]
+             InlineKeyboardButton("🗑", callback_data=f"delsite:{i}")] for i, v in items[page * PAGE:(page + 1) * PAGE]]
+    rows += pager("sitespg", page, len(items))
     rows.append([InlineKeyboardButton(f"🚫 سایت‌های بلاک‌شده ({len(BLOCKED)})", callback_data="blocklist:x")])
     return InlineKeyboardMarkup(rows)
 
@@ -638,16 +620,54 @@ async def show_sites(chat_id, ctx):
     if not SITES:
         return await ctx.bot.send_message(chat_id, "هیچ سایتی ذخیره نشده. با «➕ افزودن سایت» اضافه کن.",
                                           reply_markup=sites_kb())
-    await ctx.bot.send_message(chat_id, "🌐 سایت‌های ذخیره‌شده (برای اسکن بزن، 🗑 برای حذف):", reply_markup=sites_kb())
+    await ctx.bot.send_message(chat_id, f"🌐 {len(SITES)} سایت ذخیره‌شده (برای اسکن بزن، 🗑 برای حذف):",
+                               reply_markup=sites_kb())
 
 
-async def show_favs(chat_id, ctx):
+def fmt_uptime():
+    sec = int(__import__("time").time() - START_TIME)
+    d, sec = divmod(sec, 86400); h, sec = divmod(sec, 3600); m = sec // 60
+    return (f"{d} روز " if d else "") + f"{h} ساعت {m} دقیقه"
+
+
+def panel_text():
+    import shutil
+    disk = shutil.disk_usage(BASE_DIR)
+    return ("⚙️ پنل کنترل\n\n"
+            f"🌐 سایت‌ها: {len(SITES)}\n⭐ ذخیره‌ها: {len(FAVS)}\n🚫 بلاک‌شده‌ها: {len(BLOCKED)}\n"
+            f"🧠 ویدیوهای داخل حافظه: {len(VIDEOS)}\n🔄 اسکن فعال: {len(CRAWLERS)}\n"
+            f"💾 فضای خالی دیسک: {disk.free // 2**30} GB\n⏱ مدت روشن بودن: {fmt_uptime()}\n"
+            f"📤 حداکثر حجم ارسال: {'2 GB' if LOCAL_API else '50 MB'}\n\n"
+            f"📦 ویدیو در هر صفحه: {BATCH}\n⚡ صفحات همزمان: {CONCURRENCY}")
+
+
+def panel_kb():
+    mark = lambda cur, val: f"✅ {val}" if cur == val else str(val)
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📦 ویدیو در صفحه:", callback_data="noop:x")] +
+        [InlineKeyboardButton(mark(BATCH, n), callback_data=f"setbatch:{n}") for n in (5, 10, 20)],
+        [InlineKeyboardButton("⚡ همزمانی:", callback_data="noop:x")] +
+        [InlineKeyboardButton(mark(CONCURRENCY, n), callback_data=f"setconc:{n}") for n in (4, 8, 16)],
+        [InlineKeyboardButton("📤 پشتیبان (سایت‌ها و ذخیره‌ها)", callback_data="backup:x")],
+        [InlineKeyboardButton("⬆️ آپدیت yt-dlp", callback_data="upytdlp:x"),
+         InlineKeyboardButton("🧹 خالی کردن حافظه", callback_data="clearmem:x")],
+        [InlineKeyboardButton("🔄 بروزرسانی آمار", callback_data="panel:x")],
+    ])
+
+
+async def show_favs(chat_id, ctx, page=0):
     if not FAVS:
         return await ctx.bot.send_message(chat_id, "هنوز چیزی ذخیره نکردی.")
-    await ctx.bot.send_message(chat_id, f"⭐ {len(FAVS)} ویدیو ذخیره شده:")
-    for i, v in list(FAVS.items()):
+    items = list(FAVS.items())[::-1]  # جدیدترین اول
+    chunk = items[page * PAGE:(page + 1) * PAGE]
+    if page == 0:
+        await ctx.bot.send_message(chat_id, f"⭐ {len(FAVS)} ویدیو ذخیره شده:")
+    for i, v in chunk:
         await send_card(chat_id, i, v, ctx)
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(0.4)
+    if (page + 1) * PAGE < len(items):
+        await ctx.bot.send_message(chat_id, f"{(page + 1) * PAGE} از {len(items)}", reply_markup=InlineKeyboardMarkup(
+            [[InlineKeyboardButton("➡️ ادامه ذخیره‌ها", callback_data=f"favpg:{page + 1}")]]))
 
 
 async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -689,6 +709,8 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await show_favs(chat_id, ctx)
     elif text == BTN_SEARCH:
         await update.message.reply_text("🔎 کلمه یا عبارت مورد نظرت رو بنویس:")
+    elif text == BTN_PANEL:
+        await update.message.reply_text(panel_text(), reply_markup=panel_kb())
     elif text == BTN_STOP:
         await update.message.reply_text("⏹ اسکن متوقف شد." if CRAWLERS.pop(chat_id, None) else "اسکنی در جریان نیست.")
     elif re.match(r"^(https?://)?[\w.-]+\.[a-z]{2,}(/\S*)?(\s+.+)?$", text, re.I):
@@ -710,8 +732,7 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         ctx.user_data["query"] = text[:100]
         await update.message.reply_text(f"🔎 جستجوی «{text[:100]}» کجا انجام بشه؟", reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("🌐 همه سایت‌های من", callback_data="sq:all")],
-            [InlineKeyboardButton("📌 انتخاب یک سایت", callback_data="sq:pick")]]
-            + ([[InlineKeyboardButton("🐦 جستجو در X (توییتر)", callback_data="sq:x")]] if X_COOKIES else [])))
+            [InlineKeyboardButton("📌 انتخاب یک سایت", callback_data="sq:pick")]]))
 
 
 CHUNK = 2 * 2**20  # هر تکه 2MB
@@ -850,6 +871,13 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return await q.answer("دسترسی ندارید")
     chat_id = q.message.chat_id
 
+    if q.data == "stop:x":
+        CRAWLERS.pop(chat_id, None)
+        await q.answer("⏹ متوقف شد")
+        try:
+            return await q.message.edit_text("⏹ اسکن متوقف شد.")
+        except Exception:
+            return
     if q.data == "next":
         await q.answer()
         if chat_id not in CRAWLERS:
@@ -876,13 +904,55 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             if not SITES:
                 return await q.edit_message_text("هیچ سایتی ذخیره نشده.")
             cr, where = SearchCrawler(query, [v["url"] for v in SITES.values()]), "همه سایت‌های من"
-        elif i == "x":
-            cr, where = XSearch(query), "X"
         else:
             return
         await q.edit_message_text(f"🔎 جستجوی «{query}» در {where} ...")
         CRAWLERS[chat_id] = cr
         return await send_batch(chat_id, ctx)
+    global BATCH, CONCURRENCY
+    if action == "noop":
+        return await q.answer()
+    if action == "sitespg":
+        await q.answer()
+        return await q.edit_message_reply_markup(sites_kb(int(i)))
+    if action == "favpg":
+        await q.answer()
+        await q.edit_message_reply_markup(None)
+        return await show_favs(chat_id, ctx, int(i))
+    if action in ("panel", "setbatch", "setconc", "clearmem"):
+        if action == "setbatch":
+            BATCH = int(i)
+        elif action == "setconc":
+            CONCURRENCY = int(i)
+        elif action == "clearmem":
+            keep = {k for k in VIDEOS if k in FAVS}
+            for d in (VIDEOS, CARD_HINTS, EXTERNAL):
+                for k in [k for k in d if k not in keep]:
+                    d.pop(k, None)
+        if action in ("setbatch", "setconc"):
+            save_settings()
+        await q.answer("✅ انجام شد" if action != "panel" else "")
+        try:
+            return await q.edit_message_text(panel_text(), reply_markup=panel_kb())
+        except Exception:
+            return
+    if action == "backup":
+        await q.answer()
+        for path in (SITES_FILE, FAV_FILE, BLOCK_FILE):
+            if os.path.exists(path):
+                with open(path, "rb") as f:
+                    await ctx.bot.send_document(chat_id, f, filename=os.path.basename(path))
+        return await q.message.reply_text("📥 برای بازگردانی، همین فایل‌ها رو برای بات بفرست.")
+    if action == "upytdlp":
+        await q.answer("در حال آپدیت...")
+        import sys
+        proc = await asyncio.create_subprocess_exec(sys.executable, "-m", "pip", "install", "-U", "-q", "yt-dlp",
+                                                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+        out, _ = await proc.communicate()
+        ver = await asyncio.create_subprocess_exec("yt-dlp", "--version", stdout=asyncio.subprocess.PIPE)
+        v_out, _ = await ver.communicate()
+        return await q.message.reply_text(f"⬆️ yt-dlp: {v_out.decode().strip() or 'خطا'}"
+                                          + (f"\n{out.decode()[-300:]}" if proc.returncode else ""))
     if action == "scan":
         await q.answer()
         if i not in SITES:
@@ -987,14 +1057,49 @@ async def cmd_debug(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(txt[:4000], disable_web_page_preview=True)
 
 
+async def on_document(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """بازگردانی پشتیبان: sites.json / favorites.json / blocked.json را ادغام می‌کند."""
+    if not allowed(update):
+        return
+    doc = update.message.document
+    targets = {"sites.json": (SITES, SITES_FILE), "favorites.json": (FAVS, FAV_FILE), "blocked.json": (BLOCKED, BLOCK_FILE)}
+    if doc.file_name not in targets or doc.file_size > 5 * 2**20:
+        return await update.message.reply_text("فقط فایل‌های پشتیبان sites.json، favorites.json یا blocked.json قبول میشه.")
+    f = await doc.get_file()
+    data = json.loads(bytes(await f.download_as_bytearray()).decode("utf-8"))
+    store, path = targets[doc.file_name]
+    before = len(store)
+    if isinstance(store, dict) and isinstance(data, dict):
+        store.update(data)
+    elif isinstance(store, list) and isinstance(data, list):
+        store.extend(d for d in data if d not in store)
+    else:
+        return await update.message.reply_text("فرمت فایل درست نیست.")
+    save_json(path, store)
+    await update.message.reply_text(f"✅ {len(store) - before} مورد جدید از {doc.file_name} اضافه شد.")
+
+
+async def post_init(app):
+    from telegram import BotCommand
+    await app.bot.set_my_commands([BotCommand("start", "منوی اصلی"), BotCommand("panel", "پنل کنترل"),
+                                   BotCommand("debug", "بررسی یک صفحه")])
+
+
+async def cmd_panel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if allowed(update):
+        await update.message.reply_text(panel_text(), reply_markup=panel_kb())
+
+
 def main():
     b = Application.builder().token(BOT_TOKEN).concurrent_updates(True)
     if LOCAL_API:
         b = b.base_url(LOCAL_API).local_mode(True)
-    app = b.build()
+    app = b.post_init(post_init).build()
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("scan", cmd_scan))
     app.add_handler(CommandHandler("debug", cmd_debug))
+    app.add_handler(CommandHandler("panel", cmd_panel))
+    app.add_handler(MessageHandler(filters.Document.ALL, on_document))
     app.add_handler(CallbackQueryHandler(on_button))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     app.run_polling()
