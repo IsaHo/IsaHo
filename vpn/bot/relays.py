@@ -21,7 +21,8 @@ def record(data: dict) -> dict:
         data["tx_rate"] = max(0, (data.get("tx", 0) - prev.get("tx", 0)) / dt)
     data["seen"] = now
     reports[ip] = data
-    return pending.pop(ip, {})
+    import xray
+    return {**pending.pop(ip, {}), "proxy": xray.split_relay_inbound()}
 
 
 def queue(ip: str, action: str, ref: str = "") -> None:
@@ -45,6 +46,18 @@ def is_local_request(request) -> bool:
     sock = request.transport.get_extra_info("sockname") if request.transport else None
     peer = request.remote or ""
     return bool(sock) and sock[0] == "127.0.0.1" and peer.startswith("127.")
+
+
+def ready_for_real_ip() -> tuple:
+    """(ok, reason): every configured relay must run an agent that can switch PROXY protocol."""
+    import links
+    for host, _ in links.relays():
+        r = reports.get(host)
+        if not r or not online(host):
+            return False, f"سرور {host} گزارش نمی‌دهد"
+        if int(r.get("agent", 1)) < 2:
+            return False, f"سرور {host} قدیمی است؛ اول «⬆️ آپدیت همه» را بزنید"
+    return True, ""
 
 
 def online(ip: str) -> bool:
