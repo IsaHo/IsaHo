@@ -3,7 +3,7 @@
 ربات تلگرام: اسکن مرحله‌ای سایت‌ها، ارسال تیتر + عکس ویدیوها، دانلود با دکمه، ذخیره علاقه‌مندی‌ها.
 فایل ویدیو روی سرور نگه داشته نمی‌شود (فایل موقت بلافاصله بعد از ارسال پاک می‌شود).
 """
-import asyncio, hashlib, html as htmlmod, io, json, logging, os, re, tempfile, time, zipfile
+import asyncio, hashlib, html as htmlmod, io, json, logging, os, re, tempfile, time, unicodedata, zipfile
 from collections import deque
 from urllib.parse import quote_plus, unquote, urljoin, urlparse
 
@@ -207,6 +207,123 @@ def save_folders():
 
 def folder_name(fid) -> str | None:
     return FOLDERS["names"].get(str(fid)) if fid else None
+
+
+# ----------------------------- جستجو: یکسان‌سازی حروف -----------------------------
+# ي↔ی ، ك↔ک ، همزه‌ها، و حذف نیم‌فاصله/اعراب تا جستجو به شکل نوشتن حساس نباشد.
+NORM_MAP = str.maketrans({"\u064a": "\u06cc", "\u0643": "\u06a9", "\u0629": "\u0647", "\u06c0": "\u0647",
+                          "\u0623": "\u0627", "\u0625": "\u0627", "\u0622": "\u0627", "\u0671": "\u0627",
+                          "\u0624": "\u0648", "\u0626": "\u06cc", "\u200c": " ", "\u200f": "", "\u200e": "",
+                          "\u0640": ""})
+
+
+def norm(t: str) -> str:
+    t = unicodedata.normalize("NFKC", (t or "").translate(NORM_MAP)).lower()
+    t = re.sub(r"[\u064b-\u0652]", "", t)              # اعراب عربی
+    t = re.sub(r"[^0-9a-z\u0600-\u06ff]+", " ", t)
+    return re.sub(r"\s+", " ", t).strip()
+
+
+def search_words(q: str):
+    """کلمه‌ها را به مثبت و منفی (با پیشوند -) تقسیم می‌کند؛ هر دو یکسان‌سازی‌شده."""
+    pos, neg = [], []
+    for raw in re.split(r"\s+", (q or "").strip()):
+        if len(raw) > 1 and raw[0] == "-":
+            neg += [w for w in norm(raw[1:]).split() if len(w) > 1]
+        else:
+            pos += [w for w in norm(raw).split() if len(w) > 1]
+    return pos, neg
+
+
+def match_score(text_norm: str, pos, neg) -> int:
+    """امتیاز = تعداد کلمه‌های مثبتی که (حتی به‌صورت بخشی از کلمه) پیدا شدند؛ کلمهٔ منفی = رد."""
+    if not pos or any(n in text_norm for n in neg):
+        return 0
+    return sum(1 for p in pos if p in text_norm)
+
+
+# ----------------------------- 🗃 فهرست محلی ویدیوها -----------------------------
+# هر ویدیویی که در اسکن/بررسی دیده می‌شود این‌جا (فقط متن و لینک) ذخیره می‌شود تا جستجو
+# فوری و بدون باز کردن سایت انجام شود. حجمش ناچیز است و قدیمی‌ترها خودکار حذف می‌شوند.
+INDEX_FILE = os.path.join(BASE_DIR, "index.json")
+INDEX: dict[str, dict] = load_json(INDEX_FILE, {})
+INDEX_MAX = 40000
+_index_dirty = 0
+_INDEX_KEYS = ("title", "image", "page", "video", "ext", "dur", "q")
+
+
+def index_add(i: str, card: dict):
+    global _index_dirty
+    INDEX[i] = {k: card.get(k) for k in _INDEX_KEYS}
+    INDEX[i]["n"] = norm((card.get("title") or "") + " " + unquote(card.get("page") or ""))
+    INDEX[i]["ts"] = time.time()
+    _index_dirty += 1
+
+
+def flush_index():
+    global _index_dirty
+    if not _index_dirty:
+        return
+    if len(INDEX) > INDEX_MAX:
+        for k in sorted(INDEX, key=lambda k: INDEX[k].get("ts", 0))[:len(INDEX) - INDEX_MAX]:
+            INDEX.pop(k, None)
+    save_json(INDEX_FILE, INDEX)
+    _index_dirty = 0
+
+
+def index_search(query: str, limit: int = 120) -> list[str]:
+    pos, neg = search_words(query)
+    if not pos:
+        return []
+    scored = []
+    for i, v in INDEX.items():
+        sc = match_score(v.get("n") or norm(v.get("title", "")), pos, neg)
+        if sc:
+            scored.append((sc, v.get("ts", 0), i))
+    scored.sort(key=lambda x: (-x[0], -x[1]))        # بیشترین کلمهٔ جورشده، بعد تازه‌ترین
+    return [i for _, _, i in scored[:limit]]
+
+
+def index_card(i: str) -> dict | None:
+    v = VIDEOS.get(i) or INDEX.get(i) or FAVS.get(i)
+    if v and i not in VIDEOS:
+        VIDEOS[i] = {k: val for k, val in v.items() if k not in ("n", "ts")}
+    return VIDEOS.get(i)
+
+
+RESULTS_PER = 10
+
+
+def build_results(ud, page=0):
+    r = ud.get("res") or {}
+    ids, query = r.get("ids") or [], r.get("q", "")
+    pages = max(1, -(-len(ids) // RESULTS_PER))
+    page = max(0, min(page, pages - 1))
+    chunk = ids[page * RESULTS_PER:(page + 1) * RESULTS_PER]
+    lines = [f"🔎 «{query}» — {len(ids)} نتیجه از فهرست محلی:", ""]
+    nums = []
+    for off, i in enumerate(chunk):
+        n = page * RESULTS_PER + off + 1
+        v = INDEX.get(i) or VIDEOS.get(i) or FAVS.get(i) or {}
+        info = " • ".join(x for x in (fmt_dur(v["dur"]) if v.get("dur") else None, v.get("q")) if x)
+        mark = ("📥" if (VIEWED.get(i) or {}).get("k") == "d" else "👁") if i in VIEWED else ""
+        host = urlparse(v.get("page", "")).netloc.removeprefix("www.")
+        lines.append(f"{n}. {mark}{(v.get('title') or '?')[:72]}" + (f"\n    ⏱ {info}" if info else "")
+                     + (f"  · {host}" if host else ""))
+        nums.append(InlineKeyboardButton(str(n), callback_data=f"pick:{i}"))
+    rows = [nums[k:k + 5] for k in range(0, len(nums), 5)]
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("◀️ قبلی", callback_data=f"rpg:{page - 1}"))
+    if pages > 1:
+        nav.append(InlineKeyboardButton(f"{page + 1}/{pages}", callback_data="noop:x"))
+    if page < pages - 1:
+        nav.append(InlineKeyboardButton("بعدی ▶️", callback_data=f"rpg:{page + 1}"))
+    if nav:
+        rows.append(nav)
+    rows.append([InlineKeyboardButton("🔎 جستجوی زنده در سایت‌ها (نتایج بیشتر)", callback_data="rlive:x")])
+    lines.append("\n👇 عدد هر ویدیو رو بزن تا کارت کاملش باز شه.")
+    return "\n".join(lines)[:4000], InlineKeyboardMarkup(rows)
 
 
 def save_favs():
@@ -677,12 +794,21 @@ async def process_page(url, html, domain, sent: set, found: list, query_words=No
                 ext = EXTERNAL.pop(url, [])
                 if not videos and ext:
                     videos = {url}  # فقط لینک پلیر/فایل‌هاست دارد → کارت با دکمه‌های لینک
-                if query_words and videos and not any(w in f"{title} {url}".lower() for w in query_words):
-                    videos = set()  # نتیجه جستجو به کلمه ربطی ندارد
-                for v in videos:
-                    i = vid_id(v)
+                if query_words:
+                    pos, neg = query_words
+                    if videos and not match_score(norm(f"{title} {unquote(url)}"), pos, neg):
+                        videos = set()  # نتیجه جستجو به کلمه ربطی ندارد
+                if videos and urlparse(url).path.strip("/") == "" and len(links) >= 5:
+                    videos = set()      # صفحهٔ اصلی سایت یک فهرست است، نه یک ویدیو
+                if videos:
+                    # هر صفحه = یک ویدیو؛ از بین فرمت‌ها/کیفیت‌ها یکی انتخاب می‌شود (نه چند کارت تکراری)
+                    direct = [v for v in videos if VIDEO_EXT.search(v)]
+                    mp4 = [v for v in direct if ".mp4" in v.lower()]
+                    v = (mp4 or direct or sorted(videos))[0]
+                    i = vid_id(url)
                     VIDEOS.setdefault(i, {"title": title, "image": image, "page": url, "video": v, "ext": ext,
                                           "dur": dur, "q": q})
+                    index_add(i, VIDEOS[i])
                     if i not in sent:
                         sent.add(i)
                         found.append(i)
@@ -690,10 +816,8 @@ async def process_page(url, html, domain, sent: set, found: list, query_words=No
 
 
 SEARCH_PATHS = ["?s={q}", "search/{q}/", "?q={q}", "search?q={q}", "videos/search?q={q}", "search/?query={q}"]
-
-
-def norm_words(q: str):
-    return [w for w in re.split(r"\s+", q.lower()) if len(w) > 1]
+SPATH_FILE = os.path.join(BASE_DIR, "search_paths.json")
+SPATHS: dict = load_json(SPATH_FILE, {})     # domain -> الگوی جستجویی که قبلاً جواب داد
 
 
 class SearchCrawler:
@@ -703,13 +827,16 @@ class SearchCrawler:
         self.domain = ("، ".join(urlparse(u).netloc.removeprefix("www.") for u in self.sites[:3])
                                         + (" ..." if len(self.sites) > 3 else ""))
         self.queue, self.seen, self.sent, self.pages, self.ready = deque(), set(), set(), 0, False
-        self.words = norm_words(query)
+        self.pos, self.neg = search_words(query)
 
     async def _site_results(self, c, site: str):
         """صفحه جستجوی داخلی سایت را پیدا می‌کند (وردپرس ?s= و الگوهای رایج) و لینک نتایج را برمی‌گرداند."""
         base = site if site.endswith("/") else site + "/"
         dom = urlparse(base).netloc.removeprefix("www.")
-        for path in SEARCH_PATHS:
+        paths = SEARCH_PATHS
+        if SPATHS.get(dom) in SEARCH_PATHS:          # الگوی به‌خاطرسپرده‌شده اول امتحان شود
+            paths = [SPATHS[dom]] + [p for p in SEARCH_PATHS if p != SPATHS[dom]]
+        for path in paths:
             u = urljoin(base, path.format(q=quote_plus(self.query)))
             try:
                 r = await smart_get(c, u)
@@ -720,9 +847,12 @@ class SearchCrawler:
             before = set(CARD_HINTS)
             parse_page(str(r.url), r.text, dom)
             cards = [k for k in CARD_HINTS if k not in before and urlparse(k).netloc.removeprefix("www.") == dom]
-            rel = [k for k in cards if any(w in (CARD_HINTS[k].get("title") or "").lower() + unquote(k).lower()
-                                           for w in self.words)]
+            rel = [k for k in cards if match_score(norm((CARD_HINTS[k].get("title") or "") + " " + unquote(k)),
+                                                   self.pos, self.neg)]
             if rel:
+                if SPATHS.get(dom) != path:
+                    SPATHS[dom] = path
+                    save_json(SPATH_FILE, SPATHS)
                 return rel
         return []
 
@@ -748,7 +878,8 @@ class SearchCrawler:
                     log.warning("fetch fail %s: %s", url, e)
                     return
                 final = str(r.url)
-                await process_page(final, r.text, urlparse(final).netloc.removeprefix("www."), self.sent, found)
+                await process_page(final, r.text, urlparse(final).netloc.removeprefix("www."), self.sent, found,
+                                   (self.pos, self.neg))
 
             while self.queue and len(found) < BATCH and self.pages < 150:
                 batch = []
@@ -888,6 +1019,7 @@ async def send_batch(chat_id, ctx: ContextTypes.DEFAULT_TYPE):
         rounds += 1
         if len(found) >= max(1, BATCH // 2) or cr.done or rounds >= 4 or CRAWLERS.get(chat_id) is not cr:
             break
+    flush_index()
     try:
         await msg.delete()
     except Exception:
@@ -971,7 +1103,7 @@ def panel_text():
     disk = shutil.disk_usage(BASE_DIR)
     return ("⚙️ پنل کنترل\n\n"
             f"🌐 سایت‌ها: {len(SITES)}\n⭐ ذخیره‌ها: {len(FAVS)}\n🚫 بلاک‌شده‌ها: {len(BLOCKED)}\n"
-            f"🧠 ویدیوهای داخل حافظه: {len(VIDEOS)}\n🔄 اسکن فعال: {len(CRAWLERS)}\n"
+            f"🧠 ویدیوهای داخل حافظه: {len(VIDEOS)}\n🗃 فهرست جستجوی محلی: {len(INDEX)}\n🔄 اسکن فعال: {len(CRAWLERS)}\n"
             f"💾 فضای خالی دیسک: {disk.free // 2**30} GB\n⏱ مدت روشن بودن: {fmt_uptime()}\n"
             f"📤 حداکثر حجم ارسال: {'2 GB' if LOCAL_API else '50 MB'}\n\n"
             f"📦 ویدیو در هر صفحه: {BATCH}\n⚡ صفحات همزمان: {CONCURRENCY}\n\n"
@@ -1119,11 +1251,19 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text("می‌خوای این سایت ذخیره بشه؟", reply_markup=InlineKeyboardMarkup(
                     [[InlineKeyboardButton("💾 ذخیره سایت", callback_data=f"savesite:{i}")]]))
             await start_scan(chat_id, url, ctx)
-    else:  # هر متن دیگری = جستجو
+    else:  # هر متن دیگری = جستجو: اول فهرست محلی (فوری)، بعد در صورت نیاز جستجوی زنده
         ctx.user_data["query"] = text[:100]
-        await update.message.reply_text(f"🔎 جستجوی «{text[:100]}» کجا انجام بشه؟", reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("🌐 همه سایت‌های من", callback_data="sq:all")],
-            [InlineKeyboardButton("📌 انتخاب یک سایت", callback_data="sq:pick")]]))
+        ids = index_search(text)
+        if ids:
+            ctx.user_data["res"] = {"q": text[:100], "ids": ids}
+            txt, kb = build_results(ctx.user_data, 0)
+            await update.message.reply_text(txt, reply_markup=kb, disable_web_page_preview=True)
+        else:
+            await update.message.reply_text(
+                f"🔎 توی فهرست محلی چیزی برای «{text[:100]}» نبود. جستجوی زنده کجا انجام بشه؟",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🌐 همه سایت‌های من", callback_data="sq:all")],
+                    [InlineKeyboardButton("📌 انتخاب یک سایت", callback_data="sq:pick")]]))
 
 
 CHUNK = 2 * 2**20  # هر تکه 2MB
@@ -1483,6 +1623,28 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await q.answer("🩺 تست شروع شد")
         asyncio.create_task(run_doctor(chat_id, ctx.bot))
         return
+    if action == "pick":
+        v = index_card(i)
+        if not v:
+            return await q.answer("این ویدیو دیگه توی فهرست نیست؛ دوباره اسکن کن", show_alert=True)
+        await q.answer()
+        return await send_card(chat_id, i, v, ctx)
+    if action == "rpg":
+        await q.answer()
+        txt, kb = build_results(ctx.user_data, int(i))
+        try:
+            return await q.edit_message_text(txt, reply_markup=kb, disable_web_page_preview=True)
+        except Exception:
+            return
+    if action == "rlive":
+        query = ctx.user_data.get("query")
+        if not query:
+            return await q.answer("دوباره کلمه رو بفرست", show_alert=True)
+        await q.answer()
+        return await q.message.reply_text(
+            f"🔎 جستجوی زندهٔ «{query}» کجا انجام بشه؟", reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🌐 همه سایت‌های من", callback_data="sq:all")],
+                [InlineKeyboardButton("📌 انتخاب یک سایت", callback_data="sq:pick")]]))
     if action == "fdir":
         await q.answer()
         return await show_favs(chat_id, ctx, 0, i)
@@ -1909,6 +2071,7 @@ async def check_new_videos(app, chat_id, manual=False):
                 await send_card(chat_id, i, VIDEOS[i], app)
                 await asyncio.sleep(0.4)
         save_json(SEEN_FILE, SEEN)
+        flush_index()
         WATCH["last"] = __import__("time").time()
         save_settings()
         if manual or baselined:
