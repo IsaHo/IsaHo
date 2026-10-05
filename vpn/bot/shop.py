@@ -36,6 +36,7 @@ class ShopAdmin(StatesGroup):
     discount = State()
     test = State()
     referral = State()
+    cost = State()
     reseller = State()
 
 
@@ -491,8 +492,18 @@ def shop_admin_text() -> str:
         f"📋 پلن‌ها: {len(shopdb.plans(False))} | 🎟 کدها: {len(shopdb.discounts())} | "
         f"🤝 نماینده‌ها: {len(shopdb.resellers())}\n"
         f"🎁 اکانت تست: {test_text}\n"
-        f"👥 پاداش دعوت: {db.get_setting('shop_ref_percent', '0') or 0}٪"
+        f"👥 پاداش دعوت: {db.get_setting('shop_ref_percent', '0') or 0}٪\n"
+        + profit_text(s_month)
     )
+
+
+def profit_text(month_sales: int) -> str:
+    cost = int(db.get_setting("shop_cost", "0") or 0)
+    if not cost:
+        return "💰 هزینه‌ی ماهانه‌ی سرورها ثبت نشده («💰 هزینه‌ها»)"
+    profit = month_sales - cost
+    return (f"💰 هزینه‌ی ماهانه: {toman(cost)} | "
+            f"{'سود' if profit >= 0 else 'زیان'} این ماه: <b>{toman(abs(profit))}</b>")
 
 
 def shop_admin_kb():
@@ -500,7 +511,7 @@ def shop_admin_kb():
         [("📋 پلن‌ها", "sa:plans"), ("💳 کارت", "sa:card")],
         [("🎟 کدهای تخفیف", "sa:codes"), ("🤝 نماینده‌ها", "sa:resellers")],
         [("🎁 اکانت تست", "sa:test"), ("👥 پاداش دعوت", "sa:ref")],
-        [("🧾 سفارش‌های در انتظار", "sa:pending")],
+        [("🧾 سفارش‌های در انتظار", "sa:pending"), ("💰 هزینه‌ها", "sa:cost")],
         [("👁 نمای مشتری", "sa:preview")],
     ])
 
@@ -511,15 +522,28 @@ ADMIN_PROMPTS = {
     "test": (ShopAdmin.test, "🎁 اکانت تست: <code>مگابایت | ساعت</code> مثلاً <code>500 | 24</code>\n"
                              "برای خاموش کردن: <code>off</code>"),
     "ref": (ShopAdmin.referral, "👥 چند درصد از هر خرید به کیف پول دعوت‌کننده برود؟ (۰ = خاموش)"),
+    "cost": (ShopAdmin.cost, "💰 جمع هزینه‌ی ماهانه‌ی همه‌ی سرورها (آلمان + ایران) به تومان؟\n"
+                             "برای محاسبه‌ی سود ماهانه در صفحه‌ی فروشگاه."),
 }
 
 
-@router.callback_query(F.data.in_({"sa:card", "sa:test", "sa:ref"}), h.admin)
+@router.callback_query(F.data.in_({"sa:card", "sa:test", "sa:ref", "sa:cost"}), h.admin)
 async def shop_admin_ask(cb: CallbackQuery, state: FSMContext):
     await cb.answer()
     st, prompt = ADMIN_PROMPTS[cb.data[3:]]
     await state.set_state(st)
     await cb.message.answer(prompt, reply_markup=h.CANCEL_KB)
+
+
+@router.message(ShopAdmin.cost, h.admin)
+async def set_cost(msg: Message, state: FSMContext):
+    v = h.parse_number((msg.text or "").replace(",", "").replace("٬", ""))
+    if v is None:
+        await msg.answer("❌ یک عدد بفرستید، مثلاً <code>2500000</code>")
+        return
+    await state.clear()
+    db.set_setting("shop_cost", str(int(v)))
+    await msg.answer("✅ ذخیره شد.", reply_markup=h.ADMIN_KB)
 
 
 @router.message(ShopAdmin.card, h.admin)
@@ -566,6 +590,21 @@ PRESETS = [
     ("📅 سه‌ماهه ۱۵۰ گیگ", 150, 90, 420_000),
     ("👨‍👩‍👧 خانوادگی ۳۰۰ گیگ", 300, 60, 750_000),
 ]
+
+
+def apply_defaults() -> None:
+    """Recommended starting settings, applied once on a fresh shop; admins can change them all later."""
+    if db.get_setting("shop_seeded"):
+        return
+    if not shopdb.plans(False):
+        for title, gb, days, price in PRESETS:
+            shopdb.add_plan(title, gb, days, price)
+    defaults = {"shop_test": "500:24", "shop_ref_percent": "10",
+                "ip_limit_default": "2", "ip_limit_action": "warn"}
+    for key, value in defaults.items():
+        if not db.get_setting(key):
+            db.set_setting(key, value)
+    db.set_setting("shop_seeded", "1")
 
 
 def plans_admin():

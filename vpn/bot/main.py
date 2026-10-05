@@ -15,6 +15,8 @@ import handlers
 import shop
 import shopdb
 import devices
+import links
+import relays
 import sub_server
 import tunnels
 import xray
@@ -84,6 +86,31 @@ _device_warned = {}  # name -> last warning time
 DEVICE_BAN = 15 * 60
 
 
+async def auto_real_ip(bot: Bot) -> None:
+    """Turn on real client IPs (needed for device limits) once, as soon as every relay can follow."""
+    if db.get_setting("real_ip_auto") or db.get_setting("real_ip") == "1" or not links.relays():
+        return
+    ok, _ = relays.ready_for_real_ip()
+    if not ok:
+        return
+    db.set_setting("real_ip", "1")
+    if not xray.split_relay_inbound():
+        db.set_setting("real_ip", "")
+        db.set_setting("real_ip_auto", "unavailable")
+        return
+    try:
+        await xray.apply_all()
+    except Exception:
+        log.exception("enabling real IPs failed")
+        db.set_setting("real_ip", "")
+        await xray.apply_all()
+        db.set_setting("real_ip_auto", "failed")
+        return
+    db.set_setting("real_ip_auto", "done")
+    await notify_admins(bot, "📱 محدودیت دستگاه فعال شد (حد پیش‌فرض ۲، فقط هشدار). "
+                             "از ⚙️ تنظیمات ← 📱 محدودیت دستگاه قابل تغییر است.")
+
+
 async def check_devices(bot: Bot) -> None:
     now = time.time()
     # lift temporary device-limit suspensions
@@ -126,6 +153,7 @@ async def monitor(bot: Bot) -> None:
             await xray.flush_stats()
             await check_users(bot)
             await check_tunnels(bot)
+            await auto_real_ip(bot)
             await check_devices(bot)
             last = int(db.get_setting("last_backup", "0"))
             if time.time() - last > db.DAY:
@@ -149,6 +177,7 @@ async def main() -> None:
         raise SystemExit("BOT_TOKEN and ADMIN_IDS must be set in " + "/etc/isaho-vpn/vpn.env")
     db.init()
     shopdb.init()
+    shop.apply_defaults()
     await xray.apply_all()
 
     bot = Bot(cfg.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
