@@ -33,6 +33,14 @@ def status_icon(u) -> str:
     return "🟢"
 
 
+def day_chart(rows: list) -> list:
+    """rows: [(YYYY-MM-DD, bytes)] newest first -> chart lines oldest first."""
+    if not rows:
+        return []
+    peak = max(b for _, b in rows) or 1
+    return [f"<code>{d[5:]}</code> {'▇' * max(1, round(b / peak * 10))} {size(b)}" for d, b in reversed(rows)]
+
+
 def bar(used: int, total: int, width: int = 12) -> str:
     if not total:
         return ""

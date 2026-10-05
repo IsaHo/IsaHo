@@ -7,6 +7,7 @@ from aiohttp import web
 
 import db
 import links
+import relays
 from config import cfg
 
 log = logging.getLogger(__name__)
@@ -30,9 +31,22 @@ async def _sub(request: web.Request) -> web.Response:
     )
 
 
+async def _relay_report(request: web.Request) -> web.Response:
+    if not relays.is_local_request(request):
+        raise web.HTTPNotFound()
+    try:
+        data = await request.json()
+    except ValueError:
+        raise web.HTTPBadRequest()
+    if not isinstance(data, dict):
+        raise web.HTTPBadRequest()
+    return web.json_response(relays.record(data))
+
+
 async def start() -> web.AppRunner:
-    app = web.Application()
+    app = web.Application(client_max_size=64 * 1024)
     app.router.add_get("/sub/{token}", _sub)
+    app.router.add_post("/relay/report", _relay_report)
     runner = web.AppRunner(app, access_log=None)
     await runner.setup()
     ctx = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)

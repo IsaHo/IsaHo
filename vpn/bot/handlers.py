@@ -22,6 +22,7 @@ from aiogram.types import (BufferedInputFile, CallbackQuery, FSInputFile, Inline
 import db
 import fmt
 import links
+import relays
 import tunnels
 import xray
 from config import cfg
@@ -58,6 +59,7 @@ class Edit(StatesGroup):
     note = State()
     search = State()
     cdn_ip = State()
+    backup_chat = State()
     relays = State()
     broadcast = State()
     add_admin = State()
@@ -223,7 +225,9 @@ async def my_account(msg: Message):
         await msg.answer("سلام 👋\nبرای استفاده، لینک اختصاصی‌ای که مدیر برایتان فرستاده را باز کنید.")
         return
     for u in users:
-        await msg.answer(fmt.user_card(u) + "\n\n" + links_text(u).rsplit("\n🤖", 1)[0],
+        chart = fmt.day_chart(db.user_daily(u.name, 7))
+        usage = ("\n\n📊 <b>مصرف ۷ روز اخیر</b>\n" + "\n".join(chart)) if chart else ""
+        await msg.answer(fmt.user_card(u) + usage + "\n\n" + links_text(u).rsplit("\n🤖", 1)[0],
                          reply_markup=USER_KB)
 
 
@@ -530,6 +534,7 @@ async def settings_menu(msg: Message):
     )
     await msg.answer(text, reply_markup=ikb([
         [("🔗 لینک‌های سابسکریپشن", "lt:menu"), ("👮 مدیران", "adm:menu")],
+        [("🛰 سرورهای ایران", "rl:menu"), ("📦 کانال بکاپ", "set:bchat")],
         [("🇮🇷 سرور واسط", "set:relays"), ("🌐 تنظیم IP تمیز کلادفلر", "set:cdn")],
         [("🧪 دستور تست سرور واسط", "set:relaytest")],
         [("🔌 پورت CDN: 443", "set:port:443"), (f"🔌 پورت CDN: {cfg.cdn_port}", f"set:port:{cfg.cdn_port}")],
@@ -631,6 +636,116 @@ async def admins_del(cb: CallbackQuery):
     await cb.message.edit_text(text, reply_markup=kb)
 
 
+@router.callback_query(F.data == "set:bchat", owner)
+async def backup_chat_ask(cb: CallbackQuery, state: FSMContext):
+    await cb.answer()
+    await state.set_state(Edit.backup_chat)
+    current = db.get_setting("backup_chat") or "ندارد"
+    await cb.message.answer(
+        f"📦 کانال بکاپ فعلی: <code>{current}</code>\n\n"
+        "بکاپ روزانه علاوه بر شما به این کانال هم فرستاده می‌شود، تا اگر سرور از دست رفت، اطلاعات بماند.\n"
+        "۱) یک کانال خصوصی بسازید و ربات را ادمین آن کنید.\n"
+        "۲) یک پیام از کانال را برای این ربات فوروارد کنید، یا آیدی عددی کانال را بفرستید (مثل <code>-100123...</code>).\n"
+        "برای حذف: <code>reset</code>", reply_markup=CANCEL_KB)
+
+
+@router.callback_query(F.data == "set:bchat", admin)
+async def backup_chat_denied(cb: CallbackQuery):
+    await cb.answer("فقط مالک ربات می‌تواند کانال بکاپ را تغییر دهد", show_alert=True)
+
+
+@router.message(Edit.backup_chat, owner)
+async def backup_chat_set(msg: Message, state: FSMContext, bot: Bot):
+    origin = getattr(msg, "forward_origin", None)
+    chat = getattr(origin, "chat", None)
+    text = (msg.text or "").strip()
+    if text.lower() == "reset":
+        db.set_setting("backup_chat", "")
+        await state.clear()
+        await msg.answer("✅ کانال بکاپ حذف شد.", reply_markup=ADMIN_KB)
+        return
+    chat_id = chat.id if chat else (int(text) if re.fullmatch(r"-?\d+", text) else None)
+    if chat_id is None:
+        await msg.answer("❌ یک پیام از کانال فوروارد کنید یا آیدی عددی آن را بفرستید.")
+        return
+    try:
+        await bot.send_message(chat_id, "✅ این کانال برای بکاپ‌های ربات تنظیم شد.")
+    except Exception as e:
+        await msg.answer(f"❌ نمی‌توانم در این کانال پیام بفرستم. ربات ادمین کانال است؟\n<code>{html.escape(str(e))[:200]}</code>")
+        return
+    db.set_setting("backup_chat", str(chat_id))
+    await state.clear()
+    await msg.answer("✅ کانال بکاپ تنظیم شد. یک بکاپ همین الان فرستاده می‌شود.", reply_markup=ADMIN_KB)
+    await send_backup(bot, chat_id)
+
+
+# ---------- Iranian relay servers (agents report through the tunnels) ----------
+
+def relay_script_url() -> str:
+    # pinned to this server's commit: same version everywhere, and no GitHub cache surprises
+    return f"https://raw.githubusercontent.com/IsaHo/IsaHo/{relays.current_ref()}/vpn/relay.sh"
+
+
+def relays_view():
+    lines, rows = ["🛰 <b>سرورهای ایران</b>", ""], []
+    known = {h for h, _ in links.relays()}
+    shown = sorted(known | set(relays.reports))
+    if not shown:
+        return "هیچ سرور ایرانی گزارشی نفرستاده است.", None
+    for i, ip in enumerate(shown, 1):
+        r = relays.reports.get(ip)
+        if not r:
+            lines.append(f"⚪️ <code>{ip}</code> — هنوز گزارشی نفرستاده (relay.sh را دوباره اجرا کنید)")
+            continue
+        ago = int(time.time() - r["seen"])
+        icon = "🟢" if relays.online(ip) and r.get("tunnels_up") == r.get("tunnels_total") else (
+            "🟡" if relays.online(ip) and r.get("tunnels_up") else "🔴")
+        lines += [
+            f"{icon} <b>{html.escape(str(r.get('hostname', ip)))}</b> <code>{ip}</code>",
+            f"   تانل‌ها: {r.get('tunnels_up', '?')}/{r.get('tunnels_total', '?')} | "
+            f"load {r.get('load', 0):.2f} | RAM {r.get('mem', 0)}%",
+            f"   ⬇️ {fmt.size(int(r.get('rx_rate', 0)))}/s ⬆️ {fmt.size(int(r.get('tx_rate', 0)))}/s | "
+            f"آخرین گزارش: {ago} ثانیه پیش",
+            f"   نسخه: <code>{html.escape(str(r.get('version', '?'))[:10])}</code>",
+        ]
+        if r.get("last"):
+            lines.append(f"   آخرین آپدیت: <code>{html.escape(str(r['last'])[-120:])}</code>")
+        if ip in relays.pending:
+            lines.append(f"   ⏳ در صف: {relays.pending[ip]['action']}")
+        rows.append([(f"🔄 ریستارت {ip}", f"rl:restart:{ip}"), (f"⬆️ آپدیت {ip}", f"rl:update:{ip}")])
+    rows.append([("⬆️ آپدیت همه", "rl:update:all"), ("🔃 بروزرسانی", "rl:menu")])
+    lines += ["", f"نسخه‌ی سرور خارج: <code>{relays.current_ref()[:10]}</code>"]
+    return "\n".join(lines), ikb(rows)
+
+
+@router.callback_query(F.data == "rl:menu", admin)
+async def relays_menu(cb: CallbackQuery):
+    await cb.answer()
+    text, kb = relays_view()
+    if (cb.message.text or "").startswith("🛰"):
+        try:
+            await cb.message.edit_text(text, reply_markup=kb)
+        except Exception:
+            pass  # unchanged content
+    else:
+        await cb.message.answer(text, reply_markup=kb)
+
+
+@router.callback_query(F.data.startswith(("rl:restart:", "rl:update:")), admin)
+async def relays_action(cb: CallbackQuery):
+    _, action, target = cb.data.split(":", 2)
+    targets = list(relays.reports) if target == "all" else [target]
+    ref = relays.current_ref()
+    for ip in targets:
+        relays.queue(ip, action, ref if action == "update" else "")
+    await cb.answer("⏳ در صف قرار گرفت؛ حداکثر تا یک دقیقه‌ی دیگر اجرا می‌شود", show_alert=True)
+    text, kb = relays_view()
+    try:
+        await cb.message.edit_text(text, reply_markup=kb)
+    except Exception:
+        pass
+
+
 @router.callback_query(F.data == "set:restart", admin)
 async def settings_restart(cb: CallbackQuery):
     ok = await xray.restart()
@@ -667,7 +782,7 @@ async def settings_relaytest(cb: CallbackQuery):
     if not users:
         await cb.message.answer("اول یک کاربر فعال بسازید.")
         return
-    base = "curl -fsSL https://raw.githubusercontent.com/IsaHo/IsaHo/claude/vpn-telegram-bot/vpn/relay.sh | bash -s test"
+    base = f"curl -fsSL {relay_script_url()} | bash -s test"
     reality = links.reality_link(users[0], cfg.server_ip, cfg.reality_port, "test")
     cmd1 = f"{base} '{reality}' {cfg.server_ip}"
     cmd2 = f"{base} '{links.cdn_link(users[0])}'"
@@ -685,8 +800,8 @@ async def settings_relays(cb: CallbackQuery, state: FSMContext):
         "مثال: <code>1.2.3.4:443</code>\n"
         "برای حذف همه: <code>reset</code>\n\n"
         "روی سرور ایران قبلش این را اجرا کنید:\n"
-        f"<code>curl -fsSL https://raw.githubusercontent.com/IsaHo/IsaHo/claude/vpn-telegram-bot/vpn/relay.sh"
-        f" | bash -s {cfg.server_ip}</code>", reply_markup=CANCEL_KB)
+        f"<code>curl -fsSL {relay_script_url()} | bash -s ssh {cfg.server_ip} 3</code>\n"
+        "و خط AUTHORIZED را روی همین سرور خارج اجرا کنید.", reply_markup=CANCEL_KB)
 
 
 @router.message(Edit.relays, admin)
@@ -759,6 +874,11 @@ def users_csv() -> bytes:
 @router.message(F.text == BTN_BACKUP, admin)
 async def backup_cmd(msg: Message, bot: Bot):
     await send_backup(bot, msg.chat.id)
+    if db.get_setting("backup_chat"):
+        try:
+            await send_backup(bot, int(db.get_setting("backup_chat")))
+        except Exception:
+            await msg.answer("⚠️ ارسال به کانال بکاپ ناموفق بود.")
     await msg.answer_document(BufferedInputFile(users_csv(), f"users_{time.strftime('%Y-%m-%d')}.csv"),
                               caption="📄 لیست کاربران (با Excel باز می‌شود)")
 
@@ -845,11 +965,9 @@ async def dashboard(msg: Message):
         f"📦 مصرف این ماه: <b>{fmt.size(db.usage_since(month))}</b>",
         f"⚡ لحظه‌ای: {fmt.size(int(xray.last_rate))}/s",
     ]
-    days = db.daily_totals(7)
-    if days:
-        peak = max(b for _, b in days) or 1
-        lines += ["", "📊 <b>۷ روز اخیر</b>"]
-        lines += [f"<code>{d[5:]}</code> {'▇' * max(1, round(b / peak * 10))} {fmt.size(b)}" for d, b in reversed(days)]
+    chart = fmt.day_chart(db.daily_totals(7))
+    if chart:
+        lines += ["", "📊 <b>۷ روز اخیر</b>", *chart]
     top = db.top_usage_since(today)
     if top:
         lines += ["", "🏆 <b>پرمصرف‌های امروز</b>"]

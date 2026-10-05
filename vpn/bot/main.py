@@ -94,8 +94,14 @@ async def monitor(bot: Bot) -> None:
             last = int(db.get_setting("last_backup", "0"))
             if time.time() - last > db.DAY:
                 db.set_setting("last_backup", str(int(time.time())))
-                for admin_id in cfg.admin_ids:
-                    await handlers.send_backup(bot, admin_id)
+                targets = list(cfg.admin_ids)
+                if db.get_setting("backup_chat"):
+                    targets.append(int(db.get_setting("backup_chat")))
+                for chat_id in targets:
+                    try:
+                        await handlers.send_backup(bot, chat_id)
+                    except Exception:
+                        log.warning("backup to %s failed", chat_id)
         except Exception:
             log.exception("monitor iteration failed")
         await asyncio.sleep(cfg.stats_interval)

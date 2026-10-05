@@ -181,7 +181,7 @@ case "${1:-}" in
   update)
     repo=$(cat /opt/isaho-vpn/repo_path 2>/dev/null)
     [[ -n $repo && -d $repo/.git ]] || { echo "git checkout not found; run install.sh from your clone"; exit 1; }
-    git -C "$repo" pull --ff-only && bash "$repo/vpn/install.sh" ;;
+    git -C "$repo" fetch -q origin main && git -C "$repo" checkout -q -B main origin/main && bash "$repo/vpn/install.sh" ;;
   doctor)  cd /opt/isaho-vpn/bot && /opt/isaho-vpn/venv/bin/python doctor.py ;;
   env)     ${EDITOR:-nano} /etc/isaho-vpn/vpn.env && systemctl restart isaho-bot ;;
   uninstall)

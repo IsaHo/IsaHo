@@ -157,6 +157,91 @@ SYSCTL
     systemctl enable -q haproxy
     systemctl restart haproxy
 
+    echo "==> Installing the status agent (reports to the bot through the tunnels)"
+    PUBLIC_IP=$(curl -4 -fsS --max-time 6 https://api.ipify.org 2>/dev/null || true)
+    [[ $PUBLIC_IP =~ ^[0-9.]+$ ]] || PUBLIC_IP=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<NF;i++) if($i=="src") print $(i+1)}')
+    cat >/etc/isaho-relay.conf <<CONF
+FOREIGN_IP=$FOREIGN_IP
+TUNNELS=$TUNNELS
+SSH_PORT=$SSH_PORT
+PUBLIC_IP=$PUBLIC_IP
+VERSION=${ISAHO_REF:-manual}
+CONF
+    cat >/usr/local/bin/isaho-agent <<'AGENT'
+#!/usr/bin/env python3
+"""Reports this relay's health to the bot (through the SSH tunnels) and runs queued actions."""
+import json, os, re, socket, subprocess, time, urllib.request
+
+conf = dict(l.split("=", 1) for l in open("/etc/isaho-relay.conf").read().split() if "=" in l)
+
+def sh(cmd):
+    return subprocess.run(cmd, shell=True, capture_output=True, text=True).stdout.strip()
+
+def net_bytes():
+    rx = tx = 0
+    for line in open("/proc/net/dev").read().splitlines()[2:]:
+        name, data = line.split(":", 1)
+        if name.strip() != "lo":
+            f = data.split()
+            rx += int(f[0]); tx += int(f[8])
+    return rx, tx
+
+mem = dict((l.split(":")[0], int(l.split()[1])) for l in open("/proc/meminfo"))
+rx, tx = net_bytes()
+report = {
+    "ip": conf.get("PUBLIC_IP") or socket.gethostname(),
+    "hostname": socket.gethostname(),
+    "version": conf.get("VERSION", "?"),
+    "tunnels_total": int(conf.get("TUNNELS", 0)),
+    "tunnels_up": int(sh("systemctl list-units 'isaho-tunnel@*' --state=active --no-legend --plain | wc -l") or 0),
+    "haproxy": sh("systemctl is-active haproxy"),
+    "load": os.getloadavg()[0],
+    "mem": round(100 * (1 - mem.get("MemAvailable", 0) / max(mem.get("MemTotal", 1), 1))),
+    "rx": rx, "tx": tx,
+    "uptime": int(float(open("/proc/uptime").read().split()[0])),
+    "last": sh("tail -n 1 /var/log/isaho-update.log 2>/dev/null"),
+}
+opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+req = urllib.request.Request("http://127.0.0.1:2096/relay/report", data=json.dumps(report).encode(),
+                             headers={"Content-Type": "application/json"})
+try:
+    reply = json.load(opener.open(req, timeout=15))
+except Exception as e:
+    raise SystemExit(f"report failed: {e}")
+
+action, ref = reply.get("action"), reply.get("ref", "")
+if action == "restart":
+    sh("systemctl restart 'isaho-tunnel@*' haproxy")
+elif action == "update" and re.fullmatch(r"[0-9a-f]{7,40}|main", ref):
+    script = (f"curl -fsSL https://raw.githubusercontent.com/IsaHo/IsaHo/{ref}/vpn/relay.sh | "
+              f"ISAHO_REF={ref} bash -s ssh {conf['FOREIGN_IP']} {conf['TUNNELS']} {conf['SSH_PORT']} "
+              f"> /var/log/isaho-update.log 2>&1; echo \"$(date '+%F %T') update to {ref[:10]} exit=$?\" >> /var/log/isaho-update.log")
+    subprocess.run(["systemd-run", "--unit", f"isaho-update-{int(time.time())}", "bash", "-c", script])
+AGENT
+    chmod +x /usr/local/bin/isaho-agent
+    cat >/etc/systemd/system/isaho-agent.service <<UNIT
+[Unit]
+Description=IsaHo relay status agent
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/isaho-agent
+UNIT
+    cat >/etc/systemd/system/isaho-agent.timer <<UNIT
+[Unit]
+Description=Run the IsaHo relay agent every minute
+
+[Timer]
+OnBootSec=40
+OnUnitActiveSec=60
+AccuracySec=5
+
+[Install]
+WantedBy=timers.target
+UNIT
+    systemctl daemon-reload
+    systemctl enable -q --now isaho-agent.timer
+
     PUB=$(cat "$KEY.pub")
     echo "
 ✅ $TUNNELS SSH tunnels + HAProxy installed. Users: :$LISTEN_PORT   Subscription: http://<this-ip>:$SUB_PORT

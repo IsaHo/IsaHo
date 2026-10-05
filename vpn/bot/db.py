@@ -179,6 +179,12 @@ def top_usage_since(day: str, limit: int = 5) -> list:
             (day, limit))]
 
 
+def user_daily(name: str, days: int = 7) -> list:
+    with connect() as c:
+        return [(r["day"], r["bytes"]) for r in c.execute(
+            "SELECT day, bytes FROM usage_daily WHERE name=? ORDER BY day DESC LIMIT ?", (name, days))]
+
+
 def daily_totals(days: int = 7) -> list:
     with connect() as c:
         return [(r["day"], r["b"]) for r in c.execute(

@@ -23,7 +23,7 @@ VPN شخصی با Xray و مدیریت کامل از طریق ربات تلگر�
 **۲. روی سرور** (Ubuntu 22.04/24.04 یا Debian 12، خارج از ایران):
 ```bash
 apt update && apt install -y git
-git clone -b claude/vpn-telegram-bot https://github.com/IsaHo/IsaHo.git
+git clone https://github.com/IsaHo/IsaHo.git
 bash IsaHo/vpn/install.sh
 ```
 نصب‌کننده توکن ربات، آیدی عددی ادمین و دامنه را می‌پرسد. بعد در تلگرام به ربات `/start` بدهید.
@@ -32,7 +32,7 @@ bash IsaHo/vpn/install.sh
 
 روی یک VPS ایرانی (Ubuntu)، با تانل SSH (چند اتصال موازی + HAProxy):
 ```bash
-curl -fsSL https://raw.githubusercontent.com/IsaHo/IsaHo/claude/vpn-telegram-bot/vpn/relay.sh | bash -s ssh <IP-سرور-خارج> 3
+curl -fsSL https://raw.githubusercontent.com/IsaHo/IsaHo/main/vpn/relay.sh | bash -s ssh <IP-سرور-خارج> 3
 ```
 خط `AUTHORIZED` که چاپ می‌کند را یک بار روی سرور خارج اجرا کنید. سابسکریپشن هم از `http://IP-ایران:2096` سرو می‌شود.
 بعد در ربات: ⚙️ تنظیمات ← 🇮🇷 سرور واسط ← `IP:443`. کاربران سابسکریپشن را آپدیت کنند.
@@ -49,6 +49,11 @@ curl -fsSL https://raw.githubusercontent.com/IsaHo/IsaHo/claude/vpn-telegram-bot
 - وضعیت سرور (CPU، RAM، دیسک، پرمصرف‌ترین کاربران)
 - بکاپ خودکار روزانه به تلگرام؛ بازگردانی با فرستادن فایل `.db` به ربات
 - تنظیم IP تمیز کلادفلر برای کانفیگ CDN، بدون نیاز به فرستادن دوباره لینک‌ها
+
+## مدیریت سرورهای ایران از ربات
+
+هر سرور ایران هر دقیقه از داخل تانل وضعیتش را به ربات گزارش می‌دهد:
+⚙️ تنظیمات ← 🛰 سرورهای ایران (وضعیت تانل‌ها، بار، RAM، ترافیک، نسخه) با دکمه‌های ریستارت و آپدیت.
 
 ## امنیت سرورها
 
