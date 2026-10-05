@@ -18,10 +18,14 @@ def status() -> list:
     """[(label, host, port, sessions)] where sessions = established SSH connections from that relay."""
     conns = [c for c in psutil.net_connections(kind="tcp")
              if c.status == psutil.CONN_ESTABLISHED and c.laddr and c.laddr.port == cfg.ssh_port and c.raddr]
+    import relays
     out = []
     for i, (host, port) in enumerate(links.relays(), 1):
-        ip = _resolve(host)
-        out.append((f"IR{i}", host, port, sum(1 for c in conns if c.raddr.ip == ip)))
+        ips = {_resolve(host)}
+        egress = (relays.reports.get(host) or {}).get("egress")
+        if egress:
+            ips.add(egress)  # providers that NAT outgoing traffic connect from another IP
+        out.append((f"IR{i}", host, port, sum(1 for c in conns if c.raddr.ip in ips)))
     return out
 
 

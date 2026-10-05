@@ -160,13 +160,19 @@ SYSCTL
     systemctl restart haproxy
 
     echo "==> Installing the status agent (reports to the bot through the tunnels)"
-    PUBLIC_IP=$(curl -4 -fsS --max-time 6 https://api.ipify.org 2>/dev/null || true)
-    [[ $PUBLIC_IP =~ ^[0-9.]+$ ]] || PUBLIC_IP=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<NF;i++) if($i=="src") print $(i+1)}')
+    # identity = the address users dial (the interface IP); egress = what the foreign server sees.
+    # They differ on providers that NAT outgoing traffic through another IP.
+    IFACE_IP=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<NF;i++) if($i=="src") print $(i+1)}')
+    EGRESS_IP=$(curl -4 -fsS --max-time 6 https://api.ipify.org 2>/dev/null || true)
+    [[ $EGRESS_IP =~ ^[0-9.]+$ ]] || EGRESS_IP=$IFACE_IP
+    PUBLIC_IP=$IFACE_IP
+    [[ $IFACE_IP =~ ^(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.) || -z $IFACE_IP ]] && PUBLIC_IP=$EGRESS_IP
     cat >/etc/isaho-relay.conf <<CONF
 FOREIGN_IP=$FOREIGN_IP
 TUNNELS=$TUNNELS
 SSH_PORT=$SSH_PORT
 PUBLIC_IP=$PUBLIC_IP
+EGRESS_IP=$EGRESS_IP
 VERSION=${ISAHO_REF:-manual}
 CONF
     cat >/usr/local/bin/isaho-agent <<'AGENT'
@@ -192,6 +198,7 @@ mem = dict((l.split(":")[0], int(l.split()[1])) for l in open("/proc/meminfo"))
 rx, tx = net_bytes()
 report = {
     "ip": conf.get("PUBLIC_IP") or socket.gethostname(),
+    "egress": conf.get("EGRESS_IP", ""),
     "hostname": socket.gethostname(),
     "version": conf.get("VERSION", "?"),
     "tunnels_total": int(conf.get("TUNNELS", 0)),
@@ -202,7 +209,7 @@ report = {
     "rx": rx, "tx": tx,
     "uptime": int(float(open("/proc/uptime").read().split()[0])),
     "last": sh("tail -n 1 /var/log/isaho-update.log 2>/dev/null"),
-    "agent": 2,
+    "agent": 3,
     "proxy": "send-proxy-v2" in open("/etc/haproxy/haproxy.cfg").read(),
 }
 opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))

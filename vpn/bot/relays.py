@@ -25,6 +25,15 @@ def record(data: dict) -> dict:
     return {**pending.pop(ip, {}), "proxy": xray.split_relay_inbound()}
 
 
+def forget_stale(keep: set) -> None:
+    """Drop reports from servers that stopped reporting and are not configured relays
+    (e.g. a relay that changed its reported address after a reinstall)."""
+    for ip in list(reports):
+        if ip not in keep and time.time() - reports[ip]["seen"] > STALE:
+            reports.pop(ip, None)
+            pending.pop(ip, None)
+
+
 def queue(ip: str, action: str, ref: str = "") -> None:
     pending[ip] = {"action": action, "ref": ref}
 
