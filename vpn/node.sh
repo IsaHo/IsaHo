@@ -54,7 +54,7 @@ echo "==> Sync agent"
 cat >/usr/local/bin/isaho-node <<'AGENT'
 #!/usr/bin/env python3
 """Pull the Xray config from the bot, apply it if it changed, and push traffic counters."""
-import hashlib, http.client, json, os, socket, ssl, subprocess, sys, urllib.parse
+import base64, hashlib, http.client, json, os, socket, ssl, subprocess, sys, time, urllib.parse
 
 conf = dict(l.split("=", 1) for l in open("/etc/isaho-node/node.conf").read().split() if "=" in l)
 url = urllib.parse.urlsplit(conf["MAIN"])
@@ -118,8 +118,26 @@ if text != old:
     else:
         print("new config failed validation; keeping the old one", file=sys.stderr)
 
+# hourly standby copy of the bot (DB, settings, certificate) so this node can take over
+STANDBY = "/etc/isaho-node/standby"
+stamp = os.path.join(STANDBY, "at")
+if not os.path.exists(stamp) or time.time() - os.path.getmtime(stamp) > 3600:
+    try:
+        b = request("GET", "/node/backup")
+        os.makedirs(STANDBY, mode=0o700, exist_ok=True)
+        for name, field in (("isaho.db", "db"), ("vpn.env", "env"), ("cert.pem", "cert"), ("key.pem", "key")):
+            tmp = os.path.join(STANDBY, name + ".tmp")
+            with open(tmp, "wb") as f:
+                f.write(base64.b64decode(b[field]))
+            os.chmod(tmp, 0o600)
+            os.replace(tmp, os.path.join(STANDBY, name))
+        open(stamp, "w").write(str(b.get("at", int(time.time()))))
+    except SystemExit as e:
+        print(f"standby copy failed: {e}", file=sys.stderr)
+
 info = {"hostname": socket.gethostname(), "load": os.getloadavg()[0],
-        "xray": run("systemctl", "is-active", "xray").stdout.strip()}
+        "xray": run("systemctl", "is-active", "xray").stdout.strip(),
+        "standby_at": int(open(stamp).read()) if os.path.exists(stamp) else 0}
 try:
     request("POST", "/node/stats", {"stats": pending, "info": info})
     pending = {}
@@ -127,6 +145,34 @@ finally:
     json.dump(pending, open(PENDING, "w"))
 AGENT
 chmod +x /usr/local/bin/isaho-node
+
+cat >/usr/local/bin/isaho-takeover <<'TAKEOVER'
+#!/usr/bin/env bash
+# Promote this node to main server: run the bot here from the latest standby copy.
+# Only when the main server is really gone - two bots with one token fight over updates.
+set -euo pipefail
+S=/etc/isaho-node/standby
+[[ -f $S/isaho.db && -f $S/vpn.env ]] || { echo "no standby copy yet"; exit 1; }
+echo "Standby copy from: $(date -d @"$(cat $S/at)")"
+read -rp "Is the main server really down and should this server become the main one? [yes/N] " a </dev/tty
+[[ $a == yes ]] || exit 1
+MY_IP=$(ip -4 route get 1.1.1.1 | awk '{for(i=1;i<NF;i++) if($i=="src") print $(i+1)}')
+mkdir -p /etc/isaho-vpn /var/lib/isaho-vpn && chmod 700 /etc/isaho-vpn /var/lib/isaho-vpn
+sed "s/^SERVER_IP=.*/SERVER_IP=$MY_IP/" $S/vpn.env >/etc/isaho-vpn/vpn.env
+cp $S/cert.pem $S/key.pem /etc/isaho-vpn/ && cp $S/isaho.db /var/lib/isaho-vpn/isaho.db
+chmod 600 /etc/isaho-vpn/* /var/lib/isaho-vpn/isaho.db
+systemctl disable --now isaho-node.timer
+apt-get install -y -qq git >/dev/null
+[[ -d /root/IsaHo/.git ]] || git clone -q https://github.com/IsaHo/IsaHo.git /root/IsaHo
+git -C /root/IsaHo pull -q || true
+bash /root/IsaHo/vpn/install.sh
+echo "
+✅ The bot now runs here ($MY_IP).
+Next: on each Iranian relay run relay.sh ssh with THIS server first, e.g.
+  relay.sh ssh $MY_IP 4
+and run its AUTHORIZED line here. Point vpn.zkim.app at $MY_IP in Cloudflare if you use it."
+TAKEOVER
+chmod +x /usr/local/bin/isaho-takeover
 cat >/etc/systemd/system/isaho-node.service <<UNIT
 [Unit]
 Description=IsaHo node sync
