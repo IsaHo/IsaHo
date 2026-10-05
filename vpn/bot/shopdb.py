@@ -117,6 +117,11 @@ def add_plan(title: str, gb: float, days: int, price: int) -> None:
         c.execute("INSERT INTO plans (title, gb, days, price) VALUES (?, ?, ?, ?)", (title, gb, days, price))
 
 
+def set_price(plan_id: int, price: int) -> None:
+    with db.connect() as c:
+        c.execute("UPDATE plans SET price=? WHERE id=?", (price, plan_id))
+
+
 def toggle_plan(plan_id: int) -> None:
     with db.connect() as c:
         c.execute("UPDATE plans SET active=1-active WHERE id=?", (plan_id,))
