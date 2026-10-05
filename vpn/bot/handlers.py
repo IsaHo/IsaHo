@@ -779,8 +779,12 @@ def nodes_view():
             state = (f"{'🟢' if nodes.online(n) else '🔴'} آخرین همگام‌سازی {ago} ثانیه پیش | "
                      f"Xray: {r.get('xray', '?')} | load {float(r.get('load', 0)):.2f} | "
                      f"ترافیک از روشن شدن ربات: {fmt.size(int(r.get('bytes', 0)))}")
-        lines += ["", f"<b>{html.escape(n['name'])}</b> <code>{n['ip']}</code> {html.escape(n.get('domain', ''))}", state]
+        private = n.get("private", True)
+        mode = "🔒 فقط از طریق تانل ایران (پورت عمومی بسته)" if private else "🔓 عمومی (لینک مستقیم و CDN هم دارد)"
+        lines += ["", f"<b>{html.escape(n['name'])}</b> <code>{n['ip']}</code> {html.escape(n.get('domain', ''))}",
+                  mode, state]
         rows.append([(f"📋 دستور نصب {n['name']}", f"nd:cmd:{n['name']}"), (f"🗑 {n['name']}", f"nd:del:{n['name']}")])
+        rows.append([(("🔓 عمومی کردن " if private else "🔒 فقط تانل کردن ") + n["name"], f"nd:priv:{n['name']}")])
     rows.append([("➕ سرور خارج جدید", "nd:add"), ("🔃 بروزرسانی", "nd:menu")])
     return "\n".join(lines), ikb(rows)
 
@@ -802,9 +806,10 @@ async def nodes_menu(cb: CallbackQuery):
 async def nodes_add_ask(cb: CallbackQuery, state: FSMContext):
     await cb.answer()
     await state.set_state(Edit.node_add)
-    await cb.message.answer("➕ سرور خارج جدید: <code>نام | IP | دامنه‌ی کلادفلر</code>\n"
-                            "مثال: <code>FR | 202.133.88.44 | fr.zkim.app</code>\n"
-                            "(نام کوتاه انگلیسی؛ دامنه اختیاری است)", reply_markup=CANCEL_KB)
+    await cb.message.answer("➕ سرور خارج جدید: <code>نام | IP</code>\n"
+                            "مثال: <code>FR | 202.133.88.44</code>\n"
+                            "به‌طور پیش‌فرض فقط از طریق تانل سرورهای ایران استفاده می‌شود و هیچ پورت VPN "
+                            "عمومی ندارد (کمترین ریسک فیلتر).", reply_markup=CANCEL_KB)
 
 
 @router.message(Edit.node_add, owner)
@@ -816,9 +821,6 @@ async def nodes_add(msg: Message, state: FSMContext):
         return
     domain = parts[2] if len(parts) > 2 and re.fullmatch(r"[A-Za-z0-9.-]{3,253}", parts[2]) else ""
     node = nodes.add(parts[0].upper(), parts[1], domain)
-    types = links.enabled_types()
-    if "node" not in types:
-        links.toggle_type("node")
     await state.clear()
     await msg.answer("✅ اضافه شد. این دستور را روی همان سرور اجرا کنید:", reply_markup=ADMIN_KB)
     await msg.answer(node_install_text(node))
@@ -848,7 +850,17 @@ async def nodes_del(cb: CallbackQuery):
     await cb.message.edit_text(text, reply_markup=kb)
 
 
-@router.callback_query(F.data.startswith(("nd:add", "nd:cmd:", "nd:del:")), admin)
+@router.callback_query(F.data.startswith("nd:priv:"), owner)
+async def nodes_private(cb: CallbackQuery):
+    nodes.toggle_private(cb.data[8:])
+    if nodes.public_nodes() and "node" not in links.enabled_types():
+        links.toggle_type("node")
+    await cb.answer("✅ ظرف یک دقیقه روی سرور اعمال می‌شود", show_alert=True)
+    text, kb = nodes_view()
+    await cb.message.edit_text(text, reply_markup=kb)
+
+
+@router.callback_query(F.data.startswith(("nd:add", "nd:cmd:", "nd:del:", "nd:priv:")), admin)
 async def nodes_denied(cb: CallbackQuery):
     await cb.answer("فقط مالک ربات می‌تواند این را انجام دهد", show_alert=True)
 
