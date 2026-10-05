@@ -163,7 +163,7 @@ SYSCTL
 
 Run THIS once on the FOREIGN server ($FOREIGN_IP) to authorize (copy the whole line):
 
-id isaho-tunnel >/dev/null 2>&1 || useradd -r -m -s /usr/sbin/nologin isaho-tunnel; mkdir -p ~isaho-tunnel/.ssh && echo 'restrict,port-forwarding,permitopen=\"127.0.0.1:443\",permitopen=\"127.0.0.1:2097\" $PUB' > ~isaho-tunnel/.ssh/authorized_keys && chown -R isaho-tunnel: ~isaho-tunnel/.ssh && chmod 700 ~isaho-tunnel/.ssh && chmod 600 ~isaho-tunnel/.ssh/authorized_keys && echo AUTHORIZED
+id isaho-tunnel >/dev/null 2>&1 || useradd -r -m -s /usr/sbin/nologin isaho-tunnel; mkdir -p ~isaho-tunnel/.ssh && touch ~isaho-tunnel/.ssh/authorized_keys && sed -i '\\|$(cut -d' ' -f2 "$KEY.pub")|d' ~isaho-tunnel/.ssh/authorized_keys && echo 'restrict,port-forwarding,permitopen=\"127.0.0.1:443\",permitopen=\"127.0.0.1:2097\" $PUB' >> ~isaho-tunnel/.ssh/authorized_keys && chown -R isaho-tunnel: ~isaho-tunnel/.ssh && chmod 700 ~isaho-tunnel/.ssh && chmod 600 ~isaho-tunnel/.ssh/authorized_keys && echo AUTHORIZED
 
 Check tunnels here:  systemctl --no-pager -l status 'isaho-tunnel@*' | grep -E 'tunnel #|Active'
 "

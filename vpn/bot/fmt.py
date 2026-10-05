@@ -13,6 +13,8 @@ def size(b: int) -> str:
 
 
 def remaining_days(u) -> str:
+    if getattr(u, "pending_days", 0):
+        return f"{u.pending_days} روز (شروع از اولین اتصال)"
     if not u.expire_at:
         return "نامحدود"
     left = u.expire_at - time.time()

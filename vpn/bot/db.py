@@ -29,6 +29,12 @@ CREATE TABLE IF NOT EXISTS users (
     warned INTEGER NOT NULL DEFAULT 0,
     note TEXT NOT NULL DEFAULT ''
 );
+CREATE TABLE IF NOT EXISTS usage_daily (
+    day TEXT NOT NULL,
+    name TEXT NOT NULL,
+    bytes INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (day, name)
+);
 CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -52,6 +58,7 @@ class User:
     tg_id: Optional[int]
     warned: int
     note: str
+    pending_days: int = 0  # >0: validity starts at first use
 
     @property
     def used(self) -> int:
@@ -76,25 +83,29 @@ def connect() -> sqlite3.Connection:
 def init() -> None:
     with connect() as c:
         c.executescript(_SCHEMA)
+        cols = {r["name"] for r in c.execute("PRAGMA table_info(users)")}
+        if "pending_days" not in cols:
+            c.execute("ALTER TABLE users ADD COLUMN pending_days INTEGER NOT NULL DEFAULT 0")
 
 
 def _row(r) -> Optional[User]:
     return User(**dict(r)) if r else None
 
 
-def create_user(name: str, limit_gb: float, days: int) -> User:
+def create_user(name: str, limit_gb: float, days: int, first_use: bool = False) -> User:
     now = int(time.time())
     with connect() as c:
         c.execute(
-            "INSERT INTO users (name, uuid, sub_token, traffic_limit, expire_at, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO users (name, uuid, sub_token, traffic_limit, expire_at, created_at, pending_days) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
             (
                 name,
                 str(uuidlib.uuid4()),
                 secrets.token_urlsafe(16),
                 int(limit_gb * GB),
-                now + days * DAY if days else 0,
+                now + days * DAY if days and not first_use else 0,
                 now,
+                days if first_use else 0,
             ),
         )
     return get_by_name(name)
@@ -145,9 +156,33 @@ def update(user_id: int, **fields) -> None:
 
 def add_traffic(stats: dict) -> None:
     """stats: {name: (up_delta, down_delta)}"""
+    today = time.strftime("%Y-%m-%d")
     with connect() as c:
         for name, (up, down) in stats.items():
             c.execute("UPDATE users SET up=up+?, down=down+? WHERE name=?", (up, down, name))
+            c.execute("INSERT INTO usage_daily (day, name, bytes) VALUES (?, ?, ?) "
+                      "ON CONFLICT(day, name) DO UPDATE SET bytes=bytes+excluded.bytes", (today, name, up + down))
+        # "valid from first use" accounts start their clock now
+        c.execute("UPDATE users SET expire_at=?+pending_days*?, pending_days=0 "
+                  "WHERE pending_days>0 AND up+down>0", (int(time.time()), DAY))
+
+
+def usage_since(day: str) -> int:
+    with connect() as c:
+        return c.execute("SELECT COALESCE(SUM(bytes),0) FROM usage_daily WHERE day>=?", (day,)).fetchone()[0]
+
+
+def top_usage_since(day: str, limit: int = 5) -> list:
+    with connect() as c:
+        return [(r["name"], r["b"]) for r in c.execute(
+            "SELECT name, SUM(bytes) b FROM usage_daily WHERE day>=? GROUP BY name ORDER BY b DESC LIMIT ?",
+            (day, limit))]
+
+
+def daily_totals(days: int = 7) -> list:
+    with connect() as c:
+        return [(r["day"], r["b"]) for r in c.execute(
+            "SELECT day, SUM(bytes) b FROM usage_daily GROUP BY day ORDER BY day DESC LIMIT ?", (days,))]
 
 
 def delete(user_id: int) -> None:

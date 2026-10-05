@@ -1,4 +1,5 @@
 """Telegram bot handlers: admin panel and end-user self-service."""
+import csv
 import html
 import io
 import logging
@@ -60,6 +61,10 @@ class Edit(StatesGroup):
     relays = State()
     broadcast = State()
     add_admin = State()
+    bulk_days = State()
+    bulk_gb = State()
+    support = State()
+    reply = State()
 
 
 # ---------- keyboards ----------
@@ -73,15 +78,23 @@ BTN_BACKUP = "💾 بکاپ"
 BTN_BROADCAST = "📢 پیام همگانی"
 BTN_CANCEL = "❌ لغو"
 BTN_MY = "📊 حساب من"
+BTN_DASH = "📈 داشبورد"
+BTN_BULK = "🧰 عملیات گروهی"
+BTN_HELP = "📱 آموزش اتصال"
+BTN_SUPPORT = "💬 پشتیبانی"
 
 ADMIN_KB = ReplyKeyboardMarkup(resize_keyboard=True, keyboard=[
     [KeyboardButton(text=BTN_ADD), KeyboardButton(text=BTN_USERS)],
     [KeyboardButton(text=BTN_SEARCH), KeyboardButton(text=BTN_STATUS)],
+    [KeyboardButton(text=BTN_DASH), KeyboardButton(text=BTN_BULK)],
     [KeyboardButton(text=BTN_SETTINGS), KeyboardButton(text=BTN_BACKUP)],
     [KeyboardButton(text=BTN_BROADCAST)],
 ])
 CANCEL_KB = ReplyKeyboardMarkup(resize_keyboard=True, keyboard=[[KeyboardButton(text=BTN_CANCEL)]])
-USER_KB = ReplyKeyboardMarkup(resize_keyboard=True, keyboard=[[KeyboardButton(text=BTN_MY)]])
+USER_KB = ReplyKeyboardMarkup(resize_keyboard=True, keyboard=[
+    [KeyboardButton(text=BTN_MY)],
+    [KeyboardButton(text=BTN_HELP), KeyboardButton(text=BTN_SUPPORT)],
+])
 
 
 def ikb(rows) -> InlineKeyboardMarkup:
@@ -242,9 +255,12 @@ async def _add_traffic_value(target, state: FSMContext, gb: float):
     await state.update_data(traffic=gb)
     await state.set_state(AddUser.days)
     m = target.message if isinstance(target, CallbackQuery) else target
-    await m.answer("⏳ مدت (روز) را بفرستید یا انتخاب کنید (۰ = نامحدود):",
+    await m.answer("⏳ مدت (روز) را بفرستید یا انتخاب کنید (۰ = نامحدود).\n"
+                   "«از اولین اتصال» یعنی روزها از وقتی کاربر اولین بار وصل شود شمرده می‌شود.",
                    reply_markup=ikb([[("30", "d:30"), ("60", "d:60"), ("90", "d:90")],
-                                     [("180", "d:180"), ("365", "d:365"), ("♾ نامحدود", "d:0")]]))
+                                     [("180", "d:180"), ("365", "d:365"), ("♾ نامحدود", "d:0")],
+                                     [("30 از اولین اتصال", "d:f30"), ("60 از اولین اتصال", "d:f60")],
+                                     [("90 از اولین اتصال", "d:f90")]]))
 
 
 @router.callback_query(AddUser.traffic, F.data.startswith("t:"), admin)
@@ -262,12 +278,12 @@ async def add_traffic_msg(msg: Message, state: FSMContext):
     await _add_traffic_value(msg, state, v)
 
 
-async def _finish_add(target, state: FSMContext, days: int):
+async def _finish_add(target, state: FSMContext, days: int, first_use: bool = False):
     data = await state.get_data()
     await state.clear()
     m = target.message if isinstance(target, CallbackQuery) else target
     try:
-        u = db.create_user(data["name"], data["traffic"], days)
+        u = db.create_user(data["name"], data["traffic"], days, first_use=first_use and days > 0)
         await apply_user(u)
     except Exception as e:
         log.exception("create user failed")
@@ -282,7 +298,8 @@ async def _finish_add(target, state: FSMContext, days: int):
 @router.callback_query(AddUser.days, F.data.startswith("d:"), admin)
 async def add_days_cb(cb: CallbackQuery, state: FSMContext):
     await cb.answer()
-    await _finish_add(cb, state, int(cb.data[2:]))
+    value = cb.data[2:]
+    await _finish_add(cb, state, int(value.lstrip("f")), first_use=value.startswith("f"))
 
 
 @router.message(AddUser.days, admin)
@@ -457,7 +474,9 @@ async def user_edit_do(msg: Message, state: FSMContext):
         if v is None:
             await msg.answer("❌ یک عدد بفرستید.")
             return
-        if current == Edit.days.state:
+        if current == Edit.days.state and u.pending_days and v:
+            db.update(u.id, pending_days=u.pending_days + int(v))
+        elif current == Edit.days.state:
             base = max(u.expire_at, int(time.time())) if u.expire_at else int(time.time())
             db.update(u.id, expire_at=base + int(v) * db.DAY if v else 0, warned=0)
         else:
@@ -720,9 +739,28 @@ async def send_backup(bot: Bot, chat_id: int) -> None:
                             caption=f"💾 بکاپ {stamp}\nبرای بازگردانی، همین فایل را به ربات بفرستید.")
 
 
+def users_csv() -> bytes:
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["name", "enabled", "used_GB", "limit_GB", "expire", "days_left", "telegram", "note", "created"])
+    now = time.time()
+    for u in db.all_users():
+        w.writerow([
+            u.name, "yes" if u.enabled else f"no ({u.disabled_reason})",
+            round(u.used / db.GB, 2), round(u.traffic_limit / db.GB, 2) if u.traffic_limit else "unlimited",
+            time.strftime("%Y-%m-%d", time.localtime(u.expire_at)) if u.expire_at
+            else ("first use" if u.pending_days else "never"),
+            int((u.expire_at - now) // db.DAY) if u.expire_at else (u.pending_days or ""),
+            u.tg_id or "", u.note, time.strftime("%Y-%m-%d", time.localtime(u.created_at)),
+        ])
+    return ("\ufeff" + buf.getvalue()).encode("utf-8")  # BOM so Excel shows Persian correctly
+
+
 @router.message(F.text == BTN_BACKUP, admin)
 async def backup_cmd(msg: Message, bot: Bot):
     await send_backup(bot, msg.chat.id)
+    await msg.answer_document(BufferedInputFile(users_csv(), f"users_{time.strftime('%Y-%m-%d')}.csv"),
+                              caption="📄 لیست کاربران (با Excel باز می‌شود)")
 
 
 @router.message(F.document, admin)
@@ -785,3 +823,193 @@ async def broadcast_do(msg: Message, state: FSMContext, bot: Bot):
         except Exception:
             failed += 1
     await msg.answer(f"✅ ارسال شد: {sent} | ناموفق: {failed}", reply_markup=ADMIN_KB)
+
+
+# ---------- dashboard ----------
+
+@router.message(F.text == BTN_DASH, admin)
+async def dashboard(msg: Message):
+    await xray.flush_stats()
+    users, now = db.all_users(), time.time()
+    today, month = time.strftime("%Y-%m-%d"), time.strftime("%Y-%m-01")
+    active = [u for u in users if u.enabled]
+    expiring = sorted((u for u in active if u.expire_at and u.expire_at - now < 3 * db.DAY),
+                      key=lambda u: u.expire_at)
+    low = [u for u in active if u.traffic_limit and u.used >= u.traffic_limit * 0.9]
+    lines = [
+        "📈 <b>داشبورد</b>", "",
+        f"👥 کاربران: {len(users)} | 🟢 فعال: {len(active)} | 🔴 غیرفعال: {len(users) - len(active)}",
+        f"⏱ منتظر اولین اتصال: {sum(1 for u in users if u.pending_days)}",
+        "",
+        f"📦 مصرف امروز: <b>{fmt.size(db.usage_since(today))}</b>",
+        f"📦 مصرف این ماه: <b>{fmt.size(db.usage_since(month))}</b>",
+        f"⚡ لحظه‌ای: {fmt.size(int(xray.last_rate))}/s",
+    ]
+    days = db.daily_totals(7)
+    if days:
+        peak = max(b for _, b in days) or 1
+        lines += ["", "📊 <b>۷ روز اخیر</b>"]
+        lines += [f"<code>{d[5:]}</code> {'▇' * max(1, round(b / peak * 10))} {fmt.size(b)}" for d, b in reversed(days)]
+    top = db.top_usage_since(today)
+    if top:
+        lines += ["", "🏆 <b>پرمصرف‌های امروز</b>"]
+        lines += [f"{i}. {html.escape(n)} — {fmt.size(b)}" for i, (n, b) in enumerate(top, 1)]
+    if expiring:
+        lines += ["", "⏳ <b>تا ۳ روز دیگر منقضی می‌شوند</b>"]
+        lines += [f"• {html.escape(u.name)} — {fmt.remaining_days(u)}" for u in expiring[:15]]
+    if low:
+        lines += ["", "🔋 <b>حجمشان رو به اتمام است</b>"]
+        lines += [f"• {html.escape(u.name)} — {fmt.size(u.used)} از {fmt.size(u.traffic_limit)}" for u in low[:15]]
+    lines += ["", "📡 <b>تانل‌ها</b>", tunnels.summary()]
+    await msg.answer("\n".join(lines))
+
+
+# ---------- bulk operations ----------
+
+@router.message(F.text == BTN_BULK, admin)
+async def bulk_menu(msg: Message):
+    await msg.answer("🧰 <b>عملیات گروهی</b>\nروی همه‌ی کاربران اعمال می‌شود (کاربرانی که دستی غیرفعال کرده‌اید جدا می‌مانند).",
+                     reply_markup=ikb([
+                         [("⏳ تمدید همه", "bulk:days")],
+                         [("📦 افزودن حجم به همه", "bulk:gb")],
+                         [("🗑 حذف کاربران منقضی/تمام‌شده", "bulk:purge")],
+                     ]))
+
+
+@router.callback_query(F.data.in_({"bulk:days", "bulk:gb"}), admin)
+async def bulk_ask(cb: CallbackQuery, state: FSMContext):
+    await cb.answer()
+    if cb.data == "bulk:days":
+        await state.set_state(Edit.bulk_days)
+        await cb.message.answer("⏳ چند روز به همه‌ی کاربران زمان‌دار اضافه شود؟ (مثلاً برای جبران قطعی)",
+                                reply_markup=CANCEL_KB)
+    else:
+        await state.set_state(Edit.bulk_gb)
+        await cb.message.answer("📦 چند گیگ به همه‌ی کاربران حجم‌دار اضافه شود؟", reply_markup=CANCEL_KB)
+
+
+@router.message(Edit.bulk_days, admin)
+@router.message(Edit.bulk_gb, admin)
+async def bulk_do(msg: Message, state: FSMContext):
+    v = parse_number(msg.text)
+    if not v:
+        await msg.answer("❌ یک عدد بزرگ‌تر از صفر بفرستید.")
+        return
+    is_days = await state.get_state() == Edit.bulk_days.state
+    await state.clear()
+    changed = 0
+    for u in db.all_users():
+        if not u.enabled and u.disabled_reason == "manual":
+            continue
+        if is_days and u.pending_days:
+            db.update(u.id, pending_days=u.pending_days + int(v))
+        elif is_days and u.expire_at:
+            db.update(u.id, expire_at=max(u.expire_at, int(time.time())) + int(v) * db.DAY, warned=0)
+        elif not is_days and u.traffic_limit:
+            db.update(u.id, traffic_limit=u.traffic_limit + int(v * db.GB), warned=0)
+        else:
+            continue
+        changed += 1
+        await maybe_reactivate(u)
+    what = f"{int(v)} روز" if is_days else f"{v:g} گیگ"
+    await msg.answer(f"✅ {what} به {changed} کاربر اضافه شد.", reply_markup=ADMIN_KB)
+
+
+@router.callback_query(F.data == "bulk:purge", admin)
+async def bulk_purge_ask(cb: CallbackQuery):
+    await cb.answer()
+    dead = [u for u in db.all_users() if not u.enabled and u.disabled_reason in ("expired", "traffic")]
+    if not dead:
+        await cb.message.answer("کاربر منقضی یا تمام‌شده‌ای وجود ندارد.")
+        return
+    names = ", ".join(html.escape(u.name) for u in dead[:30])
+    await cb.message.answer(f"🗑 {len(dead)} کاربر حذف شوند؟\n{names}{' …' if len(dead) > 30 else ''}",
+                            reply_markup=ikb([[("✅ بله، حذف کن", "bulk:purgeok"), ("❌ نه", "noop")]]))
+
+
+@router.callback_query(F.data == "bulk:purgeok", admin)
+async def bulk_purge(cb: CallbackQuery):
+    dead = [u for u in db.all_users() if not u.enabled and u.disabled_reason in ("expired", "traffic")]
+    for u in dead:
+        db.delete(u.id)
+    await cb.answer()
+    await cb.message.edit_text(f"🗑 {len(dead)} کاربر حذف شد.")
+
+
+# ---------- end-user help and support ----------
+
+HELP_TEXT = """📱 <b>آموزش اتصال</b>
+
+<b>iPhone</b>
+1. یکی از اپ‌های <b>Streisand</b>، <b>Shadowrocket</b> یا <b>V2Box</b> را از App Store نصب کنید.
+2. در همین ربات «📊 حساب من» را بزنید و روی لینک سابسکریپشن بزنید تا کپی شود.
+3. در اپ، دکمه‌ی + را بزنید و از کلیپ‌بورد اضافه کنید.
+4. کانفیگ را انتخاب و وصل شوید.
+
+<b>Android</b>
+1. اپ <b>v2rayNG</b> یا <b>Hiddify</b> را نصب کنید.
+2. لینک سابسکریپشن را از «📊 حساب من» کپی کنید.
+3. در v2rayNG: منوی ☰ ← Subscription group ← + ← لینک را پیست کنید، بعد «Update subscription».
+4. کانفیگ را انتخاب و دکمه‌ی وصل شدن را بزنید.
+
+<b>اگر وصل نشد</b>
+• یک بار سابسکریپشن را آپدیت کنید (وقتی VPN خاموش است).
+• اینترنت را یک بار قطع و وصل کنید.
+• از «💬 پشتیبانی» به ما پیام بدهید."""
+
+
+@router.message(F.text == BTN_HELP)
+async def help_cmd(msg: Message):
+    await msg.answer(HELP_TEXT, disable_web_page_preview=True)
+
+
+@router.message(F.text == BTN_SUPPORT)
+async def support_start(msg: Message, state: FSMContext):
+    if not db.get_by_tg(msg.from_user.id):
+        await msg.answer("برای پشتیبانی اول لینک اختصاصی‌ای که مدیر فرستاده را باز کنید.")
+        return
+    await state.set_state(Edit.support)
+    await msg.answer("💬 پیامتان را بنویسید (می‌توانید عکس هم بفرستید):", reply_markup=CANCEL_KB)
+
+
+@router.message(F.text == BTN_CANCEL)
+async def user_cancel(msg: Message, state: FSMContext):
+    await state.clear()
+    await msg.answer("لغو شد.", reply_markup=USER_KB)
+
+
+@router.message(Edit.support)
+async def support_send(msg: Message, state: FSMContext, bot: Bot):
+    await state.clear()
+    accounts = ", ".join(u.name for u in db.get_by_tg(msg.from_user.id))
+    who = html.escape(msg.from_user.full_name or "")
+    header = (f"💬 <b>پیام پشتیبانی</b>\nاز: {who} (<code>{msg.from_user.id}</code>)\n"
+              f"اکانت: {html.escape(accounts)}")
+    for admin_id in db.admin_ids():
+        try:
+            await bot.send_message(admin_id, header,
+                                   reply_markup=ikb([[("↩️ پاسخ", f"rep:{msg.from_user.id}")]]))
+            await msg.copy_to(admin_id)
+        except Exception:
+            pass
+    await msg.answer("✅ پیامتان برای پشتیبانی فرستاده شد.", reply_markup=USER_KB)
+
+
+@router.callback_query(F.data.startswith("rep:"), admin)
+async def support_reply_ask(cb: CallbackQuery, state: FSMContext):
+    await cb.answer()
+    await state.set_state(Edit.reply)
+    await state.update_data(reply_to=int(cb.data[4:]))
+    await cb.message.answer("✍️ پاسخ را بنویسید:", reply_markup=CANCEL_KB)
+
+
+@router.message(Edit.reply, admin)
+async def support_reply_send(msg: Message, state: FSMContext, bot: Bot):
+    target = (await state.get_data()).get("reply_to")
+    await state.clear()
+    try:
+        await bot.send_message(target, "💬 <b>پاسخ پشتیبانی:</b>")
+        await msg.copy_to(target)
+        await msg.answer("✅ پاسخ فرستاده شد.", reply_markup=ADMIN_KB)
+    except Exception:
+        await msg.answer("❌ ارسال نشد (شاید کاربر ربات را بلاک کرده).", reply_markup=ADMIN_KB)
