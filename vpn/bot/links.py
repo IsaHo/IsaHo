@@ -79,6 +79,13 @@ def cdn_sub_url(u) -> str:
     return f"https://{cfg.domain}:{cfg.sub_port}/sub/{u.sub_token}"
 
 
+def backup_sub_urls(u) -> list:
+    """Subscription through the other relays, in case the first one is down."""
+    if "relay" not in enabled_types():
+        return []
+    return [f"http://{host}:2096/sub/{u.sub_token}" for host, _ in relays()[1:]]
+
+
 def sub_url(u) -> str:
     """Prefer the first Iranian relay (reachable from inside Iran); fall back to Cloudflare."""
     if relays() and "relay" in enabled_types():

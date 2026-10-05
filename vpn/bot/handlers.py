@@ -144,8 +144,8 @@ def links_text(u) -> str:
     parts = [f"🔗 <b>کانفیگ‌های {html.escape(u.name)}</b>", "",
              "📥 <b>لینک سابسکریپشن</b> (پیشنهادی - خودکار آپدیت می‌شود):",
              f"<code>{html.escape(links.sub_url(u))}</code>", ""]
-    if links.sub_url(u) != links.cdn_sub_url(u):
-        parts += ["📥 سابسکریپشن پشتیبان (کلادفلر):", f"<code>{html.escape(links.cdn_sub_url(u))}</code>", ""]
+    for backup in links.backup_sub_urls(u):
+        parts += ["📥 سابسکریپشن پشتیبان:", f"<code>{html.escape(backup)}</code>", ""]
     for link in links.all_links(u):
         if "-IR" in link.rsplit("#", 1)[-1]:
             label = "🇮🇷 از طریق سرور واسط ایران (پیشنهادی)"
