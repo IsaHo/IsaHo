@@ -12,6 +12,8 @@ from aiogram.types import BotCommand
 import db
 import fmt
 import handlers
+import shop
+import shopdb
 import devices
 import sub_server
 import tunnels
@@ -146,6 +148,7 @@ async def main() -> None:
     if not cfg.bot_token or not cfg.admin_ids:
         raise SystemExit("BOT_TOKEN and ADMIN_IDS must be set in " + "/etc/isaho-vpn/vpn.env")
     db.init()
+    shopdb.init()
     await xray.apply_all()
 
     bot = Bot(cfg.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
@@ -154,6 +157,7 @@ async def main() -> None:
     await bot.set_my_commands([BotCommand(command="start", description="منوی اصلی")])
 
     dp = Dispatcher()
+    dp.include_router(shop.router)  # customer /start and shop states first
     dp.include_router(handlers.router)
 
     runner = await sub_server.start()

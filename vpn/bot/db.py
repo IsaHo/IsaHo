@@ -60,6 +60,7 @@ class User:
     note: str
     pending_days: int = 0  # >0: validity starts at first use
     ip_limit: int = 0      # max simultaneous devices (distinct IPs); 0 = use the default
+    owner_tg: Optional[int] = None  # reseller who bought it (shop)
 
     @property
     def used(self) -> int:
@@ -132,6 +133,15 @@ def get_by_token(token: str) -> Optional[User]:
 def get_by_tg(tg_id: int) -> list:
     with connect() as c:
         return [_row(r) for r in c.execute("SELECT * FROM users WHERE tg_id=?", (tg_id,))]
+
+
+def owned_by(tg_id: int) -> list:
+    """Accounts this Telegram user may manage: linked to them or bought by them as a reseller."""
+    with connect() as c:
+        cols = {r["name"] for r in c.execute("PRAGMA table_info(users)")}
+        q = "SELECT * FROM users WHERE tg_id=?" + (" OR owner_tg=?" if "owner_tg" in cols else "") + " ORDER BY id"
+        args = (tg_id, tg_id) if "owner_tg" in cols else (tg_id,)
+        return [_row(r) for r in c.execute(q, args)]
 
 
 def all_users() -> list:

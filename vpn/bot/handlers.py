@@ -87,18 +87,26 @@ BTN_DASH = "📈 داشبورد"
 BTN_BULK = "🧰 عملیات گروهی"
 BTN_HELP = "📱 آموزش اتصال"
 BTN_SUPPORT = "💬 پشتیبانی"
+BTN_BUY = "🛒 خرید اشتراک"
+BTN_TEST = "🎁 اکانت تست"
+BTN_RENEW = "🔄 تمدید"
+BTN_INVITE = "👥 دعوت دوستان"
+BTN_SHOP = "🛒 فروشگاه"
 
 ADMIN_KB = ReplyKeyboardMarkup(resize_keyboard=True, keyboard=[
     [KeyboardButton(text=BTN_ADD), KeyboardButton(text=BTN_USERS)],
     [KeyboardButton(text=BTN_SEARCH), KeyboardButton(text=BTN_STATUS)],
     [KeyboardButton(text=BTN_DASH), KeyboardButton(text=BTN_BULK)],
+    [KeyboardButton(text=BTN_SHOP)],
     [KeyboardButton(text=BTN_SETTINGS), KeyboardButton(text=BTN_BACKUP)],
     [KeyboardButton(text=BTN_BROADCAST)],
 ])
 CANCEL_KB = ReplyKeyboardMarkup(resize_keyboard=True, keyboard=[[KeyboardButton(text=BTN_CANCEL)]])
 USER_KB = ReplyKeyboardMarkup(resize_keyboard=True, keyboard=[
-    [KeyboardButton(text=BTN_MY)],
-    [KeyboardButton(text=BTN_HELP), KeyboardButton(text=BTN_SUPPORT)],
+    [KeyboardButton(text=BTN_BUY), KeyboardButton(text=BTN_MY)],
+    [KeyboardButton(text=BTN_RENEW), KeyboardButton(text=BTN_TEST)],
+    [KeyboardButton(text=BTN_INVITE), KeyboardButton(text=BTN_HELP)],
+    [KeyboardButton(text=BTN_SUPPORT)],
 ])
 
 
@@ -1197,9 +1205,6 @@ async def help_cmd(msg: Message):
 
 @router.message(F.text == BTN_SUPPORT)
 async def support_start(msg: Message, state: FSMContext):
-    if not db.get_by_tg(msg.from_user.id):
-        await msg.answer("برای پشتیبانی اول لینک اختصاصی‌ای که مدیر فرستاده را باز کنید.")
-        return
     await state.set_state(Edit.support)
     await msg.answer("💬 پیامتان را بنویسید (می‌توانید عکس هم بفرستید):", reply_markup=CANCEL_KB)
 
@@ -1213,7 +1218,7 @@ async def user_cancel(msg: Message, state: FSMContext):
 @router.message(Edit.support)
 async def support_send(msg: Message, state: FSMContext, bot: Bot):
     await state.clear()
-    accounts = ", ".join(u.name for u in db.get_by_tg(msg.from_user.id))
+    accounts = ", ".join(u.name for u in db.owned_by(msg.from_user.id)) or "ندارد"
     who = html.escape(msg.from_user.full_name or "")
     header = (f"💬 <b>پیام پشتیبانی</b>\nاز: {who} (<code>{msg.from_user.id}</code>)\n"
               f"اکانت: {html.escape(accounts)}")
