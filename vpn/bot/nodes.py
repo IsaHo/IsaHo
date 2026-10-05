@@ -83,6 +83,30 @@ def online(node: dict) -> bool:
     return bool(r) and time.time() - r["seen"] < 180
 
 
+def standby_bundle() -> dict:
+    """Everything a node needs to take over as the main server: a consistent DB snapshot,
+    the settings file (bot token, Reality keys) and the origin certificate."""
+    import base64
+    import os
+    import sqlite3
+    import tempfile
+    from config import ENV_FILE
+    fd, tmp = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    try:
+        src, dst = sqlite3.connect(cfg.db_path), sqlite3.connect(tmp)
+        with dst:
+            src.backup(dst)
+        src.close()
+        dst.close()
+        snap = open(tmp, "rb").read()
+    finally:
+        os.unlink(tmp)
+    b64 = lambda p: base64.b64encode(open(p, "rb").read()).decode()  # noqa: E731
+    return {"db": base64.b64encode(snap).decode(), "env": b64(ENV_FILE),
+            "cert": b64(cfg.cert_file), "key": b64(cfg.key_file), "at": int(time.time())}
+
+
 def cert_fingerprint() -> str:
     pem = open(cfg.cert_file).read()
     return hashlib.sha256(ssl.PEM_cert_to_DER_cert(pem)).hexdigest()

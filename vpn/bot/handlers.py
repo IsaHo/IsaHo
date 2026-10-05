@@ -45,8 +45,14 @@ class IsOwner(Filter):
         return event.from_user is not None and event.from_user.id in cfg.admin_ids
 
 
+class IsStaff(Filter):
+    async def __call__(self, event) -> bool:
+        return event.from_user is not None and event.from_user.id in db.staff_ids()
+
+
 admin = IsAdmin()
 owner = IsOwner()
+staff = IsStaff()
 
 
 class AddUser(StatesGroup):
@@ -105,6 +111,14 @@ ADMIN_KB = ReplyKeyboardMarkup(resize_keyboard=True, keyboard=[
     [KeyboardButton(text=BTN_BROADCAST)],
 ])
 CANCEL_KB = ReplyKeyboardMarkup(resize_keyboard=True, keyboard=[[KeyboardButton(text=BTN_CANCEL)]])
+BTN_ORDERS = "🧾 سفارش‌های در انتظار"
+SUPPORT_KB = ReplyKeyboardMarkup(resize_keyboard=True, keyboard=[[KeyboardButton(text=BTN_ORDERS)]])
+
+
+def staff_kb(tg_id: int):
+    return ADMIN_KB if tg_id in db.admin_ids() else SUPPORT_KB
+
+
 USER_KB = ReplyKeyboardMarkup(resize_keyboard=True, keyboard=[
     [KeyboardButton(text=BTN_BUY), KeyboardButton(text=BTN_MY)],
     [KeyboardButton(text=BTN_RENEW), KeyboardButton(text=BTN_TEST)],
@@ -702,11 +716,13 @@ async def link_types_toggle(cb: CallbackQuery):
 
 def admins_view():
     rows = [[(f"👑 {a} (مالک)", "noop_a")] for a in sorted(cfg.admin_ids)]
-    rows += [[(f"❌ حذف {a}", f"adm:del:{a}")] for a in db.extra_admins()]
-    rows.append([("➕ افزودن مدیر", "adm:add")])
+    rows += [[(f"❌ حذف مدیر {a}", f"adm:del:{a}")] for a in db.extra_admins()]
+    rows += [[(f"❌ حذف پشتیبان {a}", f"adm:sdel:{a}")] for a in sorted(db.support_ids())]
+    rows.append([("➕ افزودن مدیر", "adm:add"), ("➕ افزودن پشتیبان", "adm:sadd")])
     text = ("👮 <b>مدیران ربات</b>\n"
             "مالک‌ها از فایل تنظیمات سرور هستند و از اینجا حذف نمی‌شوند.\n"
-            "مدیرها به همه‌ی بخش‌ها جز مدیریت مدیران دسترسی دارند.")
+            "مدیرها به همه‌ی بخش‌ها جز مدیریت مدیران دسترسی دارند.\n"
+            "🎧 پشتیبان‌ها فقط سفارش‌ها را تأیید/رد می‌کنند و به پیام‌های مشتری‌ها جواب می‌دهند.")
     return text, ikb(rows)
 
 
@@ -715,6 +731,11 @@ async def admins_menu(cb: CallbackQuery):
     await cb.answer()
     text, kb = admins_view()
     await cb.message.answer(text, reply_markup=kb)
+
+
+@router.callback_query(F.data.startswith(("adm:sadd", "adm:sdel:")), admin)
+async def supports_denied(cb: CallbackQuery):
+    await cb.answer("فقط مالک ربات می‌تواند این را تغییر دهد", show_alert=True)
 
 
 @router.callback_query(F.data == "adm:menu", admin)
@@ -735,6 +756,23 @@ async def admins_add_ask(cb: CallbackQuery, state: FSMContext):
                             "(می‌تواند آیدی‌اش را از ربات @userinfobot بگیرد.)", reply_markup=CANCEL_KB)
 
 
+@router.callback_query(F.data == "adm:sadd", owner)
+async def supports_add_ask(cb: CallbackQuery, state: FSMContext):
+    await cb.answer()
+    await state.set_state(Edit.add_admin)
+    await state.update_data(role="support")
+    await cb.message.answer("🎧 آیدی عددی تلگرام پشتیبان را بفرستید:", reply_markup=CANCEL_KB)
+
+
+@router.callback_query(F.data.startswith("adm:sdel:"), owner)
+async def supports_del(cb: CallbackQuery):
+    target = int(cb.data.rsplit(":", 1)[1])
+    db.set_setting("supports", ",".join(str(a) for a in db.support_ids() if a != target))
+    await cb.answer(f"🗑 {target} حذف شد")
+    text, kb = admins_view()
+    await cb.message.edit_text(text, reply_markup=kb)
+
+
 @router.message(Edit.add_admin, owner)
 async def admins_add_do(msg: Message, state: FSMContext, bot: Bot):
     text = (msg.text or "").strip()
@@ -742,9 +780,20 @@ async def admins_add_do(msg: Message, state: FSMContext, bot: Bot):
         await msg.answer("❌ فقط آیدی عددی بفرستید، مثلاً <code>123456789</code>")
         return
     new_id = int(text)
+    role = (await state.get_data()).get("role", "admin")
     await state.clear()
-    if new_id in db.admin_ids():
-        await msg.answer("این شخص از قبل مدیر است.", reply_markup=ADMIN_KB)
+    if new_id in db.staff_ids():
+        await msg.answer("این شخص از قبل مدیر یا پشتیبان است.", reply_markup=ADMIN_KB)
+        return
+    if role == "support":
+        db.set_setting("supports", ",".join(str(a) for a in sorted(db.support_ids() | {new_id})))
+        await msg.answer(f"✅ <code>{new_id}</code> پشتیبان شد.", reply_markup=ADMIN_KB)
+        try:
+            await bot.send_message(new_id, "🎧 شما پشتیبان این ربات شدید. /start را بزنید.")
+        except Exception:
+            await msg.answer("ℹ️ نتوانستم به او پیام بدهم؛ باید یک بار خودش ربات را /start کند.")
+        text, kb = admins_view()
+        await msg.answer(text, reply_markup=kb)
         return
     db.set_setting("admins", ",".join(str(a) for a in db.extra_admins() + [new_id]))
     await msg.answer(f"✅ <code>{new_id}</code> مدیر شد.", reply_markup=ADMIN_KB)
@@ -778,7 +827,9 @@ def nodes_view():
             ago = int(time.time() - r["seen"])
             state = (f"{'🟢' if nodes.online(n) else '🔴'} آخرین همگام‌سازی {ago} ثانیه پیش | "
                      f"Xray: {r.get('xray', '?')} | load {float(r.get('load', 0)):.2f} | "
-                     f"ترافیک از روشن شدن ربات: {fmt.size(int(r.get('bytes', 0)))}")
+                     + (f"💾 نسخه‌ی یدک ربات: {int((time.time() - r['standby_at']) / 60)} دقیقه پیش | "
+                        if r.get("standby_at") else "💾 نسخه‌ی یدک ربات: هنوز نه | ")
+                     + f"ترافیک از روشن شدن ربات: {fmt.size(int(r.get('bytes', 0)))}")
         private = n.get("private", True)
         mode = "🔒 فقط از طریق تانل ایران (پورت عمومی بسته)" if private else "🔓 عمومی (لینک مستقیم و CDN هم دارد)"
         lines += ["", f"<b>{html.escape(n['name'])}</b> <code>{n['ip']}</code> {html.escape(n.get('domain', ''))}",
@@ -1367,7 +1418,7 @@ async def support_send(msg: Message, state: FSMContext, bot: Bot):
     who = html.escape(msg.from_user.full_name or "")
     header = (f"💬 <b>پیام پشتیبانی</b>\nاز: {who} (<code>{msg.from_user.id}</code>)\n"
               f"اکانت: {html.escape(accounts)}")
-    for admin_id in db.admin_ids():
+    for admin_id in db.staff_ids():
         try:
             await bot.send_message(admin_id, header,
                                    reply_markup=ikb([[("↩️ پاسخ", f"rep:{msg.from_user.id}")]]))
@@ -1377,7 +1428,7 @@ async def support_send(msg: Message, state: FSMContext, bot: Bot):
     await msg.answer("✅ پیامتان برای پشتیبانی فرستاده شد.", reply_markup=USER_KB)
 
 
-@router.callback_query(F.data.startswith("rep:"), admin)
+@router.callback_query(F.data.startswith("rep:"), staff)
 async def support_reply_ask(cb: CallbackQuery, state: FSMContext):
     await cb.answer()
     await state.set_state(Edit.reply)
@@ -1385,13 +1436,13 @@ async def support_reply_ask(cb: CallbackQuery, state: FSMContext):
     await cb.message.answer("✍️ پاسخ را بنویسید:", reply_markup=CANCEL_KB)
 
 
-@router.message(Edit.reply, admin)
+@router.message(Edit.reply, staff)
 async def support_reply_send(msg: Message, state: FSMContext, bot: Bot):
     target = (await state.get_data()).get("reply_to")
     await state.clear()
     try:
         await bot.send_message(target, "💬 <b>پاسخ پشتیبانی:</b>")
         await msg.copy_to(target)
-        await msg.answer("✅ پاسخ فرستاده شد.", reply_markup=ADMIN_KB)
+        await msg.answer("✅ پاسخ فرستاده شد.", reply_markup=staff_kb(msg.from_user.id))
     except Exception:
         await msg.answer("❌ ارسال نشد (شاید کاربر ربات را بلاک کرده).", reply_markup=ADMIN_KB)

@@ -83,6 +83,13 @@ async def _node_stats(request: web.Request) -> web.Response:
     return web.json_response({"ok": True})
 
 
+async def _node_backup(request: web.Request) -> web.Response:
+    import nodes
+    if not nodes.by_key(request.query.get("key", "")):
+        raise web.HTTPNotFound()
+    return web.json_response(nodes.standby_bundle())
+
+
 async def start() -> web.AppRunner:
     app = web.Application(client_max_size=64 * 1024)
     app.router.add_get("/sub/{token}", _sub)
@@ -90,6 +97,7 @@ async def start() -> web.AppRunner:
     app.router.add_post("/pay/sms", _pay_sms)
     app.router.add_get("/node/config", _node_config)
     app.router.add_post("/node/stats", _node_stats)
+    app.router.add_get("/node/backup", _node_backup)
     runner = web.AppRunner(app, access_log=None)
     await runner.setup()
     ctx = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)

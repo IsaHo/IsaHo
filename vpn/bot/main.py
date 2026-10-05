@@ -17,6 +17,7 @@ import shopdb
 import devices
 import links
 import relays
+import reports
 import sub_server
 import tunnels
 import xray
@@ -182,6 +183,9 @@ async def monitor(bot: Bot) -> None:
                     shopdb.add_balance(o.tg_id, o.wallet_used)
             await auto_real_ip(bot)
             await shop.renewal_reminders(bot)
+            await reports.winback(bot, handlers.ikb)
+            await reports.weekly_report(bot, notify_admins)
+            await reports.capacity(bot, notify_admins)
             await check_devices(bot)
             last = int(db.get_setting("last_backup", "0"))
             if time.time() - last > db.DAY:

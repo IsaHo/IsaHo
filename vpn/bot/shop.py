@@ -38,6 +38,8 @@ class ShopAdmin(StatesGroup):
     price = State()
     addon = State()
     renew = State()
+    winback = State()
+    capacity = State()
     card = State()
     discount = State()
     test = State()
@@ -114,8 +116,14 @@ WELCOME = ("👋 به <b>{brand}</b> خوش آمدید!\n\n"
 async def cancel(msg: Message, state: FSMContext):
     """Registered first so it wins over the shop's own waiting states."""
     await state.clear()
-    is_admin = msg.from_user.id in db.admin_ids()
-    await msg.answer("لغو شد.", reply_markup=h.ADMIN_KB if is_admin else h.USER_KB)
+    is_staff = msg.from_user.id in db.staff_ids()
+    await msg.answer("لغو شد.", reply_markup=h.staff_kb(msg.from_user.id) if is_staff else h.USER_KB)
+
+
+@router.message(CommandStart(), h.staff, ~h.admin)
+async def support_start(msg: Message, state: FSMContext):
+    await state.clear()
+    await msg.answer("🎧 پنل پشتیبانی\nرسیدهای جدید و پیام‌های مشتری‌ها همین‌جا می‌رسد.", reply_markup=h.SUPPORT_KB)
 
 
 @router.message(CommandStart(deep_link=True, magic=F.args.startswith("ref_")), ~h.admin)
@@ -396,7 +404,7 @@ async def got_receipt(msg: Message, state: FSMContext, bot: Bot):
                f"{html.escape(plan_line(p))}\n{target}\n💰 {toman(o.final_price)}"
                + (f"\n🎟 {o.discount_code}" if o.discount_code else ""))
     kb = h.ikb([[("✅ تأیید", f"ord:ok:{o.id}"), ("❌ رد", f"ord:no:{o.id}")]])
-    for admin_id in db.admin_ids():
+    for admin_id in db.staff_ids():
         try:
             if msg.photo:
                 await bot.send_photo(admin_id, file_id, caption=caption, reply_markup=kb)
@@ -519,7 +527,7 @@ async def invite(msg: Message):
 # admin side
 # =====================================================================
 
-@router.callback_query(F.data.startswith(("ord:ok:", "ord:no:")), h.admin)
+@router.callback_query(F.data.startswith(("ord:ok:", "ord:no:")), h.staff)
 async def decide(cb: CallbackQuery, bot: Bot):
     _, verdict, oid = cb.data.split(":")
     o = shopdb.order(int(oid))
@@ -592,6 +600,8 @@ def shop_admin_kb():
         [("🎁 اکانت تست", "sa:test"), ("👥 پاداش دعوت", "sa:ref")],
         [("🧾 سفارش‌های در انتظار", "sa:pending"), ("💰 هزینه‌ها", "sa:cost")],
         [("📲 تأیید خودکار پیامک", "sms:menu"), ("⏰ تخفیف تمدید", "sa:renew")],
+        [("👋 تخفیف برگشت", "sa:winback"), ("📈 سقف ظرفیت", "sa:capacity")],
+        [("📅 گزارش ۷ روز اخیر", "sa:report")],
         [("👁 نمای مشتری", "sa:preview")],
     ])
 
@@ -604,12 +614,17 @@ ADMIN_PROMPTS = {
     "ref": (ShopAdmin.referral, "👥 چند درصد از هر خرید به کیف پول دعوت‌کننده برود؟ (۰ = خاموش)"),
     "renew": (ShopAdmin.renew, "⏰ ۳ روز مانده به پایان (یا ۸۵٪ مصرف حجم) به مشتری یادآوری می‌شود. "
                                "چند درصد تخفیف یک‌بارمصرف برای تمدید بدهد؟ (۰ = بدون تخفیف)"),
+    "winback": (ShopAdmin.winback, "👋 به مشتری‌هایی که ۱۴ روز از پایان اشتراکشان گذشته و تمدید نکرده‌اند یک بار "
+                                   "کد تخفیف فرستاده می‌شود. چند درصد؟ (۰ = خاموش)"),
+    "capacity": (ShopAdmin.capacity, "📈 سقف پهنای باند کل (مگابیت). اگر اوج ترافیک ۳ روز پشت سر هم به ۸۵٪ آن "
+                                     "برسد هشدار می‌گیرید. (پیش‌فرض ۱۵۰، ۰ = خاموش)"),
     "cost": (ShopAdmin.cost, "💰 جمع هزینه‌ی ماهانه‌ی همه‌ی سرورها (آلمان + ایران) به تومان؟\n"
                              "برای محاسبه‌ی سود ماهانه در صفحه‌ی فروشگاه."),
 }
 
 
-@router.callback_query(F.data.in_({"sa:card", "sa:test", "sa:ref", "sa:cost", "sa:renew"}), h.admin)
+@router.callback_query(F.data.in_({"sa:card", "sa:test", "sa:ref", "sa:cost", "sa:renew", "sa:winback",
+                                   "sa:capacity"}), h.admin)
 async def shop_admin_ask(cb: CallbackQuery, state: FSMContext):
     await cb.answer()
     st, prompt = ADMIN_PROMPTS[cb.data[3:]]
@@ -626,6 +641,26 @@ async def set_renew(msg: Message, state: FSMContext):
     await state.clear()
     db.set_setting("renew_discount", str(int(v)))
     await msg.answer("✅ ذخیره شد.", reply_markup=h.ADMIN_KB)
+
+
+@router.message(ShopAdmin.winback, h.admin)
+@router.message(ShopAdmin.capacity, h.admin)
+async def set_number(msg: Message, state: FSMContext):
+    key = {ShopAdmin.winback.state: "winback_discount", ShopAdmin.capacity.state: "capacity_mbps"}[await state.get_state()]
+    v = h.parse_number(msg.text)
+    if v is None or (key == "winback_discount" and v >= 100):
+        await msg.answer("❌ یک عدد معتبر بفرستید.")
+        return
+    await state.clear()
+    db.set_setting(key, str(int(v)))
+    await msg.answer("✅ ذخیره شد.", reply_markup=h.ADMIN_KB)
+
+
+@router.callback_query(F.data == "sa:report", h.admin)
+async def report_now(cb: CallbackQuery):
+    await cb.answer()
+    import reports
+    await cb.message.answer(reports.weekly_text())
 
 
 @router.message(ShopAdmin.cost, h.admin)
@@ -934,12 +969,21 @@ async def reseller_add(msg: Message, state: FSMContext, bot: Bot):
 
 # ---------- pending orders / preview ----------
 
+@router.message(F.text == h.BTN_ORDERS, h.staff)
+async def pending_msg(msg: Message, bot: Bot):
+    await send_pending(msg.chat.id, bot)
+
+
 @router.callback_query(F.data == "sa:pending", h.admin)
 async def pending_menu(cb: CallbackQuery, bot: Bot):
     await cb.answer()
+    await send_pending(cb.message.chat.id, bot)
+
+
+async def send_pending(chat_id: int, bot: Bot):
     orders = shopdb.pending_orders()
     if not orders:
-        await cb.message.answer("سفارشی در انتظار نیست.")
+        await bot.send_message(chat_id, "سفارشی در انتظار نیست.")
         return
     for o in orders[:10]:
         p = shopdb.plan(o.plan_id)
@@ -947,9 +991,9 @@ async def pending_menu(cb: CallbackQuery, bot: Bot):
                    f"{html.escape(plan_line(p) if p else '?')}\n💰 {toman(o.final_price)}")
         kb = h.ikb([[("✅ تأیید", f"ord:ok:{o.id}"), ("❌ رد", f"ord:no:{o.id}")]])
         try:
-            await bot.send_photo(cb.message.chat.id, o.receipt, caption=caption, reply_markup=kb)
+            await bot.send_photo(chat_id, o.receipt, caption=caption, reply_markup=kb)
         except Exception:
-            await cb.message.answer(caption, reply_markup=kb)
+            await bot.send_message(chat_id, caption, reply_markup=kb)
 
 
 @router.callback_query(F.data == "sa:preview", h.admin)

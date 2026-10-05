@@ -213,6 +213,15 @@ def extra_admins() -> list:
     return [int(x) for x in get_setting("admins").split(",") if x.strip().lstrip("-").isdigit()]
 
 
+def support_ids() -> set:
+    """Support staff: may review orders and answer customers, nothing else."""
+    return {int(x) for x in get_setting("supports").split(",") if x.strip().isdigit()} - set(cfg.admin_ids)
+
+
+def staff_ids() -> set:
+    return admin_ids() | support_ids()
+
+
 def admin_ids() -> set:
     """Owners from ADMIN_IDS (cannot be removed from the bot) plus admins added in the bot."""
     return set(cfg.admin_ids) | set(extra_admins())
