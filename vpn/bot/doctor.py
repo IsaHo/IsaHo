@@ -65,12 +65,9 @@ def main() -> None:
             "realitySettings": {"serverName": cfg.reality_sni, "fingerprint": "chrome",
                                 "publicKey": cfg.reality_public_key, "shortId": cfg.reality_short_id}}))
 
-    for i, (host, port) in enumerate(links.relays(), 1):
-        try_config(f"Relay IR{i} ({host}:{port} -> Reality)", 30810 + i, vless(
-            host, port, u.uuid, flow="xtls-rprx-vision", stream={
-                "network": "tcp", "security": "reality",
-                "realitySettings": {"serverName": cfg.reality_sni, "fingerprint": "chrome",
-                                    "publicKey": cfg.reality_public_key, "shortId": cfg.reality_short_id}}))
+    import tunnels
+    for label, host, _, n in tunnels.status():
+        print(f"{'✅' if n else '❌'} Relay {label} ({host}): {n} SSH tunnel(s) connected to this server")
 
     try_config(f"CDN XHTTP (through Cloudflare, port {links.cdn_public_port()})", 30802, vless(
         links.cdn_address(), links.cdn_public_port(), u.uuid, stream={
@@ -79,12 +76,18 @@ def main() -> None:
             "xhttpSettings": {"host": cfg.domain, "path": cfg.cdn_path, "mode": "packet-up"}}))
 
     try:
-        req = urllib.request.Request(links.sub_url(u), headers={"User-Agent": "v2rayNG/1.9"})
+        req = urllib.request.Request(links.cdn_sub_url(u), headers={"User-Agent": "v2rayNG/1.9"})
         with urllib.request.urlopen(req, timeout=15) as r:
             n = len(links.all_links(u))
             print(f"✅ Subscription through Cloudflare: HTTP {r.status}, {n} configs")
     except Exception as e:
         print(f"❌ Subscription through Cloudflare: {e}")
+
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{cfg.relay_sub_port}/sub/{u.sub_token}", timeout=5) as r:
+            print(f"✅ Subscription for relays (local :{cfg.relay_sub_port}): HTTP {r.status}")
+    except Exception as e:
+        print(f"❌ Subscription for relays (local :{cfg.relay_sub_port}): {e}")
 
     print("\nIf everything above is ✅ the server side is fine and any failure is on the client network/app.")
 

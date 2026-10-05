@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import tempfile
+import time
 
 import db
 from config import cfg
@@ -13,6 +14,8 @@ log = logging.getLogger(__name__)
 REALITY_TAG = "reality"
 CDN_TAG = "cdn"
 _lock = asyncio.Lock()
+last_rate = 0.0  # users' bytes/s over the last stats interval
+_last_flush = 0.0
 
 
 def _clients(users, flow: str = "") -> list:
@@ -159,7 +162,13 @@ async def collect_stats() -> dict:
 
 
 async def flush_stats() -> None:
+    global last_rate, _last_flush
     stats = await collect_stats()
+    now = time.monotonic()
+    total = sum(up + down for up, down in stats.values())
+    if _last_flush and now > _last_flush:
+        last_rate = total / (now - _last_flush)
+    _last_flush = now
     if stats:
         db.add_traffic(stats)
 

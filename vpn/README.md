@@ -30,10 +30,11 @@ bash IsaHo/vpn/install.sh
 
 ## سرور واسط ایران (پیشنهادی وقتی اتصال مستقیم فیلتر است)
 
-روی یک VPS ایرانی (Ubuntu):
+روی یک VPS ایرانی (Ubuntu)، با تانل SSH (چند اتصال موازی + HAProxy):
 ```bash
-curl -fsSL https://raw.githubusercontent.com/IsaHo/IsaHo/claude/vpn-telegram-bot/vpn/relay.sh | bash -s <IP-سرور-خارج>
+curl -fsSL https://raw.githubusercontent.com/IsaHo/IsaHo/claude/vpn-telegram-bot/vpn/relay.sh | bash -s ssh <IP-سرور-خارج> 3
 ```
+خط `AUTHORIZED` که چاپ می‌کند را یک بار روی سرور خارج اجرا کنید. سابسکریپشن هم از `http://IP-ایران:2096` سرو می‌شود.
 بعد در ربات: ⚙️ تنظیمات ← 🇮🇷 سرور واسط ← `IP:443`. کاربران سابسکریپشن را آپدیت کنند.
 
 ## امکانات ربات
@@ -48,6 +49,10 @@ curl -fsSL https://raw.githubusercontent.com/IsaHo/IsaHo/claude/vpn-telegram-bot
 - وضعیت سرور (CPU، RAM، دیسک، پرمصرف‌ترین کاربران)
 - بکاپ خودکار روزانه به تلگرام؛ بازگردانی با فرستادن فایل `.db` به ربات
 - تنظیم IP تمیز کلادفلر برای کانفیگ CDN، بدون نیاز به فرستادن دوباره لینک‌ها
+
+## امنیت سرورها
+
+روی هر دو سرور: `bash vpn/harden.sh <IP-سرور-دیگر>` (fail2ban، و اگر کلید SSH دارید ورود با رمز بسته می‌شود).
 
 ## دستورات سرور
 

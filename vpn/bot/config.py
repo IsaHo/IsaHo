@@ -43,6 +43,8 @@ class Config:
     cdn_port: int = int(_get("CDN_PORT", "2053"))
     cdn_path: str = _get("CDN_PATH", "/xh")
     sub_port: int = int(_get("SUB_PORT", "2096"))
+    relay_sub_port: int = int(_get("RELAY_SUB_PORT", "2097"))
+    ssh_port: int = int(_get("SSH_PORT", "22"))
 
     cert_file: str = _get("CERT_FILE", "/etc/isaho-vpn/cert.pem")
     key_file: str = _get("KEY_FILE", "/etc/isaho-vpn/key.pem")

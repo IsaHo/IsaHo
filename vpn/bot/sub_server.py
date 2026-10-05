@@ -38,5 +38,7 @@ async def start() -> web.AppRunner:
     ctx = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
     ctx.load_cert_chain(cfg.cert_file, cfg.key_file)
     await web.TCPSite(runner, "0.0.0.0", cfg.sub_port, ssl_context=ctx).start()
-    log.info("subscription server on :%s", cfg.sub_port)
+    # plain HTTP for the SSH tunnels from Iranian relays (never exposed publicly)
+    await web.TCPSite(runner, "127.0.0.1", cfg.relay_sub_port).start()
+    log.info("subscription server on :%s (relay :%s)", cfg.sub_port, cfg.relay_sub_port)
     return runner

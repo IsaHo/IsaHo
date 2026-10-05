@@ -21,6 +21,7 @@ from aiogram.types import (BufferedInputFile, CallbackQuery, FSInputFile, Inline
 import db
 import fmt
 import links
+import tunnels
 import xray
 from config import cfg
 
@@ -130,6 +131,8 @@ def links_text(u) -> str:
     parts = [f"🔗 <b>کانفیگ‌های {html.escape(u.name)}</b>", "",
              "📥 <b>لینک سابسکریپشن</b> (پیشنهادی - خودکار آپدیت می‌شود):",
              f"<code>{html.escape(links.sub_url(u))}</code>", ""]
+    if links.sub_url(u) != links.cdn_sub_url(u):
+        parts += ["📥 سابسکریپشن پشتیبان (کلادفلر):", f"<code>{html.escape(links.cdn_sub_url(u))}</code>", ""]
     for link in links.all_links(u):
         if "-IR" in link.rsplit("#", 1)[-1]:
             label = "🇮🇷 از طریق سرور واسط ایران (پیشنهادی)"
@@ -483,7 +486,9 @@ async def server_status(msg: Message):
         f"🌐 ترافیک کارت شبکه: ⬆️ {fmt.size(net.bytes_sent)} ⬇️ {fmt.size(net.bytes_recv)}\n"
         f"⏱ آپتایم: {up // 86400} روز {up % 86400 // 3600} ساعت\n\n"
         f"👥 کاربران: {len(users)} | فعال: {sum(u.enabled for u in users)}\n"
-        f"📦 مصرف کل کاربران: {fmt.size(sum(u.used for u in users))}"
+        f"📦 مصرف کل کاربران: {fmt.size(sum(u.used for u in users))}\n"
+        f"⚡ ترافیک لحظه‌ای کاربران: {fmt.size(int(xray.last_rate))}/s\n\n"
+        f"📡 <b>تانل‌ها</b>\n{tunnels.summary()}"
     )
     top = sorted(users, key=lambda u: u.used, reverse=True)[:5]
     if top and top[0].used:
