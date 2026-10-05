@@ -811,6 +811,7 @@ def relay_script_url() -> str:
 def relays_view():
     lines, rows = ["🛰 <b>سرورهای ایران</b>", ""], []
     known = {h for h, _ in links.relays()}
+    relays.forget_stale(known)
     shown = sorted(known | set(relays.reports))
     if not shown:
         return "هیچ سرور ایرانی گزارشی نفرستاده است.", None
