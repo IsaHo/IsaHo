@@ -7,7 +7,9 @@ bot.py — لانچرِ مشترک: «سرراست» و «سولاخی» داخ�
     پس پیام‌های قدیمی بعد از عوض‌کردن بخش هم کار می‌کنند.
   • دسترسی هر دو بخش با همان «👤 مدیریت آیدی‌ها»ی سرراست کنترل می‌شود.
   • اعلان‌های خودکار هر دو (بروزرسانی سرراست + ویدیوی جدید سولاخی) فعال‌اند.
-  • 🧹 حریم خصوصی (برای کل چت): پاک شدن خودکار پیام‌ها + «همین الان پاک کن».
+  • 🧹 حریم خصوصی (برای کل چت): پاک شدن خودکار پیام‌ها + «همین الان پاک کن»
+    + 🙈 تار کردن عکس‌ها/ویدیوها (اسپویلر تلگرام؛ با لمس دیده می‌شوند).
+  • لینک اختصاصی هر داستان: t.me/<bot>?start=s_<slug> کارت داستان را مستقیم باز می‌کند.
 
 کد هر ربات دست‌نخورده در فایل خودش است:
   manhwa_bot/sarrast.py        ← ربات سرراست
@@ -116,22 +118,33 @@ def set_mode(uid, mode: str | None) -> None:
 
 # ---------- ربات با ثبت پیام‌ها (برای پاک‌سازی حریم خصوصی) ----------
 
+def _spoiler(a, k):
+    """اگر «تار کردن» برای این چت روشن باشد، عکس/ویدیو را اسپویلر (تار) بفرست."""
+    chat_id = k.get("chat_id", a[0] if a else None)
+    if "has_spoiler" not in k and chat_id is not None and privacy.get_blur(chat_id):
+        k["has_spoiler"] = True
+
+
 class TrackingBot(ExtBot):
-    """همان ربات معمولی؛ فقط آیدی هر پیامی که می‌فرستد را برای پاک‌سازی بعدی ثبت می‌کند."""
+    """همان ربات معمولی؛ آیدی هر پیامی که می‌فرستد را برای پاک‌سازی ثبت می‌کند
+    و در حالت «تار کردن»، عکس/ویدیوها را اسپویلر می‌فرستد (برای سرراست و سولاخی)."""
 
     async def send_message(self, *a, **k):
         return _tracked(await super().send_message(*a, **k))
 
     async def send_photo(self, *a, **k):
+        _spoiler(a, k)
         return _tracked(await super().send_photo(*a, **k))
 
     async def send_document(self, *a, **k):
         return _tracked(await super().send_document(*a, **k))
 
     async def send_video(self, *a, **k):
+        _spoiler(a, k)
         return _tracked(await super().send_video(*a, **k))
 
     async def send_animation(self, *a, **k):
+        _spoiler(a, k)
         return _tracked(await super().send_animation(*a, **k))
 
     async def send_audio(self, *a, **k):
@@ -151,7 +164,10 @@ def _tracked(msg):
 
 def privacy_text(chat_id) -> str:
     d = privacy.get_delay(chat_id)
+    blur = "روشن" if privacy.get_blur(chat_id) else "خاموش"
     return ("🧹 حریم خصوصی\n\n"
+            f"🙈 تار کردن عکس‌ها و ویدیوها: {blur}\n"
+            "(کاورها، کارت‌ها و ویدیوها تار میان و فقط با لمس دیده می‌شن)\n\n"
             f"⏱ پاک شدن خودکار پیام‌ها: {privacy.delay_label(d)}\n"
             "(هم پیام‌های ربات، هم پیام‌هایی که تو فرستادی — در هر دو بخش)\n\n"
             "🧹 «همین الان پاک کن» همهٔ پیام‌های این چت از ۴۸ ساعت اخیر رو پاک می‌کنه.\n"
@@ -162,7 +178,11 @@ def privacy_kb(chat_id) -> InlineKeyboardMarkup:
     d = privacy.get_delay(chat_id)
     opts = [InlineKeyboardButton(("✅ " if sec == d else "") + label, callback_data=f"p.ad:{sec}")
             for sec, label in privacy.DELAYS]
-    return InlineKeyboardMarkup([opts[:2], opts[2:], [InlineKeyboardButton("🧹 همین الان پاک کن", callback_data="p.clean")]])
+    blur = privacy.get_blur(chat_id)
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🙈 تار کردن: روشن ✅" if blur else "🙈 تار کردن: خاموش", callback_data="p.blur")],
+        opts[:2], opts[2:],
+        [InlineKeyboardButton("🧹 همین الان پاک کن", callback_data="p.clean")]])
 
 
 async def on_privacy_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -170,6 +190,15 @@ async def on_privacy_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     if not sarrast.authorized(update):
         return await q.answer("⛔ دسترسی ندارید", show_alert=True)
     chat_id = q.message.chat_id
+    if q.data == "p.blur":
+        on = not privacy.get_blur(chat_id)
+        privacy.set_blur(chat_id, on)
+        await q.answer("🙈 عکس‌ها و ویدیوها از این به بعد تار میان" if on else "عکس‌ها و ویدیوها عادی میان")
+        try:
+            await q.message.edit_text(privacy_text(chat_id), reply_markup=privacy_kb(chat_id))
+        except Exception:
+            pass
+        return
     if q.data.startswith("p.ad:"):
         sec = int(q.data[5:])
         privacy.set_delay(chat_id, sec)
@@ -218,7 +247,15 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⛔ این ربات خصوصی است.")
         return
     privacy.track_message(update.message)
-    set_mode(update.effective_user.id, None)
+    uid = update.effective_user.id
+    args = context.args or []
+    if args and args[0].startswith("s_") and len(args[0]) > 2:   # لینک اختصاصی داستان
+        set_mode(uid, "sarrast")
+        context.user_data["uid"] = uid
+        await sarrast.open_series(context, update.effective_chat.id, context.user_data,
+                                  sarrast.series_url_of(args[0][2:]))
+        return
+    set_mode(uid, None)
     await show_root(update)
 
 

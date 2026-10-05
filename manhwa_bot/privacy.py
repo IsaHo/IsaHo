@@ -4,6 +4,7 @@ privacy.py — پاک‌سازی چت برای حریم خصوصی (برای ک�
   • آیدی پیام‌های ربات و پیام‌های کاربر ثبت می‌شود (فقط چت خصوصی).
   • «پاک شدن خودکار»: هر پیام بعد از مدت انتخابی (۱ / ۶ / ۲۴ ساعت) پاک می‌شود.
   • «همین الان پاک کن»: همهٔ پیام‌های ثبت‌شدهٔ ۴۸ ساعت اخیر یکجا پاک می‌شوند.
+  • «تار کردن»: عکس‌ها و ویدیوها تار (اسپویلر) فرستاده می‌شوند و فقط با لمس دیده می‌شوند (پیش‌فرض روشن).
 
 تلگرام به ربات اجازه می‌دهد فقط پیام‌های کمتر از ۴۸ ساعت را پاک کند؛
 قدیمی‌ترها خودکار از لیست حذف می‌شوند.
@@ -40,6 +41,7 @@ def _load() -> dict:
             _state = {}
         _state.setdefault("delay", {})   # chat_id -> ثانیه (۰ = خاموش)
         _state.setdefault("msgs", {})    # chat_id -> [[message_id, ts], ...]
+        _state.setdefault("blur", {})    # chat_id -> bool (نبودن = روشن)
     return _state
 
 
@@ -85,6 +87,17 @@ def set_delay(chat_id, seconds: int) -> None:
             st["delay"][str(chat_id)] = int(seconds)
         else:
             st["delay"].pop(str(chat_id), None)
+        _save()
+
+
+def get_blur(chat_id) -> bool:
+    with _lock:
+        return bool(_load()["blur"].get(str(chat_id), True))
+
+
+def set_blur(chat_id, on: bool) -> None:
+    with _lock:
+        _load()["blur"][str(chat_id)] = bool(on)
         _save()
 
 
