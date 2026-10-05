@@ -77,7 +77,7 @@ def all_links(u) -> list:
         links.append(cdn_link(u))
     if "node" in types and cfg.reality_public_key:
         import nodes
-        for n in nodes.all_nodes():
+        for n in nodes.public_nodes():
             links.append(reality_link(u, n["ip"], cfg.reality_port, f"{n['name']}-Reality"))
             if n.get("domain"):
                 links.append(cdn_link(u, n["domain"], f"{n['name']}-CDN"))

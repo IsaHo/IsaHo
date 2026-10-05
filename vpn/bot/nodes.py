@@ -27,7 +27,8 @@ def save(nodes: list) -> None:
 
 def add(name: str, ip: str, domain: str) -> dict:
     nodes = [n for n in all_nodes() if n["name"] != name]
-    node = {"name": name, "ip": ip, "domain": domain, "key": secrets.token_hex(16)}
+    # private: Xray listens on localhost only, reachable just through the relays' SSH tunnels
+    node = {"name": name, "ip": ip, "domain": domain, "key": secrets.token_hex(16), "private": True}
     nodes.append(node)
     save(nodes)
     return node
@@ -42,7 +43,23 @@ def by_key(key: str):
 
 
 def config_for(node: dict) -> dict:
-    return xray.build_config(db.active_users(), node=True)
+    conf = xray.build_config(db.active_users(), node=True)
+    if node.get("private", True):
+        for inbound in conf["inbounds"]:
+            inbound["listen"] = "127.0.0.1"
+    return conf
+
+
+def toggle_private(name: str) -> None:
+    nodes = all_nodes()
+    for n in nodes:
+        if n["name"] == name:
+            n["private"] = not n.get("private", True)
+    save(nodes)
+
+
+def public_nodes() -> list:
+    return [n for n in all_nodes() if not n.get("private", True)]
 
 
 def record_stats(node: dict, stats: dict, info: dict) -> None:

@@ -47,9 +47,8 @@ fs.file-max=1048576
 SYSCTL
 sysctl --system >/dev/null 2>&1 || true
 grep -q '^precedence ::ffff:0:0/96' /etc/gai.conf 2>/dev/null || echo 'precedence ::ffff:0:0/96  100' >>/etc/gai.conf
-if command -v ufw >/dev/null && ufw status | grep -q "Status: active"; then
-    ufw allow 443/tcp >/dev/null; ufw allow 2053/tcp >/dev/null
-fi
+# no public VPN ports by default: users arrive through the Iranian relays' SSH tunnels
+# (switch the node to public in the bot and open 443/2053 yourself if you ever want direct links)
 
 echo "==> Sync agent"
 cat >/usr/local/bin/isaho-node <<'AGENT'
