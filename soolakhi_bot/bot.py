@@ -3,7 +3,7 @@
 ربات تلگرام: اسکن مرحله‌ای سایت‌ها، ارسال تیتر + عکس ویدیوها، دانلود با دکمه، ذخیره علاقه‌مندی‌ها.
 فایل ویدیو روی سرور نگه داشته نمی‌شود (فایل موقت بلافاصله بعد از ارسال پاک می‌شود).
 """
-import asyncio, hashlib, io, json, logging, os, re, tempfile
+import asyncio, hashlib, html as htmlmod, io, json, logging, os, re, tempfile, time, zipfile
 from collections import deque
 from urllib.parse import quote_plus, unquote, urljoin, urlparse
 
@@ -233,6 +233,88 @@ def _attr_urls(tag, names):
                     yield part
 
 
+PLACEHOLDER = re.compile(r"(blank|spacer|pixel|placeholder|lazy|loading|loader|transparent|1x1|dummy|"
+                         r"no-?image|noimg|no-?thumb|default)[^/]*\.(gif|png|svg|jpe?g|webp)", re.I)
+LAZY_ATTRS = ["data-src", "data-lazy-src", "data-original", "data-lazy", "data-thumb_url", "data-thumb", "data-thumbnail",
+              "data-preview", "data-image", "data-webp", "data-echo", "data-hi-res-src", "data-poster", "data-bg",
+              "data-srcset", "srcset", "src", "poster"]
+CARD_JUNK = re.compile(r"(\b\d{1,2}:\d{2}(:\d{2})?\b|\b(2160|1440|1080|720|480|360)p\b|\b(4K|UHD|FHD|HD)\b|"
+                       r"\b[\d.,]+\s*[KkMm]?\s*(views?|بازدید)\b|\b\d+\s*(seconds?|minutes?|hours?|days?|weeks?|months?|years?)"
+                       r"\s+ago\b|\b\d+%|\bnew\b)", re.I)
+GENERIC_TITLE = re.compile(r"^(home|homepage|index|video|videos|watch|play|untitled|page not found|404.*|not found|"
+                           r"just a moment.*|attention required.*|access denied.*|خانه|صفحه اصلی|ویدیو|فیلم|thumbnail|"
+                           r"image|photo|poster|preview|cover)$", re.I)
+
+
+def _pick_src(val: str, is_set: bool = True) -> str | None:
+    """از src یا srcset، بزرگ‌ترین عکس واقعی (نه placeholder یا data:)."""
+    val = val.strip()
+    if val.startswith("data:"):
+        return None
+    best, best_w = None, -1
+    for part in (val.split(",") if is_set else [val]):
+        bits = part.strip().split()
+        if not bits or bits[0].startswith("data:") or PLACEHOLDER.search(bits[0]):
+            continue
+        w = 0
+        if len(bits) > 1 and re.fullmatch(r"\d+(\.\d+)?[wx]", bits[1]):
+            w = float(bits[1][:-1])
+        if w > best_w:
+            best, best_w = bits[0], w
+    return best
+
+
+def best_img(tag, J) -> str | None:
+    """عکس واقعیِ یک تگ img/picture/div با در نظر گرفتن lazy-load و srcset و background-image."""
+    if tag is None:
+        return None
+    cands = [tag]
+    pic = tag.find_parent("picture") if tag.name == "img" else None
+    if pic is not None:
+        cands = [tag] + pic.find_all("source")
+    for t in cands:
+        for n in LAZY_ATTRS:
+            val = t.get(n)
+            if isinstance(val, list):
+                val = " ".join(val)
+            if val and isinstance(val, str):
+                u = _pick_src(val, "srcset" in n)
+                if u and not looks_generic(u):
+                    return J(u)
+    m = re.search(r"url\(['\"]?([^'\")]+)['\"]?\)", tag.get("style") or "")
+    if m and not m.group(1).startswith("data:") and not PLACEHOLDER.search(m.group(1)):
+        return J(m.group(1))
+    return None
+
+
+def _many_cards(box, u, base) -> bool:
+    """آیا این بخش از صفحه بیش از یک کارت را در بر دارد؟ (تا تیتر/عکس کارت کناری برداشته نشود)"""
+    for a in box.find_all("a", href=True, limit=40):
+        h = urljoin(base, a["href"]).split("#")[0]
+        if h != u and h != base and urlparse(h).netloc == urlparse(u).netloc and a.find("img") is not None:
+            return True
+    return False
+
+
+def bad_title(t: str | None, site_name: str | None = None) -> bool:
+    t = (t or "").strip()
+    if len(t) < 4 or t.startswith("http") or GENERIC_TITLE.match(t):
+        return True
+    return bool(site_name) and t.lower() == site_name.strip().lower()
+
+
+def title_from_url(url: str) -> str:
+    slug = unquote(urlparse(url).path.rstrip("/").split("/")[-1] or "")
+    slug = re.sub(r"\.(html?|php|aspx?)$", "", slug)
+    slug = re.sub(r"^\d+[-_]|[-_]\d{4,}$", "", slug)
+    return re.sub(r"[-_+]+", " ", slug).strip()[:200]
+
+
+def clean_card_title(t: str) -> str:
+    t = CARD_JUNK.sub(" ", t or "")
+    return re.sub(r"\s+", " ", t).strip(" -|•·")
+
+
 SRC_ATTRS = ["src", "data-src", "data-lazy-src", "data-original", "data-url", "data-video", "data-video-src",
              "data-mp4", "data-file", "data-hls", "data-stream", "srcset", "data-srcset", "href", "content"]
 IMG_ATTRS = ["poster", "data-poster", "data-thumb", "data-thumbnail", "data-preview", "data-image", "data-bg",
@@ -264,7 +346,7 @@ def parse_page(url: str, html: str, domain: str):
                 continue
             stack.extend(v for v in d.values() if isinstance(v, (dict, list)))
             if "VideoObject" in str(d.get("@type")):
-                title = title or d.get("name")
+                title = title or (htmlmod.unescape(d["name"]) if isinstance(d.get("name"), str) else None)
                 dur = dur or parse_dur(d.get("duration"))
                 height = height or d.get("height") or d.get("videoQuality")
                 th = d.get("thumbnailUrl") or d.get("thumbnail")
@@ -279,7 +361,9 @@ def parse_page(url: str, html: str, domain: str):
                         videos.add(J(u))
 
     # 2) متاتگ‌ها
-    title = title or meta("og:title") or meta("twitter:title")
+    for cand in (meta("og:title"), meta("twitter:title")):
+        if bad_title(title, site_name) and cand:
+            title = cand
     for cand in (meta("og:image"), meta("og:image:url"), meta("twitter:image"), meta("thumbnailUrl")):
         if not image and cand and not looks_generic(cand):
             image = cand
@@ -313,16 +397,18 @@ def parse_page(url: str, html: str, domain: str):
                if not re.search(r"(google|facebook|twitter|disqus|recaptcha|doubleclick|ads)", u, re.I)]
 
     # تیتر و عکس جایگزین
-    if not title:
+    if bad_title(title, site_name):
         h = soup.find("h1") or soup.find("h2")
-        title = h.get_text(" ", strip=True) if h else (soup.title.get_text(strip=True) if soup.title else url)
+        h = h.get_text(" ", strip=True) if h else ""
+        page_t = soup.title.get_text(strip=True) if soup.title else ""
+        title = next((x for x in (h, page_t) if not bad_title(clean_title(x, site_name), site_name)), title or url)
     if not image:
         for img in soup.find_all("img"):
-            for u in _attr_urls(img, IMG_ATTRS):
-                if not re.search(r"(logo|icon|avatar|gravatar|sprite|banner|emoji|(?<![a-z])ads?[/_-])", u, re.I) \
-                        and not (img.get("width", "999").isdigit() and int(img.get("width", "999")) < 100):
-                    image = J(u); break
-            if image: break
+            u = best_img(img, J)
+            if u and not re.search(r"(logo|icon|avatar|gravatar|sprite|banner|emoji|(?<![a-z])ads?[/_-])", u, re.I) \
+                    and not (img.get("width", "999").isdigit() and int(img.get("width", "999")) < 100):
+                image = u
+                break
     if not image:  # background-image: url(...)
         m = re.search(rf"""url\(["']?([^"')]+\.(?:{IMG_EXTS})[^"')]*)["']?\)""", html, re.I)
         if m: image = J(m.group(1))
@@ -356,24 +442,28 @@ def parse_page(url: str, html: str, domain: str):
         if not img:  # گاهی عکس و لینک عنوان جدا هستند ولی در یک کارت مشترک
             for _ in range(3):
                 container = container.parent
-                if container is None: break
+                if container is None or _many_cards(container, u, url): break
                 img = container.find("img")
                 if img: break
         if not img:
             continue
-        thumb = next((J(x) for x in _attr_urls(img, IMG_ATTRS) if IMG_EXT.search(x) or "/" in x), None)
-        t = a.get("title") or (a.get_text(" ", strip=True) if len(a.get_text(strip=True)) > 3 else "")
-        if not t:
-            box = a.parent
+        thumb = best_img(img, J)
+        # عنوان کارت به ترتیب اطمینان: title لینک، تیتر h داخل کارت، alt عکس، متن لینک (بدون مدت/بازدید/HD)
+        t = a.get("title") or ""
+        if bad_title(t):
+            box = a
             for _ in range(3):  # عنوان کارت معمولاً در h2/h3 کنار عکس است
-                if box is None: break
-                h = box.find(["h1", "h2", "h3", "h4", "h5"])
-                if h and len(h.get_text(strip=True)) > 3:
-                    t = h.get_text(" ", strip=True); break
+                if box is None or _many_cards(box, u, url): break
+                h = box.find(["h1", "h2", "h3", "h4", "h5", "h6"]) or box.find(class_=re.compile(r"title|caption", re.I))
+                if h and not bad_title(clean_card_title(h.get_text(" ", strip=True))):
+                    t = clean_card_title(h.get_text(" ", strip=True)); break
                 box = box.parent
-        if not t:
+        if bad_title(t):
             alt = img.get("alt") or img.get("title") or ""
-            t = alt if len(alt) > 3 else ""
+            t = alt if not bad_title(alt) and not IMG_EXT.search(alt) else ""
+        if bad_title(t):
+            t = clean_card_title(a.get_text(" ", strip=True))
+            t = t if not bad_title(t) else ""
         if thumb or t:
             old = CARD_HINTS.get(u, {})
             # مدت/کیفیت روی خود کارت (مثل «12:30» و «HD»)؛ فقط از متن کوتاه همان کارت
@@ -398,6 +488,77 @@ def clean_title(t: str, site_name: str | None) -> str:
         keep = [p for p in parts if p.strip().lower() != sn and not (sn and sn in p.lower() and len(p) < len(sn) + 6)]
         t = max(keep or parts, key=len) if not sn else " - ".join(keep or parts)
     return t
+
+
+# ----------------------------- دریافت هوشمند صفحه -----------------------------
+# بعضی سایت‌ها جلوی ربات‌ها را می‌گیرند (Cloudflare، DDoS-Guard، صفحهٔ «Just a moment» یا 403).
+# در این حالت همان صفحه با شبیه‌سازی کامل مرورگر کروم (curl_cffi) دوباره گرفته می‌شود و
+# سایت به خاطر سپرده می‌شود تا دفعه‌های بعد مستقیم همین روش استفاده شود.
+BLOCK_SIGNS = re.compile(r"(cf-chl|challenge-platform|cf-browser-verification|Just a moment\.\.\.|Attention Required!|"
+                         r"DDoS-Guard|ddos-guard|Checking your browser|enable JavaScript and cookies to continue|"
+                         r"sucuri_cloudproxy|Access denied \||_Incapsula_Resource|bot verification)", re.I)
+IMPERSONATE: set[str] = set()         # دامنه‌هایی که فقط با شبیه‌سازی مرورگر جواب می‌دهند
+FETCH_STATS: dict[str, dict] = {}     # domain -> {ok, bypass, blocked, err, codes}
+_CURL = None
+
+
+def _curl():
+    global _CURL
+    if _CURL is None:
+        from curl_cffi.requests import AsyncSession
+        _CURL = AsyncSession(impersonate="chrome", timeout=25, allow_redirects=True, max_clients=16)
+    return _CURL
+
+
+def looks_blocked(status: int, text: str) -> bool:
+    if status in (403, 429, 503) or 520 <= status <= 530:
+        return True
+    return status == 200 and len(text) < 60000 and bool(BLOCK_SIGNS.search(text[:60000]))
+
+
+def _stat(domain, key, code=None):
+    st = FETCH_STATS.setdefault(domain, {"ok": 0, "bypass": 0, "blocked": 0, "err": 0, "codes": {}})
+    st[key] += 1
+    if code:
+        st["codes"][str(code)] = st["codes"].get(str(code), 0) + 1
+
+
+async def _curl_get(url, referer=None):
+    from types import SimpleNamespace
+    r = await _curl().get(url, headers={"Referer": referer} if referer else None)
+    return SimpleNamespace(status_code=r.status_code, text=r.text, content=r.content, url=str(r.url),
+                           headers={k.lower(): v for k, v in r.headers.items()})
+
+
+async def smart_get(c, url, referer=None):
+    """صفحه را می‌گیرد؛ اگر سایت جلوی ربات را گرفت، با شبیه‌سازی مرورگر دوباره امتحان می‌کند."""
+    dom = host_of(url)
+    if dom not in IMPERSONATE:
+        try:
+            r = await c.get(url, headers={"Referer": referer} if referer else None)
+            if not looks_blocked(r.status_code, r.text if "html" in r.headers.get("content-type", "") else ""):
+                _stat(dom, "ok")
+                return r
+            code = r.status_code
+        except Exception as e:
+            code = type(e).__name__
+    else:
+        code = "remembered"
+    try:
+        r2 = await _curl_get(url, referer)
+    except Exception as e:
+        _stat(dom, "err", type(e).__name__)
+        if code == "remembered":
+            raise
+        raise RuntimeError(f"blocked ({code}); browser mode failed: {type(e).__name__}") from e
+    if looks_blocked(r2.status_code, r2.text if "html" in r2.headers.get("content-type", "") else ""):
+        _stat(dom, "blocked", r2.status_code)
+        return r2
+    if code != "remembered":
+        log.info("browser mode works for %s (was %s)", dom, code)
+    IMPERSONATE.add(dom)
+    _stat(dom, "bypass")
+    return r2
 
 
 def looks_generic(img: str) -> bool:
@@ -465,7 +626,7 @@ class Crawler:
 
     async def _fetch(self, c, url, found):
         try:
-            r = await c.get(url)
+            r = await smart_get(c, url)
             if "text/html" not in r.headers.get("content-type", ""):
                 return []
         except Exception as e:
@@ -509,8 +670,10 @@ async def process_page(url, html, domain, sent: set, found: list, query_words=No
                 dur, q = pm.get("dur") or hint.get("dur"), pm.get("q") or hint.get("q")
                 if hint.get("image") and (not image or looks_generic(image)):
                     image = hint["image"]
-                if hint.get("title") and (not title or title == url or len(title) < 4):
+                if hint.get("title") and bad_title(title):
                     title = hint["title"]
+                if bad_title(title):
+                    title = title_from_url(url) or title
                 ext = EXTERNAL.pop(url, [])
                 if not videos and ext:
                     videos = {url}  # فقط لینک پلیر/فایل‌هاست دارد → کارت با دکمه‌های لینک
@@ -549,7 +712,7 @@ class SearchCrawler:
         for path in SEARCH_PATHS:
             u = urljoin(base, path.format(q=quote_plus(self.query)))
             try:
-                r = await c.get(u)
+                r = await smart_get(c, u)
             except Exception:
                 continue
             if r.status_code != 200 or "text/html" not in r.headers.get("content-type", ""):
@@ -578,7 +741,7 @@ class SearchCrawler:
                 await self._prepare(c)
             async def one(url):
                 try:
-                    r = await c.get(url)
+                    r = await smart_get(c, url)
                     if "text/html" not in r.headers.get("content-type", ""):
                         return
                 except Exception as e:
@@ -640,10 +803,13 @@ def site_root(url: str) -> str:
 async def fetch_image(url: str, referer: str):
     """عکس را خودمان (با Referer) می‌گیریم و به JPEG تبدیل می‌کنیم؛ فقط در RAM و چند صد KB."""
     async with httpx.AsyncClient(headers={**HEADERS, "Referer": referer}, follow_redirects=True, timeout=20) as c:
-        r = await c.get(url)
-        r.raise_for_status()
-        if len(r.content) > 15 * 2**20:
-            raise ValueError("image too big")
+        r = await smart_get(c, url, referer)
+    if r.status_code >= 400 or not r.content or r.content[:15].lstrip().startswith((b"<", b"{")):
+        r = await _curl_get(url, referer)        # hotlink بسته / صفحهٔ HTML به جای عکس → با مرورگر
+        if r.status_code >= 400:
+            raise ValueError(f"image HTTP {r.status_code}")
+    if len(r.content) > 15 * 2**20:
+        raise ValueError("image too big")
     im = Image.open(io.BytesIO(r.content))
     im = im.convert("RGB")
     im.thumbnail((1280, 1280))
@@ -839,6 +1005,7 @@ def panel_kb():
         [InlineKeyboardButton("⏰ هر:", callback_data="noop:x")] +
         [InlineKeyboardButton(mark(WATCH["hours"], h) + "h", callback_data=f"watchh:{h}") for h in (1, 3, 6, 12, 24)],
         [InlineKeyboardButton("🔍 بررسی همین الان", callback_data="watch:now")],
+        [InlineKeyboardButton("🩺 تست تک‌تک سایت‌ها (تیتر و عکس)", callback_data="doctor:x")],
         [InlineKeyboardButton("📤 پشتیبان (سایت‌ها و ذخیره‌ها)", callback_data="backup:x")],
         [InlineKeyboardButton("⬆️ آپدیت yt-dlp", callback_data="upytdlp:x"),
          InlineKeyboardButton("🧹 خالی کردن حافظه", callback_data="clearmem:x")],
@@ -1312,6 +1479,10 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_reply_markup(None)
         folder, _, pg = i.rpartition(".")
         return await show_favs(chat_id, ctx, int(pg), folder or "all")
+    if action == "doctor":
+        await q.answer("🩺 تست شروع شد")
+        asyncio.create_task(run_doctor(chat_id, ctx.bot))
+        return
     if action == "fdir":
         await q.answer()
         return await show_favs(chat_id, ctx, 0, i)
@@ -1521,15 +1692,153 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                    "⬇️ دانلود شروع شد" if pos == 1 else f"📥 به صف اضافه شد (نفر {pos})")
 
 
+# ----------------------------- 🩺 تست سایت‌ها -----------------------------
+DOCTOR = {"running": False}
+DOCTOR_PAGES = 20      # صفحات بررسی‌شده از هر سایت
+DOCTOR_VIDEOS = 6      # ویدیوهای نمونه از هر سایت
+
+
+async def doctor_site(site) -> dict:
+    """یک سایت را اسکن آزمایشی می‌کند: دسترسی، تیتر و عکس ویدیوها، و قابل نمایش بودن عکس‌ها."""
+    dom = host_of(site["url"])
+    FETCH_STATS.pop(dom, None)
+    res = {"name": site["name"], "url": site["url"], "domain": dom, "error": None, "videos": [], "html": {}}
+    cr = Crawler(site["url"], max_pages=DOCTOR_PAGES, batch=DOCTOR_VIDEOS)
+    t0 = time.time()
+    try:
+        found = await asyncio.wait_for(cr.next_batch(), 180)
+    except Exception as e:
+        found, res["error"] = [], f"{type(e).__name__}: {e}"[:200]
+    res["secs"], res["pages"] = int(time.time() - t0), cr.pages
+    res["stats"] = FETCH_STATS.get(dom, {})
+    res["browser"] = dom in IMPERSONATE
+    for i in found[:DOCTOR_VIDEOS]:
+        v = VIDEOS[i]
+        item = {"title": v["title"], "page": v["page"], "image": v.get("image"), "dur": v.get("dur"), "q": v.get("q"),
+                "title_ok": not bad_title(v["title"]), "img_ok": False, "img_err": None}
+        if v.get("image"):
+            try:
+                await asyncio.wait_for(fetch_image(v["image"], v["page"]), 40)
+                item["img_ok"] = True
+            except Exception as e:
+                item["img_err"] = f"{type(e).__name__}: {e}"[:120]
+        res["videos"].append(item)
+    # نمونهٔ HTML برای عیب‌یابی: صفحهٔ اول سایت + اولین صفحهٔ ویدیوی مشکل‌دار
+    urls = [("home", site["url"])]
+    bad = next((x for x in res["videos"] if not (x["title_ok"] and x["img_ok"])), None)
+    if bad:
+        urls.append(("video", bad["page"]))
+    async with httpx.AsyncClient(headers=HEADERS, follow_redirects=True, timeout=25) as c:
+        for kind, u in urls:
+            try:
+                r = await smart_get(c, u)
+                res["html"][kind] = r.text[:600_000]
+            except Exception as e:
+                res["html"][kind] = f"<!-- fetch failed: {type(e).__name__}: {e} -->"
+    return res
+
+
+def doctor_verdict(r) -> tuple[str, str]:
+    vids, st = r["videos"], r.get("stats") or {}
+    if not vids:
+        if st.get("blocked") or (not st.get("ok") and not st.get("bypass")):
+            codes = ", ".join(f"{k}×{v}" for k, v in (st.get("codes") or {}).items()) or r.get("error") or "جواب نداد"
+            return "⛔", f"سایت جواب ربات رو نداد ({codes}) — احتمالاً IP سرور رو بسته یا کپچا داره"
+        return "❌", "صفحه‌ها باز شدن ولی ویدیویی پیدا نشد (ساختار سایت باید بررسی بشه)"
+    t_ok = sum(x["title_ok"] for x in vids)
+    i_ok = sum(x["img_ok"] for x in vids)
+    if t_ok == len(vids) and i_ok == len(vids):
+        return "✅", "تیتر و عکس همه درسته"
+    parts = []
+    if t_ok < len(vids):
+        parts.append(f"تیتر {len(vids) - t_ok} تا مشکل داره")
+    if i_ok < len(vids):
+        parts.append(f"عکس {len(vids) - i_ok} تا نیومد")
+    return "⚠️", "، ".join(parts)
+
+
+def doctor_text(r) -> str:
+    icon, why = doctor_verdict(r)
+    st = r.get("stats") or {}
+    lines = [f"{icon} {r['name']} ({r['domain']})", f"   {why}",
+             f"   📄 {r['pages']} صفحه در {r['secs']} ثانیه — عادی {st.get('ok', 0)}، "
+             f"🛡 با شبیه‌سازی مرورگر {st.get('bypass', 0)}، ⛔ بسته {st.get('blocked', 0)}، خطا {st.get('err', 0)}"]
+    for x in r["videos"][:4]:
+        lines.append(f"   {'✓' if x['title_ok'] else '✗'}{'🖼' if x['img_ok'] else '⬜'} {x['title'][:60]}")
+    return "\n".join(lines)
+
+
+async def run_doctor(chat_id, bot):
+    if DOCTOR["running"]:
+        return await bot.send_message(chat_id, "🩺 یه تست در حال انجامه، صبر کن.")
+    if not SITES:
+        return await bot.send_message(chat_id, "هیچ سایتی ذخیره نشده.")
+    DOCTOR["running"] = True
+    results = []
+    sites = list(SITES.values())
+    msg = await bot.send_message(chat_id, f"🩺 تست تک‌تک {len(sites)} سایت شروع شد (هر سایت حدود ۱ تا ۳ دقیقه) ...")
+    try:
+        for n, site in enumerate(sites, 1):
+            try:
+                await msg.edit_text(f"🩺 تست سایت‌ها: {n} از {len(sites)}\n🔎 {site['name']} ...")
+            except Exception:
+                pass
+            try:
+                results.append(await doctor_site(site))
+            except Exception as e:
+                log.exception("doctor failed for %s", site["url"])
+                results.append({"name": site["name"], "url": site["url"], "domain": host_of(site["url"]),
+                                "error": str(e)[:200], "videos": [], "html": {}, "pages": 0, "secs": 0, "stats": {}})
+        count = {k: sum(doctor_verdict(r)[0] == k for r in results) for k in ("✅", "⚠️", "❌", "⛔")}
+        head = (f"🩺 نتیجهٔ تست {len(results)} سایت:\n✅ سالم {count['✅']} | ⚠️ ناقص {count['⚠️']} | "
+                f"❌ ویدیو پیدا نشد {count['❌']} | ⛔ بسته {count['⛔']}\n"
+                "(✓ تیتر درست، 🖼 عکس قابل نمایش)\n")
+        order = {"⛔": 0, "❌": 1, "⚠️": 2, "✅": 3}
+        results.sort(key=lambda r: order[doctor_verdict(r)[0]])
+        chunk = head
+        for r in results:
+            block = "\n" + doctor_text(r) + "\n"
+            if len(chunk) + len(block) > 3900:
+                await bot.send_message(chat_id, chunk, disable_web_page_preview=True)
+                chunk = ""
+            chunk += block
+        if chunk.strip():
+            await bot.send_message(chat_id, chunk, disable_web_page_preview=True)
+        # فایل گزارش کامل + نمونهٔ HTML سایت‌های مشکل‌دار (برای اصلاح دقیق‌تر اسکنر)
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+            z.writestr("report.json", json.dumps([{k: v for k, v in r.items() if k != "html"} for r in results],
+                                                 ensure_ascii=False, indent=1))
+            for r in results:
+                if doctor_verdict(r)[0] != "✅":
+                    for kind, h in (r.get("html") or {}).items():
+                        z.writestr(f"{r['domain']}_{kind}.html", h)
+        buf.seek(0)
+        await bot.send_document(chat_id, buf, filename="soolakhi_site_report.zip",
+                                caption="📎 گزارش کامل تست سایت‌ها (برای عیب‌یابی سایت‌های ⚠️/❌)")
+    finally:
+        DOCTOR["running"] = False
+        try:
+            await msg.delete()
+        except Exception:
+            pass
+
+
+async def cmd_doctor(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if allowed(update):
+        asyncio.create_task(run_doctor(update.effective_chat.id, ctx.bot))
+
+
 async def cmd_debug(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """/debug <url> : نشان می‌دهد اسکنر از یک صفحه چه چیزی استخراج می‌کند."""
     if not allowed(update) or not ctx.args:
         return await update.message.reply_text("استفاده: /debug https://site.com/video-page")
     url = ctx.args[0]
     async with httpx.AsyncClient(headers=HEADERS, follow_redirects=True, timeout=30) as c:
-        r = await c.get(url)
+        r = await smart_get(c, url)
     title, image, videos, iframes, links = parse_page(url, r.text, urlparse(url).netloc.removeprefix("www."))
-    txt = (f"HTTP {r.status_code}\nTitle: {title}\nImage: {image}\nVideos ({len(videos)}):\n" + "\n".join(list(videos)[:8]) +
+    mode = "🛡 مرورگر" if host_of(url) in IMPERSONATE else "عادی"
+    txt = (f"HTTP {r.status_code} ({mode})\nTitle: {title}\nImage: {image}\nVideos ({len(videos)}):\n" + "\n".join(list(videos)[:8]) +
            f"\nIframes: {iframes[:3]}\nLinks: {len(links)}\nCards: " +
            "\n".join(f"{k} -> {v}" for k, v in list(CARD_HINTS.items())[:5]))
     await update.message.reply_text(txt[:4000], disable_web_page_preview=True)
@@ -1646,6 +1955,7 @@ def main():
     app.add_handler(CommandHandler("scan", cmd_scan))
     app.add_handler(CommandHandler("debug", cmd_debug))
     app.add_handler(CommandHandler("panel", cmd_panel))
+    app.add_handler(CommandHandler("doctor", cmd_doctor))
     app.add_handler(MessageHandler(filters.Document.ALL, on_document))
     app.add_handler(CallbackQueryHandler(on_button))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))

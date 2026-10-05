@@ -328,6 +328,7 @@ async def post_init(app: Application):
         BotCommand("update", "سرراست: چک بروزرسانی‌ها"),
         BotCommand("panel", "سولاخی: پنل کنترل"),
         BotCommand("debug", "سولاخی: بررسی یک صفحه"),
+        BotCommand("doctor", "سولاخی: تست تک‌تک سایت‌ها"),
         BotCommand("logo", "سرراست: لوگوی سایت"),
     ])
 
@@ -351,6 +352,7 @@ def main():
     app.add_handler(CommandHandler("scan", soolakhi.cmd_scan))
     app.add_handler(CommandHandler("debug", soolakhi.cmd_debug))
     app.add_handler(CommandHandler("panel", soolakhi.cmd_panel))
+    app.add_handler(CommandHandler("doctor", soolakhi.cmd_doctor))
     app.add_handler(MessageHandler(filters.Document.ALL, soolakhi.on_document))
     # مسیردهی مشترک
     app.add_handler(CallbackQueryHandler(route_callback))
