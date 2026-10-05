@@ -37,16 +37,19 @@ def reality_link(u, address: str = "", port: int = 0, tag: str = "Reality") -> s
     return f"vless://{u.uuid}@{address}:{port}?{q}#{quote(f'{cfg.brand}-{u.name}-{tag}')}"
 
 
-def cdn_link(u) -> str:
+def cdn_link(u, domain: str = "", tag: str = "CDN") -> str:
+    domain = domain or cfg.domain
     q = urlencode({
-        "encryption": "none", "security": "tls", "sni": cfg.domain, "fp": "chrome",
-        "alpn": "h2,http/1.1", "type": "xhttp", "host": cfg.domain, "path": cfg.cdn_path,
+        "encryption": "none", "security": "tls", "sni": domain, "fp": "chrome",
+        "alpn": "h2,http/1.1", "type": "xhttp", "host": domain, "path": cfg.cdn_path,
         "mode": "packet-up",
     })
-    return f"vless://{u.uuid}@{cdn_address()}:{cdn_public_port()}?{q}#{quote(f'{cfg.brand}-{u.name}-CDN')}"
+    address = cdn_address() if domain == cfg.domain else domain
+    return f"vless://{u.uuid}@{address}:{cdn_public_port()}?{q}#{quote(f'{cfg.brand}-{u.name}-{tag}')}"
 
 
-LINK_TYPES = {"relay": "🇮🇷 تانل (سرور واسط)", "reality": "⚡ Reality مستقیم", "cdn": "☁️ CDN"}
+LINK_TYPES = {"relay": "🇮🇷 تانل (سرور واسط)", "reality": "⚡ Reality مستقیم", "cdn": "☁️ CDN",
+              "node": "🌍 سرورهای خارج دیگر (مستقیم + CDN)"}
 
 
 def enabled_types() -> set:
@@ -72,6 +75,12 @@ def all_links(u) -> list:
         links.append(reality_link(u))
     if "cdn" in types and cfg.domain:
         links.append(cdn_link(u))
+    if "node" in types and cfg.reality_public_key:
+        import nodes
+        for n in nodes.all_nodes():
+            links.append(reality_link(u, n["ip"], cfg.reality_port, f"{n['name']}-Reality"))
+            if n.get("domain"):
+                links.append(cdn_link(u, n["domain"], f"{n['name']}-CDN"))
     return links
 
 

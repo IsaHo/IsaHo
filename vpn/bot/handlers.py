@@ -23,6 +23,7 @@ import db
 import fmt
 import links
 import devices
+import nodes
 import relays
 import tunnels
 import xray
@@ -62,6 +63,7 @@ class Edit(StatesGroup):
     cdn_ip = State()
     backup_chat = State()
     status_chat = State()
+    node_add = State()
     relays = State()
     broadcast = State()
     add_admin = State()
@@ -661,6 +663,7 @@ async def settings_menu(msg: Message):
         [("🔗 لینک‌های سابسکریپشن", "lt:menu"), ("👮 مدیران", "adm:menu")],
         [("🛰 سرورهای ایران", "rl:menu"), ("📦 کانال بکاپ", "set:bchat")],
         [("📱 محدودیت دستگاه", "dev:menu"), ("📣 کانال وضعیت", "set:schat")],
+        [("🌍 سرورهای خارج", "nd:menu")],
         [("🇮🇷 سرور واسط", "set:relays"), ("🌐 تنظیم IP تمیز کلادفلر", "set:cdn")],
         [("🧪 دستور تست سرور واسط", "set:relaytest")],
         [("🔌 پورت CDN: 443", "set:port:443"), (f"🔌 پورت CDN: {cfg.cdn_port}", f"set:port:{cfg.cdn_port}")],
@@ -760,6 +763,94 @@ async def admins_del(cb: CallbackQuery):
     await cb.answer(f"🗑 {target} حذف شد")
     text, kb = admins_view()
     await cb.message.edit_text(text, reply_markup=kb)
+
+
+# ---------- secondary foreign servers (nodes) ----------
+
+def nodes_view():
+    lines, rows = ["🌍 <b>سرورهای خارج</b>", "",
+                   f"🟢 اصلی: <code>{cfg.server_ip}</code> (ربات و دیتابیس اینجاست)"], []
+    for n in nodes.all_nodes():
+        r = nodes.reports.get(n["name"])
+        if not r:
+            state = "⚪️ هنوز وصل نشده"
+        else:
+            ago = int(time.time() - r["seen"])
+            state = (f"{'🟢' if nodes.online(n) else '🔴'} آخرین همگام‌سازی {ago} ثانیه پیش | "
+                     f"Xray: {r.get('xray', '?')} | load {float(r.get('load', 0)):.2f} | "
+                     f"ترافیک از روشن شدن ربات: {fmt.size(int(r.get('bytes', 0)))}")
+        lines += ["", f"<b>{html.escape(n['name'])}</b> <code>{n['ip']}</code> {html.escape(n.get('domain', ''))}", state]
+        rows.append([(f"📋 دستور نصب {n['name']}", f"nd:cmd:{n['name']}"), (f"🗑 {n['name']}", f"nd:del:{n['name']}")])
+    rows.append([("➕ سرور خارج جدید", "nd:add"), ("🔃 بروزرسانی", "nd:menu")])
+    return "\n".join(lines), ikb(rows)
+
+
+@router.callback_query(F.data == "nd:menu", admin)
+async def nodes_menu(cb: CallbackQuery):
+    await cb.answer()
+    text, kb = nodes_view()
+    if (cb.message.text or "").startswith("🌍"):
+        try:
+            await cb.message.edit_text(text, reply_markup=kb)
+        except Exception:
+            pass
+    else:
+        await cb.message.answer(text, reply_markup=kb)
+
+
+@router.callback_query(F.data == "nd:add", owner)
+async def nodes_add_ask(cb: CallbackQuery, state: FSMContext):
+    await cb.answer()
+    await state.set_state(Edit.node_add)
+    await cb.message.answer("➕ سرور خارج جدید: <code>نام | IP | دامنه‌ی کلادفلر</code>\n"
+                            "مثال: <code>FR | 202.133.88.44 | fr.zkim.app</code>\n"
+                            "(نام کوتاه انگلیسی؛ دامنه اختیاری است)", reply_markup=CANCEL_KB)
+
+
+@router.message(Edit.node_add, owner)
+async def nodes_add(msg: Message, state: FSMContext):
+    parts = [p.strip() for p in (msg.text or "").split("|")]
+    if len(parts) < 2 or not re.fullmatch(r"[A-Za-z0-9]{1,12}", parts[0]) or \
+            not re.fullmatch(r"\d{1,3}(\.\d{1,3}){3}", parts[1]):
+        await msg.answer("❌ قالب: <code>FR | 202.133.88.44 | fr.zkim.app</code>")
+        return
+    domain = parts[2] if len(parts) > 2 and re.fullmatch(r"[A-Za-z0-9.-]{3,253}", parts[2]) else ""
+    node = nodes.add(parts[0].upper(), parts[1], domain)
+    types = links.enabled_types()
+    if "node" not in types:
+        links.toggle_type("node")
+    await state.clear()
+    await msg.answer("✅ اضافه شد. این دستور را روی همان سرور اجرا کنید:", reply_markup=ADMIN_KB)
+    await msg.answer(node_install_text(node))
+
+
+def node_install_text(node) -> str:
+    url = (f"https://raw.githubusercontent.com/IsaHo/IsaHo/{relays.current_ref()}/vpn/node.sh")
+    cmd = (f"curl -fsSL {url} | bash -s https://{cfg.server_ip}:{cfg.sub_port} {node['key']} "
+           f"{nodes.cert_fingerprint()} {node.get('domain') or 'node.local'}")
+    return (f"🖥 <b>نصب روی {html.escape(node['name'])} ({node['ip']})</b>\nروی متن بزنید تا کپی شود:\n\n"
+            f"<code>{html.escape(cmd)}</code>\n\n⚠️ این دستور کلید محرمانه دارد؛ به کسی ندهید.")
+
+
+@router.callback_query(F.data.startswith("nd:cmd:"), owner)
+async def nodes_cmd(cb: CallbackQuery):
+    await cb.answer()
+    node = next((n for n in nodes.all_nodes() if n["name"] == cb.data[7:]), None)
+    if node:
+        await cb.message.answer(node_install_text(node))
+
+
+@router.callback_query(F.data.startswith("nd:del:"), owner)
+async def nodes_del(cb: CallbackQuery):
+    nodes.remove(cb.data[7:])
+    await cb.answer("🗑 حذف شد")
+    text, kb = nodes_view()
+    await cb.message.edit_text(text, reply_markup=kb)
+
+
+@router.callback_query(F.data.startswith(("nd:add", "nd:cmd:", "nd:del:")), admin)
+async def nodes_denied(cb: CallbackQuery):
+    await cb.answer("فقط مالک ربات می‌تواند این را انجام دهد", show_alert=True)
 
 
 @router.callback_query(F.data == "set:schat", admin)
@@ -864,7 +955,9 @@ def relays_view():
             "🟡" if relays.online(ip) and r.get("tunnels_up") else "🔴")
         lines += [
             f"{icon} <b>{html.escape(str(r.get('hostname', ip)))}</b> <code>{ip}</code>",
-            f"   تانل‌ها: {r.get('tunnels_up', '?')}/{r.get('tunnels_total', '?')} | "
+            f"   تانل‌ها: {r.get('tunnels_up', '?')}/{r.get('tunnels_total', '?')}"
+            + (f" + خارج دوم {r.get('node_tunnels_up', 0)}/{r['node_tunnels_total']}" if r.get("node_tunnels_total") else "")
+            + " | "
             f"load {r.get('load', 0):.2f} | RAM {r.get('mem', 0)}%",
             f"   ⬇️ {fmt.size(int(r.get('rx_rate', 0)))}/s ⬆️ {fmt.size(int(r.get('tx_rate', 0)))}/s | "
             f"آخرین گزارش: {ago} ثانیه پیش",

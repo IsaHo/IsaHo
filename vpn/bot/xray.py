@@ -47,7 +47,10 @@ def _clients(users, flow: str = "") -> list:
     return out
 
 
-def _inbounds(users) -> list:
+def _inbounds(users, split=None, cert=None, key=None) -> list:
+    """split/cert/key default to this server; nodes (see nodes.py) pass their own."""
+    split = split_relay_inbound() if split is None else split
+    cert, key = cert or cfg.cert_file, key or cfg.key_file
     sniffing = {"enabled": True, "destOverride": ["http", "tls", "quic"], "routeOnly": True}
     inbounds = [
         {
@@ -82,7 +85,7 @@ def _inbounds(users) -> list:
                 "security": "tls",
                 "tlsSettings": {
                     "alpn": ["h2", "http/1.1"],
-                    "certificates": [{"certificateFile": cfg.cert_file, "keyFile": cfg.key_file}],
+                    "certificates": [{"certificateFile": cert, "keyFile": key}],
                 },
                 "xhttpSettings": {"path": cfg.cdn_path, "mode": "auto"},
                 "sockopt": {"tcpFastOpen": True},
@@ -90,7 +93,7 @@ def _inbounds(users) -> list:
             "sniffing": sniffing,
         },
     ]
-    if split_relay_inbound():
+    if split:
         reality = inbounds[0]
         reality["listen"] = cfg.server_ip
         relay = json.loads(json.dumps(reality))
@@ -100,11 +103,15 @@ def _inbounds(users) -> list:
     return inbounds
 
 
-def build_config(users) -> dict:
+def build_config(users, node: bool = False) -> dict:
+    """node=True builds the config for a secondary foreign server (no relay split, its own cert)."""
     api_host, api_port = cfg.api_addr.rsplit(":", 1)
+    split = False if node else split_relay_inbound()
+    inbounds = (_inbounds(users, split=False, cert="/etc/isaho-node/cert.pem", key="/etc/isaho-node/key.pem")
+                if node else _inbounds(users))
     return {
         # the access log is only useful (and only kept) when relays pass real client IPs
-        "log": {"loglevel": "warning", "access": ACCESS_LOG if split_relay_inbound() else "none"},
+        "log": {"loglevel": "warning", "access": ACCESS_LOG if split else "none"},
         "api": {"tag": "api", "services": ["HandlerService", "StatsService"]},
         "stats": {},
         "policy": {
@@ -115,7 +122,7 @@ def build_config(users) -> dict:
         "inbounds": [
             {"tag": "api", "listen": api_host, "port": int(api_port),
              "protocol": "dokodemo-door", "settings": {"address": api_host}},
-            *_inbounds(users),
+            *inbounds,
         ],
         "outbounds": [
             {"tag": "direct", "protocol": "freedom", "settings": {"domainStrategy": "UseIPv4"}},
