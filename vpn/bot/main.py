@@ -87,6 +87,8 @@ async def check_tunnels(bot: Bot) -> None:
 
 
 _device_warned = {}  # name -> last warning time
+_device_over = {}    # name -> consecutive checks over the limit
+DEVICE_CONFIRM = 5   # ~5 minutes
 DEVICE_BAN = 15 * 60
 
 
@@ -131,16 +133,24 @@ async def check_devices(bot: Bot) -> None:
         limit = u.ip_limit or default
         n = devices.count(u.name)
         if not limit or n <= limit:
+            _device_over.pop(u.name, None)
+            continue
+        # act only when it persists, so a phone switching Wi-Fi/data is not punished
+        _device_over[u.name] = _device_over.get(u.name, 0) + 1
+        if _device_over[u.name] < DEVICE_CONFIRM:
             continue
         name = html.escape(u.name)
+        nets = ", ".join(devices.networks(u.name)[:8])
         if action == "disable":
             db.update(u.id, enabled=0, disabled_reason=f"iplimit:{int(now + DEVICE_BAN)}")
             await xray.sync_user(u, False)
             await notify(bot, u, f"⛔ اکانت <b>{name}</b> با {n} دستگاه هم‌زمان (حد: {limit}) "
                                  "استفاده شد و ۱۵ دقیقه قطع شد.")
-        elif now - _device_warned.get(u.name, 0) > 1800:
+        elif now - _device_warned.get(u.name, 0) > 6 * 3600:
+            # warnings go to admins only; customers hear about it only if they are suspended
             _device_warned[u.name] = now
-            await notify(bot, u, f"⚠️ اکانت <b>{name}</b> روی {n} دستگاه هم‌زمان استفاده می‌شود (حد: {limit}).")
+            await notify_admins(bot, f"⚠️ اکانت <b>{name}</b> از {n} شبکه‌ی مختلف هم‌زمان استفاده می‌شود "
+                                     f"(حد: {limit}).\n<code>{nets}</code>")
 
 
 async def notify_status(bot: Bot, text: str) -> None:
