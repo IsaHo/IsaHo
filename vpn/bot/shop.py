@@ -583,23 +583,34 @@ async def set_ref(msg: Message, state: FSMContext):
 
 # starting points; prices are meant to be adjusted with ✏️
 PRESETS = [
-    ("🌱 اقتصادی ۲۰ گیگ", 20, 30, 90_000),
-    ("⭐ استاندارد ۵۰ گیگ", 50, 30, 180_000),
-    ("🔥 حرفه‌ای ۱۰۰ گیگ", 100, 30, 300_000),
-    ("💎 ویژه ۲۰۰ گیگ", 200, 30, 500_000),
-    ("📅 سه‌ماهه ۱۵۰ گیگ", 150, 90, 420_000),
-    ("👨‍👩‍👧 خانوادگی ۳۰۰ گیگ", 300, 60, 750_000),
+    ("🌱 اقتصادی ۲۰ گیگ", 20, 30, 150_000),
+    ("⭐ استاندارد ۵۰ گیگ", 50, 30, 290_000),
+    ("🔥 حرفه‌ای ۱۰۰ گیگ", 100, 30, 490_000),
+    ("💎 ویژه ۲۰۰ گیگ", 200, 30, 850_000),
+    ("📅 سه‌ماهه ۱۵۰ گیگ", 150, 90, 690_000),
+    ("👨‍👩‍👧 خانوادگی ۳۰۰ گیگ", 300, 60, 1_250_000),
 ]
+OLD_PRESET_PRICES = {"🌱 اقتصادی ۲۰ گیگ": 90_000, "⭐ استاندارد ۵۰ گیگ": 180_000,
+                     "🔥 حرفه‌ای ۱۰۰ گیگ": 300_000, "💎 ویژه ۲۰۰ گیگ": 500_000,
+                     "📅 سه‌ماهه ۱۵۰ گیگ": 420_000, "👨‍👩‍👧 خانوادگی ۳۰۰ گیگ": 750_000}
 
 
 def apply_defaults() -> None:
     """Recommended starting settings, applied once on a fresh shop; admins can change them all later."""
+    if db.get_setting("shop_seeded") and not db.get_setting("shop_prices_v2"):
+        # raise first-version preset prices that the admin has not edited
+        new = {t: p for t, _, _, p in PRESETS}
+        for p in shopdb.plans(False):
+            if OLD_PRESET_PRICES.get(p.title) == p.price:
+                shopdb.set_price(p.id, new[p.title])
+        db.set_setting("shop_prices_v2", "1")
     if db.get_setting("shop_seeded"):
         return
     if not shopdb.plans(False):
         for title, gb, days, price in PRESETS:
             shopdb.add_plan(title, gb, days, price)
-    defaults = {"shop_test": "500:24", "shop_ref_percent": "10",
+    db.set_setting("shop_prices_v2", "1")
+    defaults = {"shop_test": "500:24", "shop_ref_percent": "10", "shop_cost": "5000000",
                 "ip_limit_default": "2", "ip_limit_action": "warn"}
     for key, value in defaults.items():
         if not db.get_setting(key):
