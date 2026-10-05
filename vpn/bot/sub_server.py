@@ -17,6 +17,10 @@ async def _sub(request: web.Request) -> web.Response:
     user = db.get_by_token(request.match_info["token"])
     if not user:
         raise web.HTTPNotFound()
+    import webpage
+    if webpage.is_browser(request):
+        return web.Response(text=webpage.render(user), content_type="text/html", charset="utf-8",
+                            headers={"Cache-Control": "no-store"})
     title = base64.b64encode(f"{cfg.brand} - {user.name}".encode()).decode()
     return web.Response(
         text=links.sub_body(user),

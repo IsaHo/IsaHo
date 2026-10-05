@@ -66,6 +66,7 @@ class Plan:
     days: int
     price: int
     active: int
+    kind: str = "plan"  # plan | addon (extra traffic for an existing account)
 
 
 @dataclass
@@ -104,14 +105,20 @@ def init() -> None:
         cols = {r["name"] for r in c.execute("PRAGMA table_info(users)")}
         if "owner_tg" not in cols:
             c.execute("ALTER TABLE users ADD COLUMN owner_tg INTEGER")
+        if "kind" not in {r["name"] for r in c.execute("PRAGMA table_info(plans)")}:
+            c.execute("ALTER TABLE plans ADD COLUMN kind TEXT NOT NULL DEFAULT 'plan'")
 
 
 # ---------- plans ----------
 
-def plans(only_active: bool = True) -> list:
-    q = "SELECT * FROM plans" + (" WHERE active=1" if only_active else "") + " ORDER BY price"
+def plans(only_active: bool = True, kind: str = "plan") -> list:
+    q = "SELECT * FROM plans WHERE kind=?" + (" AND active=1" if only_active else "") + " ORDER BY price"
     with db.connect() as c:
-        return [Plan(**dict(r)) for r in c.execute(q)]
+        return [Plan(**dict(r)) for r in c.execute(q, (kind,))]
+
+
+def addons(only_active: bool = True) -> list:
+    return plans(only_active, "addon")
 
 
 def plan(plan_id: int) -> Optional[Plan]:
@@ -120,9 +127,10 @@ def plan(plan_id: int) -> Optional[Plan]:
         return Plan(**dict(r)) if r else None
 
 
-def add_plan(title: str, gb: float, days: int, price: int) -> None:
+def add_plan(title: str, gb: float, days: int, price: int, kind: str = "plan") -> None:
     with db.connect() as c:
-        c.execute("INSERT INTO plans (title, gb, days, price) VALUES (?, ?, ?, ?)", (title, gb, days, price))
+        c.execute("INSERT INTO plans (title, gb, days, price, kind) VALUES (?, ?, ?, ?, ?)",
+                  (title, gb, days, price, kind))
 
 
 def set_price(plan_id: int, price: int) -> None:
