@@ -1,0 +1,7 @@
+python-telegram-bot>=21
+httpx[http2]
+beautifulsoup4
+yt-dlp
+Pillow
+curl_cffi
+lxml
