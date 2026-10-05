@@ -1,6 +1,7 @@
 """Shop: plans, card-to-card payments with receipt approval, test accounts, self renewal,
 discount codes, referral rewards and resellers. Customer-facing handlers run before the
 main router so /start and the customer keyboard land here."""
+import asyncio
 import html
 import logging
 import re
@@ -17,10 +18,12 @@ import fmt
 import handlers as h
 import links
 import shopdb
+import smspay
 from config import cfg
 
 log = logging.getLogger(__name__)
 router = Router()
+BOT = None  # set by main; used by the SMS webhook
 
 
 class Buy(StatesGroup):
@@ -286,6 +289,8 @@ async def pay(cb: CallbackQuery, state: FSMContext, bot: Bot):
     await cb.answer()
     await cb.message.edit_reply_markup(reply_markup=None)
     q = quote(data, cb.from_user.id)
+    if q["final"]:
+        q["final"] = smspay.unique_amount(q["final"])  # last digits identify this order's deposit
     if q["wallet"]:
         shopdb.add_balance(cb.from_user.id, -q["wallet"])
     o = shopdb.create_order(
@@ -300,9 +305,13 @@ async def pay(cb: CallbackQuery, state: FSMContext, bot: Bot):
         return
     await state.set_state(Buy.receipt)
     await state.update_data(order_id=o.id)
+    after = ("⚡ چند ثانیه بعد از واریز، اشتراک خودکار برایتان فرستاده می‌شود. "
+             "اگر تا ۱۰ دقیقه نرسید، <b>عکس رسید</b> را همین‌جا بفرستید." if smspay.enabled()
+             else "📸 بعد از واریز، <b>عکس رسید</b> را همین‌جا بفرستید.")
     await cb.message.answer(
-        f"💳 لطفاً <b>{toman(q['final'])}</b> را به کارت زیر واریز کنید:\n\n{html.escape(card_info())}\n\n"
-        f"📸 بعد از واریز، <b>عکس رسید</b> را همین‌جا بفرستید. (سفارش #{o.id})", reply_markup=h.CANCEL_KB)
+        f"💳 لطفاً <b>دقیقاً {toman(q['final'])}</b> را به کارت زیر واریز کنید:\n\n{html.escape(card_info())}\n\n"
+        f"⚠️ مبلغ را دقیق و با همین سه رقم آخر واریز کنید؛ سفارش شما با همین مبلغ شناسایی می‌شود.\n\n"
+        f"{after}\n(سفارش #{o.id} — تا ۴۸ ساعت معتبر)", reply_markup=h.CANCEL_KB)
 
 
 @router.message(Buy.receipt, F.photo | F.document)
@@ -310,6 +319,9 @@ async def got_receipt(msg: Message, state: FSMContext, bot: Bot):
     order_id = (await state.get_data()).get("order_id")
     await state.clear()
     o = shopdb.order(order_id) if order_id else None
+    if o and o.status == "approved":
+        await msg.answer("✅ پرداخت شما قبلاً خودکار تأیید و اشتراک ارسال شده است.", reply_markup=h.USER_KB)
+        return
     if not o or o.status != "waiting":
         await msg.answer("سفارش پیدا نشد.", reply_markup=h.USER_KB)
         return
@@ -512,6 +524,7 @@ def shop_admin_kb():
         [("🎟 کدهای تخفیف", "sa:codes"), ("🤝 نماینده‌ها", "sa:resellers")],
         [("🎁 اکانت تست", "sa:test"), ("👥 پاداش دعوت", "sa:ref")],
         [("🧾 سفارش‌های در انتظار", "sa:pending"), ("💰 هزینه‌ها", "sa:cost")],
+        [("📲 تأیید خودکار پیامک", "sms:menu")],
         [("👁 نمای مشتری", "sa:preview")],
     ])
 
@@ -834,3 +847,99 @@ async def preview(cb: CallbackQuery):
     await cb.answer()
     await cb.message.answer("👁 این منوی مشتری است. برای برگشت به پنل /start را بزنید.", reply_markup=h.USER_KB)
 
+
+
+# =====================================================================
+# automatic payment verification by bank SMS
+# =====================================================================
+
+async def handle_sms(text: str) -> str:
+    text = (text or "").strip()
+    if not text or not smspay.enabled():
+        return "disabled"
+    if not shopdb.log_sms(text):
+        return "duplicate"
+    o, reason = smspay.match(text)
+    if not o or not shopdb.auto_approve(o.id):
+        shopdb.sms_result(text, None, reason)
+        return reason
+    shopdb.sms_result(text, o.id, "approved")
+    if BOT:
+        # answer the phone right away; building the account can take a few seconds
+        _tasks.add(t := asyncio.create_task(_auto_fulfil(o)))
+        t.add_done_callback(_tasks.discard)
+    return "approved"
+
+
+_tasks = set()
+
+
+async def _auto_fulfil(o) -> None:
+    try:
+        await fulfill(BOT, shopdb.order(o.id))
+    except Exception as e:
+        log.exception("auto fulfil failed")
+        await notify_admins(BOT, f"❌ سفارش #{o.id} با پیامک تأیید شد ولی ساخت اکانت خطا داد: "
+                                 f"<code>{html.escape(str(e))}</code>")
+        return
+    await notify_admins(BOT, f"⚡ سفارش #{o.id} خودکار با پیامک بانک تأیید شد ({toman(o.final_price)}).")
+
+
+def sms_admin():
+    on = smspay.enabled()
+    from links import relays
+    host = relays()[0][0] if relays() else cfg.domain
+    url = f"http://{host}:2096/pay/sms?key={smspay.key()}"
+    lines = [
+        "📲 <b>تأیید خودکار با پیامک بانک</b>", "",
+        f"وضعیت: {'🟢 روشن' if on else '🔴 خاموش'}", "",
+        "هر سفارش یک مبلغ یکتا (سه رقم آخر) می‌گیرد. پیامک واریز بانک از گوشی شما به ربات فرستاده "
+        "می‌شود و سفارشی که مبلغش در پیامک باشد خودکار تأیید می‌شود. پیامک‌های برداشت و خط موجودی نادیده "
+        "گرفته می‌شوند. اگر دو سفارش با یک پیامک جور شوند، تأیید دستی می‌ماند.", "",
+        "🔗 آدرس (محرمانه؛ به کسی ندهید):", f"<code>{url}</code>", "",
+        "<b>تنظیم در آیفون (iOS 17+)</b>",
+        "۱. اپ Shortcuts ← Automation ← + ← <b>Message</b>",
+        "۲. Sender: شماره یا نام پیامک‌های بانک | Message Contains: <code>واریز</code> | <b>Run Immediately</b>",
+        "۳. Next ← New Blank Automation ← اکشن <b>Get Contents of URL</b>",
+        "۴. URL: آدرس بالا | Method: <b>POST</b> | Request Body: <b>Form</b>",
+        "۵. یک فیلد Text با نام <code>text</code> و مقدار: متغیر <b>Shortcut Input</b> (Content)",
+        "۶. Done. برای تست یک مبلغ کوچک به کارت خودتان واریز کنید و «📜 پیامک‌های اخیر» را ببینید.",
+    ]
+    recent = shopdb.last_sms(5)
+    if recent:
+        lines += ["", "📜 <b>پیامک‌های اخیر</b>"]
+        for r in recent:
+            when = time.strftime("%m-%d %H:%M", time.localtime(r["at"]))
+            lines.append(f"• {when} — {html.escape(r['result'] or '...')}"
+                         + (f" (سفارش #{r['order_id']})" if r["order_id"] else ""))
+    kb = h.ikb([
+        [(("🔴 خاموش کردن" if on else "🟢 روشن کردن"), "sms:toggle"), ("🔑 کلید جدید", "sms:rekey")],
+        [("📜 پیامک‌های اخیر", "sms:menu")],
+    ])
+    return "\n".join(lines), kb
+
+
+@router.callback_query(F.data == "sms:menu", h.admin)
+async def sms_menu(cb: CallbackQuery):
+    await cb.answer()
+    text, kb = sms_admin()
+    await cb.message.answer(text, reply_markup=kb, disable_web_page_preview=True)
+
+
+@router.callback_query(F.data.in_({"sms:toggle", "sms:rekey"}), h.owner)
+async def sms_change(cb: CallbackQuery):
+    if cb.data == "sms:toggle":
+        smspay.key()
+        db.set_setting("sms_on", "" if smspay.enabled() else "1")
+    else:
+        db.set_setting("sms_key", "")
+        smspay.key()
+    await cb.answer("✅ ذخیره شد" + ("؛ آدرس را در Shortcut هم عوض کنید" if cb.data == "sms:rekey" else ""),
+                    show_alert=cb.data == "sms:rekey")
+    text, kb = sms_admin()
+    await cb.message.edit_text(text, reply_markup=kb, disable_web_page_preview=True)
+
+
+@router.callback_query(F.data.in_({"sms:toggle", "sms:rekey"}), h.admin)
+async def sms_change_denied(cb: CallbackQuery):
+    await cb.answer("فقط مالک ربات می‌تواند این را تغییر دهد", show_alert=True)

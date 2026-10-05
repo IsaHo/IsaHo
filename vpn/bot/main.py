@@ -153,6 +153,9 @@ async def monitor(bot: Bot) -> None:
             await xray.flush_stats()
             await check_users(bot)
             await check_tunnels(bot)
+            for o in shopdb.expire_waiting(int(time.time()) - 2 * db.DAY):
+                if o.wallet_used:
+                    shopdb.add_balance(o.tg_id, o.wallet_used)
             await auto_real_ip(bot)
             await check_devices(bot)
             last = int(db.get_setting("last_backup", "0"))
@@ -181,6 +184,7 @@ async def main() -> None:
     await xray.apply_all()
 
     bot = Bot(cfg.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    shop.BOT = bot
     me = await bot.get_me()
     db.set_setting("bot_username", me.username)
     await bot.set_my_commands([BotCommand(command="start", description="منوی اصلی")])
