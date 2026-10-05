@@ -51,6 +51,21 @@ def card_info() -> str:
     return db.get_setting("shop_card", "")
 
 
+_CARD = re.compile(r"(?<!\d)(\d{4}[\s\-]?\d{4}[\s\-]?\d{4}[\s\-]?\d{4}|IR\d{24})(?!\d)", re.I)
+
+
+def card_html() -> str:
+    """Card details with card / IBAN numbers as tap-to-copy (digits only)."""
+    text = card_info().translate(str.maketrans("۰۱۲۳۴۵۶۷۸۹", "0123456789"))
+    out, last = [], 0
+    for m in _CARD.finditer(text):
+        out.append(html.escape(text[last:m.start()]))
+        out.append(f"<code>{re.sub(r'[^0-9A-Za-z]', '', m.group(0)).upper()}</code>")
+        last = m.end()
+    out.append(html.escape(text[last:]))
+    return "".join(out)
+
+
 def shop_open() -> bool:
     return bool(card_info()) and bool(shopdb.plans())
 
@@ -308,10 +323,14 @@ async def pay(cb: CallbackQuery, state: FSMContext, bot: Bot):
     after = ("⚡ چند ثانیه بعد از واریز، اشتراک خودکار برایتان فرستاده می‌شود. "
              "اگر تا ۱۰ دقیقه نرسید، <b>عکس رسید</b> را همین‌جا بفرستید." if smspay.enabled()
              else "📸 بعد از واریز، <b>عکس رسید</b> را همین‌جا بفرستید.")
+    rial = q["final"] * 10
     await cb.message.answer(
-        f"💳 لطفاً <b>دقیقاً {toman(q['final'])}</b> را به کارت زیر واریز کنید:\n\n{html.escape(card_info())}\n\n"
-        f"⚠️ مبلغ را دقیق و با همین سه رقم آخر واریز کنید؛ سفارش شما با همین مبلغ شناسایی می‌شود.\n\n"
-        f"{after}\n(سفارش #{o.id} — تا ۴۸ ساعت معتبر)", reply_markup=h.CANCEL_KB)
+        f"💳 <b>پرداخت سفارش #{o.id}</b>\n\n"
+        f"💰 مبلغ: <b>{rial:,} ریال</b> ({toman(q['final'])})\n"
+        f"👇 برای کپی مبلغ بزنید:\n<code>{rial}</code>\n\n"
+        f"🏦 کارت مقصد:\n{card_html()}\n\n"
+        f"⚠️ مبلغ را <b>دقیقاً</b> همین عدد واریز کنید (حتی رقم‌های آخر)؛ سفارش شما با همین مبلغ شناسایی می‌شود.\n\n"
+        f"{after}\n⏳ تا ۴۸ ساعت معتبر است.", reply_markup=h.CANCEL_KB)
 
 
 @router.message(Buy.receipt, F.photo | F.document)
