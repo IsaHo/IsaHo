@@ -62,11 +62,34 @@ async def _pay_sms(request: web.Request) -> web.Response:
     return web.Response(text=result)
 
 
+async def _node_config(request: web.Request) -> web.Response:
+    import nodes
+    node = nodes.by_key(request.query.get("key", ""))
+    if not node:
+        raise web.HTTPNotFound()
+    return web.json_response(nodes.config_for(node))
+
+
+async def _node_stats(request: web.Request) -> web.Response:
+    import nodes
+    node = nodes.by_key(request.query.get("key", ""))
+    if not node:
+        raise web.HTTPNotFound()
+    try:
+        data = await request.json()
+    except ValueError:
+        raise web.HTTPBadRequest()
+    nodes.record_stats(node, data.get("stats") or {}, data.get("info") or {})
+    return web.json_response({"ok": True})
+
+
 async def start() -> web.AppRunner:
     app = web.Application(client_max_size=64 * 1024)
     app.router.add_get("/sub/{token}", _sub)
     app.router.add_post("/relay/report", _relay_report)
     app.router.add_post("/pay/sms", _pay_sms)
+    app.router.add_get("/node/config", _node_config)
+    app.router.add_post("/node/stats", _node_stats)
     runner = web.AppRunner(app, access_log=None)
     await runner.setup()
     ctx = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)

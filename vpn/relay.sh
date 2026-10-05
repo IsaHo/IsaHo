@@ -61,7 +61,11 @@ fi
 # foreign server, load-balanced by HAProxy with health checks, for networks where TLS to
 # foreign IPs is throttled but SSH passes. The subscription is served here too, over HTTP :2096.
 if [[ ${1:-} == ssh ]]; then
-    FOREIGN_IP=${2:?usage: bash relay.sh ssh <foreign-ip> [tunnels] [ssh-port]}
+    # several foreign servers: "main-ip,node-ip,...". The first one hosts the bot (subscription,
+    # agent reports); all of them carry user traffic.
+    FOREIGN_LIST=${2:?usage: bash relay.sh ssh <foreign-ip[,node-ip...]> [tunnels] [ssh-port]}
+    IFS=, read -ra FOREIGNS <<<"$FOREIGN_LIST"
+    FOREIGN_IP=${FOREIGNS[0]}
     TUNNELS=${3:-3}
     SSH_PORT=${4:-22}
     LISTEN_PORT=443
@@ -78,6 +82,11 @@ if [[ ${1:-} == ssh ]]; then
     rm -f /etc/systemd/system/isaho-ssh-tunnel.service
     nft delete table ip isaho_relay 2>/dev/null || true
     for i in $(seq 1 8); do systemctl disable --now "isaho-tunnel@$i" 2>/dev/null || true; done
+    for u in /etc/systemd/system/isaho-ntunnel-*.service; do
+        [[ -e $u ]] || continue
+        systemctl disable --now "$(basename "$u")" 2>/dev/null || true
+        rm -f "$u"
+    done
 
     KEY=/root/.ssh/isaho_tunnel
     mkdir -p /root/.ssh && chmod 700 /root/.ssh
@@ -127,6 +136,10 @@ backend tunnels
     balance leastconn
 CFG
         for i in $(seq 1 "$TUNNELS"); do echo "    server t$i 127.0.0.1:1000$i check inter 10s fall 2 rise 1$SEND_PROXY"; done
+        # extra foreign servers never get the PROXY header (only the main server reads it)
+        for j in $(seq 1 $(( ${#FOREIGNS[@]} - 1 ))); do
+            for i in $(seq 1 "$TUNNELS"); do echo "    server n${j}_$i 127.0.0.1:$((12000 + j * 10 + i)) check inter 10s fall 2 rise 1"; done
+        done
         cat <<CFG
 
 frontend sub
@@ -156,6 +169,31 @@ SYSCTL
 
     systemctl daemon-reload
     for i in $(seq 1 "$TUNNELS"); do systemctl enable -q "isaho-tunnel@$i"; systemctl restart "isaho-tunnel@$i"; done
+    for j in $(seq 1 $(( ${#FOREIGNS[@]} - 1 ))); do
+        for i in $(seq 1 "$TUNNELS"); do
+            unit=isaho-ntunnel-$j-$i.service
+            cat >/etc/systemd/system/$unit <<UNIT
+[Unit]
+Description=IsaHo SSH tunnel #$i to ${FOREIGNS[$j]}
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/bin/ssh -N -T -i $KEY -p $SSH_PORT \\
+  -o ServerAliveInterval=10 -o ServerAliveCountMax=3 -o TCPKeepAlive=yes \\
+  -o ExitOnForwardFailure=yes -o StrictHostKeyChecking=accept-new -o BatchMode=yes \\
+  -o Compression=no -o IPQoS=throughput -o ConnectTimeout=10 \\
+  -L 127.0.0.1:$((12000 + j * 10 + i)):127.0.0.1:443 isaho-tunnel@${FOREIGNS[$j]}
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+            systemctl daemon-reload
+            systemctl enable -q "$unit"; systemctl restart "$unit"
+        done
+    done
     systemctl enable -q haproxy
     systemctl restart haproxy
 
@@ -168,7 +206,7 @@ SYSCTL
     PUBLIC_IP=$IFACE_IP
     [[ $IFACE_IP =~ ^(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.) || -z $IFACE_IP ]] && PUBLIC_IP=$EGRESS_IP
     cat >/etc/isaho-relay.conf <<CONF
-FOREIGN_IP=$FOREIGN_IP
+FOREIGN_IP=$FOREIGN_LIST
 TUNNELS=$TUNNELS
 SSH_PORT=$SSH_PORT
 PUBLIC_IP=$PUBLIC_IP
@@ -203,6 +241,8 @@ report = {
     "version": conf.get("VERSION", "?"),
     "tunnels_total": int(conf.get("TUNNELS", 0)),
     "tunnels_up": int(sh("systemctl list-units 'isaho-tunnel@*' --state=active --no-legend --plain | wc -l") or 0),
+    "node_tunnels_up": int(sh("systemctl list-units 'isaho-ntunnel-*' --state=active --no-legend --plain | wc -l") or 0),
+    "node_tunnels_total": int(conf.get("TUNNELS", 0)) * (len(conf.get("FOREIGN_IP", "").split(",")) - 1),
     "haproxy": sh("systemctl is-active haproxy"),
     "load": os.getloadavg()[0],
     "mem": round(100 * (1 - mem.get("MemAvailable", 0) / max(mem.get("MemTotal", 1), 1))),
@@ -272,7 +312,7 @@ UNIT
     echo "
 ✅ $TUNNELS SSH tunnels + HAProxy installed. Users: :$LISTEN_PORT   Subscription: http://<this-ip>:$SUB_PORT
 
-Run THIS once on the FOREIGN server ($FOREIGN_IP) to authorize (copy the whole line):
+Run THIS once on EACH foreign server (${FOREIGN_LIST//,/ and }) to authorize (copy the whole line):
 
 id isaho-tunnel >/dev/null 2>&1 || useradd -r -m -s /usr/sbin/nologin isaho-tunnel; mkdir -p ~isaho-tunnel/.ssh && touch ~isaho-tunnel/.ssh/authorized_keys && sed -i '\\|$(cut -d' ' -f2 "$KEY.pub")|d' ~isaho-tunnel/.ssh/authorized_keys && echo 'restrict,port-forwarding,permitopen=\"127.0.0.1:443\",permitopen=\"127.0.0.1:2097\" $PUB' >> ~isaho-tunnel/.ssh/authorized_keys && chown -R isaho-tunnel: ~isaho-tunnel/.ssh && chmod 700 ~isaho-tunnel/.ssh && chmod 600 ~isaho-tunnel/.ssh/authorized_keys && echo AUTHORIZED
 
