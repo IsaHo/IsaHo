@@ -103,6 +103,17 @@ class Series:
     title: str
     url: str
     chapters: list = field(default_factory=list)
+    cover: str = ""       # og:image صفحهٔ داستان
+    summary: str = ""     # og:description (خلاصهٔ داستان)
+
+
+_FA_DIGITS = str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789")
+
+
+def to_int(s: str) -> int | None:
+    """عدد (فارسی/عربی/لاتین) را به int تبدیل می‌کند."""
+    m = re.search(r"\d+", (s or "").translate(_FA_DIGITS))
+    return int(m.group(0)) if m else None
 
 
 class Scraper:
@@ -187,24 +198,47 @@ class Scraper:
             out[clean] = Chapter(num=extract_num(rest), title=rest, url=clean)
         return sorted(out.values(), key=lambda c: (c.num, c.title))
 
+    @staticmethod
+    def _meta(soup: BeautifulSoup, *names) -> str:
+        for n in names:
+            tag = soup.find("meta", attrs={"property": n}) or soup.find("meta", attrs={"name": n})
+            if tag and tag.get("content"):
+                return tag["content"].strip()
+        return ""
+
     def get_series(self, any_url: str) -> Series:
+        """اطلاعات داستان (اسم، کاور، خلاصه) از صفحهٔ اصلیِ داستان، و لیست کامل قسمت‌ها.
+        صفحهٔ اصلی فقط چند قسمت (اولی + آخرین‌ها) را دارد؛ صفحهٔ یک قسمت، لیست کامل را."""
         s_url = self.series_url(any_url)
         fallback = s_url.rstrip("/").split("/")[-1]
-        soup = BeautifulSoup(self.get(any_url).text, "html.parser")
-        title = self._title(soup, fallback)
-        chapters = self._chapter_links(soup, s_url)
-        # صفحهٔ اصلیِ سری فقط چند قسمت (اولی + آخرین‌ها) را لیست می‌کند؛
-        # صفحهٔ یک قسمت، لیست کاملِ همهٔ قسمت‌ها را دارد.
         is_chapter_page = len([p for p in urlparse(any_url).path.split("/") if p]) >= 3
-        if chapters and not is_chapter_page:
+
+        root = None
+        try:
+            root = BeautifulSoup(self.get(s_url).text, "html.parser")
+        except Exception:
+            if not is_chapter_page:
+                raise
+        chapters = self._chapter_links(root, s_url) if root is not None else []
+
+        full_src = any_url if is_chapter_page else (chapters[0].url if chapters else None)
+        if full_src:
             try:
-                soup2 = BeautifulSoup(self.get(chapters[0].url).text, "html.parser")
-                more = self._chapter_links(soup2, s_url)
+                more = self._chapter_links(BeautifulSoup(self.get(full_src).text, "html.parser"), s_url)
                 if len(more) > len(chapters):
                     chapters = more
             except Exception:
-                pass
-        return Series(title=title, url=s_url, chapters=chapters)
+                if root is None:
+                    raise
+
+        title, cover, summary = fallback, "", ""
+        if root is not None:
+            title = self._title(root, fallback)
+            img = self._meta(root, "og:image", "twitter:image")
+            cover = urljoin(s_url, img) if img else ""
+            summary = self._meta(root, "og:description", "description", "twitter:description")
+            summary = re.sub(r"\s*[|\-–—]\s*سرراست\s*$", "", summary).strip()
+        return Series(title=title, url=s_url, chapters=chapters, cover=cover, summary=summary)
 
     def get_chapters(self, any_url: str) -> list[Chapter]:
         return self.get_series(any_url).chapters
@@ -213,8 +247,14 @@ class Scraper:
 
     def get_catalog(self, max_pages: int = 60) -> list[dict]:
         """فهرست همهٔ داستان‌های سایت را با پیمایش صفحه‌های اصلی جمع می‌کند.
-        هر آیتم: {'slug','title','url'}."""
+        هر آیتم: {slug, title, url, cover, latest, fresh, rank}
+          latest = شمارهٔ آخرین قسمتِ نوشته‌شده روی کارت (اگر بود)
+          fresh  = برچسب «تازه» داشت (تازه آپدیت شده)
+          rank   = ترتیب در سایت (صفحهٔ اول = تازه‌ترین آپدیت‌ها)"""
         cand: dict[str, list] = {}
+        cover: dict[str, str] = {}
+        latest: dict[str, int] = {}
+        fresh: set = set()
         empty_streak = 0
         for pg in range(1, max_pages + 1):
             url = f"{SITE}/" if pg == 1 else f"{SITE}/?page={pg}"
@@ -227,25 +267,39 @@ class Scraper:
             for a in soup.find_all("a"):
                 href = self._unwrap((a.get("href") or "").strip())
                 parts = urlparse(urljoin(url, href)).path.strip("/").split("/")
-                if len(parts) == 2 and parts[0] == "series":
-                    texts = cand.setdefault(parts[1], [])
-                    t = " ".join(a.get_text(strip=True).split())
-                    if t:
-                        texts.append(t)
-                    img = a.find("img")
-                    if img:
-                        for att in ("alt", "title"):
-                            v = " ".join((img.get(att) or "").split())
-                            if v:
-                                texts.append(v)
+                if not (len(parts) == 2 and parts[0] == "series"):
+                    continue
+                slug = parts[1]
+                texts = cand.setdefault(slug, [])
+                t = " ".join(a.get_text(strip=True).split())
+                if t:
+                    texts.append(t)
+                    if t == "تازه":
+                        fresh.add(slug)
+                    m = re.match(r"قسمت\s*([\d۰-۹٠-٩]+)", t)
+                    if m:
+                        n = to_int(m.group(1))
+                        if n is not None:
+                            latest[slug] = max(latest.get(slug, 0), n)
+                img = a.find("img")
+                if img:
+                    for att in ("alt", "title"):
+                        v = " ".join((img.get(att) or "").split())
+                        if v:
+                            texts.append(v)
+                    if slug not in cover:
+                        src = self._best_src(img, url)
+                        if src and src.startswith("http"):
+                            cover[slug] = src
             if len(cand) == before:
                 empty_streak += 1
                 if empty_streak >= 2:
                     break
             else:
                 empty_streak = 0
-        return [{"slug": s, "title": _best_title(ts) or s, "url": f"{SITE}/series/{s}"}
-                for s, ts in sorted(cand.items(), key=lambda kv: _best_title(kv[1]) or kv[0])]
+        return [{"slug": s, "title": _best_title(ts) or s, "url": f"{SITE}/series/{s}",
+                 "cover": cover.get(s, ""), "latest": latest.get(s), "fresh": s in fresh, "rank": i}
+                for i, (s, ts) in enumerate(cand.items())]
 
     # ---------- images ----------
 
@@ -263,7 +317,8 @@ class Scraper:
         return None
 
     def get_images(self, chapter_url: str) -> list[str]:
-        soup = BeautifulSoup(self.get(chapter_url).text, "html.parser")
+        html = self.get(chapter_url).text
+        soup = BeautifulSoup(html, "html.parser")
         slug = urlparse(chapter_url).path.rstrip("/").split("/")[-1]
 
         raw: list[str] = []

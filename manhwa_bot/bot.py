@@ -17,7 +17,6 @@ bot.py — لانچرِ مشترک: «سرراست» و «سولاخی» داخ�
 
 from __future__ import annotations
 
-import asyncio
 import importlib.util
 import json
 import logging
@@ -30,6 +29,7 @@ from telegram.ext import (
     CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
+    InlineQueryHandler,
     MessageHandler,
     filters,
 )
@@ -65,16 +65,15 @@ soolakhi.MENU = ReplyKeyboardMarkup(
     [list(r) for r in soolakhi.MENU.keyboard] + [[BTN_HOME]], resize_keyboard=True)
 
 # دکمه‌هایی که فقط مال یک بخش‌اند (برای وقتی که بعد از ری‌استارت حالت معلوم نیست)
-_SARRAST_BTNS = {sarrast.BTN_SEARCH, sarrast.BTN_ALLSTORIES, sarrast.BTN_ALLLINKS, sarrast.BTN_UPDATES,
-                 sarrast.BTN_FOLLOWS, sarrast.BTN_FOLLOW_EDIT, sarrast.BTN_IDS}
+_SARRAST_BTNS = set(sarrast.MENU_BUTTONS)
 _SOOLAKHI_BTNS = {soolakhi.BTN_SITES, soolakhi.BTN_NEW, soolakhi.BTN_FAVS, soolakhi.BTN_STOP,
                   soolakhi.BTN_SEARCH, soolakhi.BTN_PANEL}
 _SHARED = _SARRAST_BTNS & _SOOLAKHI_BTNS
 _SARRAST_BTNS -= _SHARED
 _SOOLAKHI_BTNS -= _SHARED
 
-# callbackهای سرراست؛ بقیه مال سولاخی است
-_SARRAST_CB_PREFIXES = ("go:", "uf:", "delid:")
+# callbackهای سرراست؛ بقیه مال سولاخی است («s.» = همهٔ callbackهای جدید سرراست)
+_SARRAST_CB_PREFIXES = ("s.", "go:", "uf:", "delid:")
 _SARRAST_CB_EXACT = {"addid"}
 
 # ---------- حالت فعلی هر کاربر (در فایل، تا بعد از ری‌استارت هم بماند) ----------
@@ -112,8 +111,10 @@ def set_mode(uid, mode: str | None) -> None:
 async def show_root(update: Update, text: str = None):
     await update.effective_message.reply_text(
         text or "سلام! 👋 کدوم بخش؟\n\n"
-                "📚 سرراست — مانهوا: جستجو، لینک مستقیم قسمت‌ها، دنبال‌کردن و اعلان قسمت جدید\n"
-                "🎬 سولاخی — اسکن سایت‌های ویدیو، ذخیره‌ها، دانلود، اعلان ویدیوی جدید",
+                "📚 سرراست\n"
+                "مانهوا: کارت داستان، ادامهٔ خواندن، دسته‌بندی، لینک مستقیم قسمت‌ها، اعلان قسمت جدید\n\n"
+                "🎬 سولاخی\n"
+                "ویدیو: اسکن سایت‌ها، جستجو، ذخیره‌ها، دانلود، اعلان ویدیوی جدید",
         reply_markup=ROOT_KB)
 
 
@@ -172,8 +173,16 @@ async def route_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def post_init(app: Application):
-    app.create_task(sarrast.updater_loop(app))
+    sarrast.start_background(app)          # بروزرسانی‌ها + جمع‌کردن اطلاعات داستان‌ها
     app.create_task(soolakhi.watch_loop(app))
+    for fn, txt in ((app.bot.set_my_short_description, "📚 سرراست + 🎬 سولاخی — مانهوا و ویدیو در یک ربات"),
+                    (app.bot.set_my_description,
+                     "📚 سرراست: جستجو، کارت داستان، ادامهٔ خواندن، دسته‌بندی و اعلان قسمت جدید\n"
+                     "🎬 سولاخی: اسکن سایت‌های ویدیو، ذخیره‌ها و اعلان ویدیوی جدید")):
+        try:
+            await fn(txt)
+        except Exception as e:
+            log.info("description: %s", e)
     await app.bot.set_my_commands([
         BotCommand("start", "منوی اصلی (سرراست / سولاخی)"),
         BotCommand("update", "سرراست: چک بروزرسانی‌ها"),
@@ -202,6 +211,7 @@ def main():
     app.add_handler(MessageHandler(filters.Document.ALL, soolakhi.on_document))
     # مسیردهی مشترک
     app.add_handler(CallbackQueryHandler(route_callback))
+    app.add_handler(InlineQueryHandler(sarrast.on_inline))   # @ربات اسم‌داستان در هر چت
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, route_text))
 
     log.info("ربات مشترک (سرراست + سولاخی) روشن شد.")
