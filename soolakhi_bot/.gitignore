@@ -3,3 +3,4 @@ sites.json
 blocked.json
 settings.json
 __pycache__/
+seen.json

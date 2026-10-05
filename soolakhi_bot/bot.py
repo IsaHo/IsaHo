@@ -100,8 +100,17 @@ _settings = load_json(SETTINGS_FILE, {})
 BATCH = int(_settings.get("batch", BATCH))
 
 
+WATCH = {"on": bool(_settings.get("watch_on", False)), "hours": int(_settings.get("watch_hours", 6)),
+         "chat": _settings.get("watch_chat"), "last": _settings.get("watch_last", 0)}
+SEEN_FILE = os.path.join(BASE_DIR, "seen.json")
+SEEN: dict[str, list] = load_json(SEEN_FILE, {})  # site_id -> idهای ویدیوهای دیده‌شده
+WATCH_PAGES = int(os.environ.get("WATCH_PAGES", "40"))  # صفحات بررسی‌شده هر سایت در هر دور
+WATCH_MAX_SEND = 15  # حداکثر ویدیوی جدید ارسالی برای هر سایت در هر دور
+
+
 def save_settings():
-    save_json(SETTINGS_FILE, {"batch": BATCH, "concurrency": CONCURRENCY})
+    save_json(SETTINGS_FILE, {"batch": BATCH, "concurrency": CONCURRENCY, "watch_on": WATCH["on"],
+                              "watch_hours": WATCH["hours"], "watch_chat": WATCH["chat"], "watch_last": WATCH["last"]})
 
 
 def save_favs():
@@ -314,8 +323,9 @@ SKIP_URL = re.compile(r"(/wp-(admin|login|json)|/feed/?$|/xmlrpc|/cart|/checkout
 class Crawler:
     """اسکن مرحله‌ای و همزمان: هر بار تا پیدا شدن BATCH ویدیو جلو می‌رود.
     صفحات احتمالاً ویدیویی (کارت‌های دارای عکس) جلوتر از صفحات دسته/تگ بررسی می‌شوند."""
-    def __init__(self, start_url: str):
+    def __init__(self, start_url: str, max_pages: int | None = None, batch: int | None = None):
         self.domain = urlparse(start_url).netloc.removeprefix("www.")
+        self.max_pages, self.batch = max_pages, batch
         self.seen, self.pages = set(), 0
         self.hi, self.mid, self.lo = deque([start_url]), deque(), deque()
         self.sent: set[str] = set()
@@ -352,7 +362,8 @@ class Crawler:
         self.seen.update(self.hi)
         limits = httpx.Limits(max_connections=CONCURRENCY, max_keepalive_connections=CONCURRENCY)
         async with httpx.AsyncClient(headers=HEADERS, follow_redirects=True, timeout=20, limits=limits) as c:
-            while (self.hi or self.mid or self.lo) and self.pages < MAX_PAGES and len(found) < BATCH:
+            while (self.hi or self.mid or self.lo) and self.pages < (self.max_pages or MAX_PAGES) \
+                    and len(found) < (self.batch or BATCH):
                 batch = []
                 while len(batch) < CONCURRENCY and (self.hi or self.mid or self.lo):
                     batch.append(self._pop())
@@ -638,7 +649,16 @@ def panel_text():
             f"🧠 ویدیوهای داخل حافظه: {len(VIDEOS)}\n🔄 اسکن فعال: {len(CRAWLERS)}\n"
             f"💾 فضای خالی دیسک: {disk.free // 2**30} GB\n⏱ مدت روشن بودن: {fmt_uptime()}\n"
             f"📤 حداکثر حجم ارسال: {'2 GB' if LOCAL_API else '50 MB'}\n\n"
-            f"📦 ویدیو در هر صفحه: {BATCH}\n⚡ صفحات همزمان: {CONCURRENCY}")
+            f"📦 ویدیو در هر صفحه: {BATCH}\n⚡ صفحات همزمان: {CONCURRENCY}\n\n"
+            f"🔔 خبر ویدیوی جدید: {'روشن ✅' if WATCH['on'] else 'خاموش ❌'} (هر {WATCH['hours']} ساعت)\n"
+            f"🕒 آخرین بررسی: {fmt_ago(WATCH['last'])}")
+
+
+def fmt_ago(ts):
+    if not ts:
+        return "هنوز انجام نشده"
+    m = int((__import__("time").time() - ts) // 60)
+    return f"{m} دقیقه پیش" if m < 60 else f"{m // 60} ساعت پیش"
 
 
 def panel_kb():
@@ -648,6 +668,11 @@ def panel_kb():
         [InlineKeyboardButton(mark(BATCH, n), callback_data=f"setbatch:{n}") for n in (5, 10, 20)],
         [InlineKeyboardButton("⚡ همزمانی:", callback_data="noop:x")] +
         [InlineKeyboardButton(mark(CONCURRENCY, n), callback_data=f"setconc:{n}") for n in (4, 8, 16)],
+        [InlineKeyboardButton("🔔 خاموش کردن خبر" if WATCH["on"] else "🔔 روشن کردن خبر ویدیوی جدید",
+                              callback_data="watch:toggle")],
+        [InlineKeyboardButton("⏰ هر:", callback_data="noop:x")] +
+        [InlineKeyboardButton(mark(WATCH["hours"], h) + "h", callback_data=f"watchh:{h}") for h in (1, 3, 6, 12, 24)],
+        [InlineKeyboardButton("🔍 بررسی همین الان", callback_data="watch:now")],
         [InlineKeyboardButton("📤 پشتیبان (سایت‌ها و ذخیره‌ها)", callback_data="backup:x")],
         [InlineKeyboardButton("⬆️ آپدیت yt-dlp", callback_data="upytdlp:x"),
          InlineKeyboardButton("🧹 خالی کردن حافظه", callback_data="clearmem:x")],
@@ -919,6 +944,26 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await q.answer()
         await q.edit_message_reply_markup(None)
         return await show_favs(chat_id, ctx, int(i))
+    if action == "watch" and i == "now":
+        await q.answer("🔍 بررسی شروع شد")
+        await q.message.reply_text(f"🔍 در حال بررسی {len(SITES)} سایت برای ویدیوی جدید... (ممکنه چند دقیقه طول بکشه)")
+        return await check_new_videos(ctx.application, chat_id, manual=True)
+    if action in ("watch", "watchh"):
+        if action == "watch":
+            WATCH["on"] = not WATCH["on"]
+        else:
+            WATCH["hours"] = int(i)
+        WATCH["chat"] = chat_id
+        save_settings()
+        await q.answer("✅ ذخیره شد")
+        if action == "watch" and WATCH["on"] and not SEEN:
+            await q.message.reply_text("🔔 روشن شد. بار اول فقط ویدیوهای فعلی سایت‌ها ثبت میشن؛ "
+                                       "از بررسی بعدی، فقط ویدیوهای جدید برات میاد.\n"
+                                       "برای ثبت همین الان، «🔍 بررسی همین الان» رو بزن.")
+        try:
+            return await q.edit_message_text(panel_text(), reply_markup=panel_kb())
+        except Exception:
+            return
     if action in ("panel", "setbatch", "setconc", "clearmem"):
         if action == "setbatch":
             BATCH = int(i)
@@ -1079,7 +1124,66 @@ async def on_document(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ {len(store) - before} مورد جدید از {doc.file_name} اضافه شد.")
 
 
+async def check_new_videos(app, chat_id, manual=False):
+    """همه سایت‌های ذخیره‌شده را چک می‌کند و فقط ویدیوهای جدید را می‌فرستد.
+    بار اول هر سایت فقط وضعیت فعلی ثبت می‌شود (چیزی ارسال نمی‌شود) تا سیل پیام نیاید."""
+    if WATCH.get("running"):
+        if manual:
+            await app.bot.send_message(chat_id, "⏳ یک بررسی در حال انجامه، صبر کن.")
+        return
+    WATCH["running"] = True
+    total_new, baselined = 0, []
+    try:
+        for sid, site in list(SITES.items()):
+            cr = Crawler(site["url"], max_pages=WATCH_PAGES, batch=10_000)
+            try:
+                found = await cr.next_batch()
+            except Exception as e:
+                log.warning("watch fail %s: %s", site["url"], e)
+                continue
+            known = set(SEEN.get(sid, []))
+            first_time = sid not in SEEN
+            new = [i for i in found if i not in known]
+            SEEN[sid] = (SEEN.get(sid, []) + new)[-3000:]
+            if first_time:
+                baselined.append(site["name"])
+                continue
+            if not new:
+                continue
+            total_new += len(new)
+            await app.bot.send_message(chat_id, f"🔔 {len(new)} ویدیوی جدید از {site['name']}"
+                                       + (f" (نمایش {WATCH_MAX_SEND} تای اول)" if len(new) > WATCH_MAX_SEND else ""))
+            for i in new[:WATCH_MAX_SEND]:
+                await send_card(chat_id, i, VIDEOS[i], app)
+                await asyncio.sleep(0.4)
+        save_json(SEEN_FILE, SEEN)
+        WATCH["last"] = __import__("time").time()
+        save_settings()
+        if manual or baselined:
+            msg = f"✅ بررسی تمام شد. {total_new} ویدیوی جدید." if total_new or manual else ""
+            if baselined:
+                msg += (f"\n📌 {len(baselined)} سایت برای اولین بار ثبت شد"
+                        " (از دور بعد ویدیوهای جدیدشون میاد).")
+            if msg.strip():
+                await app.bot.send_message(chat_id, msg.strip())
+    finally:
+        WATCH["running"] = False
+
+
+async def watch_loop(app):
+    """هر دقیقه چک می‌کند آیا وقت بررسی رسیده یا نه (با ری‌استارت هم زمان‌بندی حفظ می‌شود)."""
+    import time
+    while True:
+        await asyncio.sleep(60)
+        try:
+            if WATCH["on"] and WATCH["chat"] and SITES and time.time() - WATCH["last"] >= WATCH["hours"] * 3600:
+                await check_new_videos(app, WATCH["chat"])
+        except Exception:
+            log.exception("watch loop error")
+
+
 async def post_init(app):
+    asyncio.get_running_loop().create_task(watch_loop(app))
     from telegram import BotCommand
     await app.bot.set_my_commands([BotCommand("start", "منوی اصلی"), BotCommand("panel", "پنل کنترل"),
                                    BotCommand("debug", "بررسی یک صفحه")])
