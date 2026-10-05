@@ -31,6 +31,7 @@ class Buy(StatesGroup):
 
 class ShopAdmin(StatesGroup):
     plan = State()
+    price = State()
     card = State()
     discount = State()
     test = State()
@@ -556,11 +557,60 @@ async def set_ref(msg: Message, state: FSMContext):
 
 # ---------- plans ----------
 
+# starting points; prices are meant to be adjusted with ✏️
+PRESETS = [
+    ("🌱 اقتصادی ۲۰ گیگ", 20, 30, 90_000),
+    ("⭐ استاندارد ۵۰ گیگ", 50, 30, 180_000),
+    ("🔥 حرفه‌ای ۱۰۰ گیگ", 100, 30, 300_000),
+    ("💎 ویژه ۲۰۰ گیگ", 200, 30, 500_000),
+    ("📅 سه‌ماهه ۱۵۰ گیگ", 150, 90, 420_000),
+    ("👨‍👩‍👧 خانوادگی ۳۰۰ گیگ", 300, 60, 750_000),
+]
+
+
 def plans_admin():
     rows = [[(f"{'🟢' if p.active else '⚪️'} {p.title} — {toman(p.price)}", f"sp:t:{p.id}"),
-             ("🗑", f"sp:d:{p.id}")] for p in shopdb.plans(False)]
-    rows.append([("➕ پلن جدید", "sp:add")])
-    return ("📋 <b>پلن‌ها</b>\nروی هر پلن بزنید تا فعال/غیرفعال شود.", h.ikb(rows))
+             ("✏️", f"sp:e:{p.id}"), ("🗑", f"sp:d:{p.id}")] for p in shopdb.plans(False)]
+    rows.append([("➕ پلن جدید", "sp:add"), ("✨ پلن‌های پیشنهادی", "sp:presets")])
+    return ("📋 <b>پلن‌ها</b>\nروی هر پلن بزنید تا فعال/غیرفعال شود؛ ✏️ تغییر قیمت، 🗑 حذف.", h.ikb(rows))
+
+
+@router.callback_query(F.data == "sp:presets", h.admin)
+async def plan_presets(cb: CallbackQuery):
+    existing = {p.title for p in shopdb.plans(False)}
+    added = 0
+    for title, gb, days, price in PRESETS:
+        if title not in existing:
+            shopdb.add_plan(title, gb, days, price)
+            added += 1
+    await cb.answer(f"✅ {added} پلن اضافه شد؛ قیمت‌ها را با ✏️ تنظیم کنید", show_alert=True)
+    text, kb = plans_admin()
+    await cb.message.edit_text(text, reply_markup=kb)
+
+
+@router.callback_query(F.data.startswith("sp:e:"), h.admin)
+async def plan_price_ask(cb: CallbackQuery, state: FSMContext):
+    await cb.answer()
+    p = shopdb.plan(int(cb.data[5:]))
+    if not p:
+        return
+    await state.set_state(ShopAdmin.price)
+    await state.update_data(plan_id=p.id)
+    await cb.message.answer(f"✏️ قیمت جدید «{html.escape(p.title)}» (فعلی: {toman(p.price)}) را به تومان بفرستید:",
+                            reply_markup=h.CANCEL_KB)
+
+
+@router.message(ShopAdmin.price, h.admin)
+async def plan_price_set(msg: Message, state: FSMContext):
+    v = h.parse_number((msg.text or "").replace(",", "").replace("٬", ""))
+    if v is None:
+        await msg.answer("❌ یک عدد بفرستید، مثلاً <code>150000</code>")
+        return
+    shopdb.set_price((await state.get_data())["plan_id"], int(v))
+    await state.clear()
+    await msg.answer("✅ قیمت ذخیره شد.", reply_markup=h.ADMIN_KB)
+    text, kb = plans_admin()
+    await msg.answer(text, reply_markup=kb)
 
 
 @router.callback_query(F.data == "sa:plans", h.admin)
@@ -570,7 +620,7 @@ async def plans_menu(cb: CallbackQuery):
     await cb.message.answer(text, reply_markup=kb)
 
 
-@router.callback_query(F.data.startswith(("sp:t:", "sp:d:")), h.admin)
+@router.callback_query(F.data.regexp(r"^sp:[td]:\d+$"), h.admin)
 async def plan_edit(cb: CallbackQuery):
     _, op, pid = cb.data.split(":")
     (shopdb.toggle_plan if op == "t" else shopdb.delete_plan)(int(pid))
