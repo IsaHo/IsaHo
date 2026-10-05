@@ -61,6 +61,7 @@ class Edit(StatesGroup):
     search = State()
     cdn_ip = State()
     backup_chat = State()
+    status_chat = State()
     relays = State()
     broadcast = State()
     add_admin = State()
@@ -656,7 +657,7 @@ async def settings_menu(msg: Message):
     await msg.answer(text, reply_markup=ikb([
         [("🔗 لینک‌های سابسکریپشن", "lt:menu"), ("👮 مدیران", "adm:menu")],
         [("🛰 سرورهای ایران", "rl:menu"), ("📦 کانال بکاپ", "set:bchat")],
-        [("📱 محدودیت دستگاه", "dev:menu")],
+        [("📱 محدودیت دستگاه", "dev:menu"), ("📣 کانال وضعیت", "set:schat")],
         [("🇮🇷 سرور واسط", "set:relays"), ("🌐 تنظیم IP تمیز کلادفلر", "set:cdn")],
         [("🧪 دستور تست سرور واسط", "set:relaytest")],
         [("🔌 پورت CDN: 443", "set:port:443"), (f"🔌 پورت CDN: {cfg.cdn_port}", f"set:port:{cfg.cdn_port}")],
@@ -756,6 +757,41 @@ async def admins_del(cb: CallbackQuery):
     await cb.answer(f"🗑 {target} حذف شد")
     text, kb = admins_view()
     await cb.message.edit_text(text, reply_markup=kb)
+
+
+@router.callback_query(F.data == "set:schat", admin)
+async def status_chat_ask(cb: CallbackQuery, state: FSMContext):
+    await cb.answer()
+    await state.set_state(Edit.status_chat)
+    current = db.get_setting("status_chat") or "ندارد"
+    await cb.message.answer(
+        f"📣 کانال وضعیت فعلی: <code>{current}</code>\n\n"
+        "وقتی یک سرور قطع یا وصل می‌شود، پیام کوتاهی برای مشتری‌ها در این کانال (عمومی) گذاشته می‌شود.\n"
+        "ربات را ادمین کانال کنید و یک پیام از کانال را فوروارد کنید یا آیدی آن را بفرستید.\n"
+        "برای حذف: <code>reset</code>", reply_markup=CANCEL_KB)
+
+
+@router.message(Edit.status_chat, admin)
+async def status_chat_set(msg: Message, state: FSMContext, bot: Bot):
+    chat = getattr(getattr(msg, "forward_origin", None), "chat", None)
+    text = (msg.text or "").strip()
+    if text.lower() == "reset":
+        db.set_setting("status_chat", "")
+        await state.clear()
+        await msg.answer("✅ حذف شد.", reply_markup=ADMIN_KB)
+        return
+    chat_id = chat.id if chat else (int(text) if re.fullmatch(r"-?\d+", text) else None)
+    if chat_id is None:
+        await msg.answer("❌ یک پیام از کانال فوروارد کنید یا آیدی عددی آن را بفرستید.")
+        return
+    try:
+        await bot.send_message(chat_id, "📣 اطلاع‌رسانی وضعیت سرویس در این کانال انجام می‌شود.")
+    except Exception as e:
+        await msg.answer(f"❌ ربات نمی‌تواند در این کانال پیام بفرستد: <code>{html.escape(str(e))[:200]}</code>")
+        return
+    db.set_setting("status_chat", str(chat_id))
+    await state.clear()
+    await msg.answer("✅ کانال وضعیت تنظیم شد.", reply_markup=ADMIN_KB)
 
 
 @router.callback_query(F.data == "set:bchat", owner)

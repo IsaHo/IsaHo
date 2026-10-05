@@ -4,6 +4,7 @@ main router so /start and the customer keyboard land here."""
 import asyncio
 import html
 import logging
+import random
 import re
 import time
 
@@ -35,6 +36,8 @@ class Buy(StatesGroup):
 class ShopAdmin(StatesGroup):
     plan = State()
     price = State()
+    addon = State()
+    renew = State()
     card = State()
     discount = State()
     test = State()
@@ -71,6 +74,12 @@ def shop_open() -> bool:
 
 
 def plan_line(p) -> str:
+    if p and p.kind == "addon":
+        return f"➕ حجم اضافه {p.gb:g} گیگ"
+    return _plan_line(p)
+
+
+def _plan_line(p) -> str:
     gb = f"{p.gb:g} گیگ" if p.gb else "حجم نامحدود"
     days = f"{p.days} روز" if p.days else "بدون محدودیت زمان"
     return f"{p.title} — {gb}، {days}"
@@ -140,8 +149,11 @@ async def my_accounts(msg: Message):
 async def send_account(msg: Message, u) -> None:
     chart = fmt.day_chart(db.user_daily(u.name, 7))
     usage = ("\n\n📊 <b>مصرف ۷ روز اخیر</b>\n" + "\n".join(chart)) if chart else ""
+    buttons = [("🔄 تمدید همین اکانت", f"rn:{u.id}")]
+    if shopdb.addons() and card_info():
+        buttons.append(("➕ حجم اضافه", f"ad:{u.id}"))
     await msg.answer(fmt.user_card(u) + usage + "\n\n" + h.links_text(u).rsplit("\n🤖", 1)[0],
-                     reply_markup=h.ikb([[("🔄 تمدید همین اکانت", f"rn:{u.id}")]]))
+                     reply_markup=h.ikb([buttons]))
 
 
 @router.callback_query(F.data.startswith("acc:"))
@@ -181,13 +193,16 @@ async def renew(msg: Message, state: FSMContext):
         await msg.answer("اکانتی برای تمدید ندارید. از «🛒 خرید اشتراک» شروع کنید.")
         return
     if len(accounts) == 1:
-        await renew_pick(msg, accounts[0])
+        await renew_pick(msg, accounts[0], state)
         return
     rows = [[(f"{fmt.status_icon(u)} {u.name}", f"rn:{u.id}")] for u in accounts[:50]]
     await msg.answer("کدام اکانت تمدید شود؟", reply_markup=h.ikb(rows))
 
 
-async def renew_pick(msg: Message, u) -> None:
+async def renew_pick(msg: Message, u, state: FSMContext, code: str = "") -> None:
+    await state.update_data(auto_code=code)
+    if code:
+        await msg.answer(f"🎟 کد تخفیف <code>{code}</code> خودکار روی فاکتور اعمال می‌شود.")
     if not shop_open():
         await msg.answer("فروش فعلاً بسته است. از «💬 پشتیبانی» پیام بدهید.")
         return
@@ -197,11 +212,33 @@ async def renew_pick(msg: Message, u) -> None:
 
 
 @router.callback_query(F.data.startswith("rn:"))
-async def renew_cb(cb: CallbackQuery):
+async def renew_cb(cb: CallbackQuery, state: FSMContext):
     await cb.answer()
     u = db.get(int(cb.data[3:]))
     if u and owns(cb.from_user.id, u):
-        await renew_pick(cb.message, u)
+        await renew_pick(cb.message, u, state)
+
+
+@router.callback_query(F.data.startswith("rnc:"))
+async def renew_code_cb(cb: CallbackQuery, state: FSMContext):
+    await cb.answer()
+    _, uid, code = cb.data.split(":")
+    u = db.get(int(uid))
+    if u and owns(cb.from_user.id, u):
+        await renew_pick(cb.message, u, state, code if shopdb.discount(code) else "")
+
+
+@router.callback_query(F.data.startswith("ad:"))
+async def addon_pick(cb: CallbackQuery, state: FSMContext):
+    await cb.answer()
+    u = db.get(int(cb.data[3:]))
+    if not u or not owns(cb.from_user.id, u):
+        return
+    await state.update_data(auto_code="")
+    c = shopdb.customer(cb.from_user.id)
+    rows = [[(f"{p.gb:g} گیگ — {toman(reseller_price(c, p.price))}", f"p:{p.id}:a{u.id}")] for p in shopdb.addons()]
+    await cb.message.answer(f"➕ حجم اضافه برای <b>{html.escape(u.name)}</b>\n"
+                            "به حجم فعلی اضافه می‌شود و تاریخ انقضا تغییر نمی‌کند:", reply_markup=h.ikb(rows))
 
 
 @router.callback_query(F.data.startswith("p:"))
@@ -212,13 +249,15 @@ async def plan_chosen(cb: CallbackQuery, state: FSMContext):
     if not p or not p.active:
         await cb.message.answer("این پلن دیگر موجود نیست.")
         return
-    user_id = None
-    if target.startswith("r"):
+    user_id, kind = None, "new"
+    if target[0] in "ra":
         u = db.get(int(target[1:]))
         if not u or not owns(cb.from_user.id, u):
             return
-        user_id = u.id
-    await state.set_data({"plan_id": p.id, "user_id": user_id, "code": "", "name": ""})
+        user_id, kind = u.id, ("renew" if target[0] == "r" else "addon")
+    code = (await state.get_data()).get("auto_code", "")
+    await state.set_data({"plan_id": p.id, "user_id": user_id, "kind": kind,
+                          "code": code if code and shopdb.discount(code) else "", "name": ""})
     c = shopdb.customer(cb.from_user.id)
     if user_id is None and c.reseller_percent:
         await state.set_state(Buy.name)
@@ -255,7 +294,8 @@ async def checkout(msg: Message, state: FSMContext, tg_id: int) -> None:
     if data.get("name"):
         lines.insert(3, f"نام اکانت: <code>{html.escape(data['name'])}</code>")
     if data.get("user_id"):
-        lines.insert(3, f"تمدید: <code>{html.escape(db.get(data['user_id']).name)}</code>")
+        label = "حجم اضافه برای" if data.get("kind") == "addon" else "تمدید"
+        lines.insert(3, f"{label}: <code>{html.escape(db.get(data['user_id']).name)}</code>")
     if q["discount"]:
         lines.append(f"🎟 کد {q['discount']['code']}: {q['discount']['percent']}٪ تخفیف")
     if q["wallet"]:
@@ -309,7 +349,8 @@ async def pay(cb: CallbackQuery, state: FSMContext, bot: Bot):
     if q["wallet"]:
         shopdb.add_balance(cb.from_user.id, -q["wallet"])
     o = shopdb.create_order(
-        tg_id=cb.from_user.id, plan_id=q["plan"].id, kind="renew" if data.get("user_id") else "new",
+        tg_id=cb.from_user.id, plan_id=q["plan"].id,
+        kind=data.get("kind") or ("renew" if data.get("user_id") else "new"),
         user_id=data.get("user_id"), account_name=data.get("name", ""), price=q["price"],
         discount_code=q["discount"]["code"] if q["discount"] else "", wallet_used=q["wallet"],
         final_price=q["final"], status="pending" if q["final"] == 0 else "waiting")
@@ -349,7 +390,7 @@ async def got_receipt(msg: Message, state: FSMContext, bot: Bot):
     await msg.answer("✅ رسید دریافت شد. بعد از تأیید، اشتراک برایتان فرستاده می‌شود.", reply_markup=h.USER_KB)
     p = shopdb.plan(o.plan_id)
     who = html.escape(msg.from_user.full_name or "")
-    target = f"تمدید {html.escape(db.get(o.user_id).name)}" if o.user_id else (
+    target = f"{'حجم اضافه' if o.kind == 'addon' else 'تمدید'} {html.escape(db.get(o.user_id).name)}" if o.user_id else (
         f"اکانت جدید {html.escape(o.account_name)}" if o.account_name else "اکانت جدید")
     caption = (f"🧾 <b>سفارش #{o.id}</b>\nاز: {who} (<code>{msg.from_user.id}</code>)\n"
                f"{html.escape(plan_line(p))}\n{target}\n💰 {toman(o.final_price)}"
@@ -393,6 +434,12 @@ async def fulfill(bot: Bot, o) -> None:
         u = db.get(u.id)
         await h.apply_user(u)
         head = "🎉 خرید شما تأیید شد!"
+    elif o.kind == "addon":
+        u = db.get(o.user_id)
+        if u.traffic_limit:
+            db.update(u.id, traffic_limit=u.traffic_limit + int(p.gb * db.GB), warned=0)
+        u = await h.maybe_reactivate(db.get(u.id))
+        head = f"✅ {p.gb:g} گیگ به اکانت شما اضافه شد!"
     else:
         u = db.get(o.user_id)
         if u.pending_days:
@@ -523,7 +570,8 @@ def shop_admin_text() -> str:
         f"📋 پلن‌ها: {len(shopdb.plans(False))} | 🎟 کدها: {len(shopdb.discounts())} | "
         f"🤝 نماینده‌ها: {len(shopdb.resellers())}\n"
         f"🎁 اکانت تست: {test_text}\n"
-        f"👥 پاداش دعوت: {db.get_setting('shop_ref_percent', '0') or 0}٪\n"
+        f"👥 پاداش دعوت: {db.get_setting('shop_ref_percent', '0') or 0}٪ | "
+        f"⏰ تخفیف تمدید: {db.get_setting('renew_discount', '10') or 0}٪\n"
         + profit_text(s_month)
     )
 
@@ -543,7 +591,7 @@ def shop_admin_kb():
         [("🎟 کدهای تخفیف", "sa:codes"), ("🤝 نماینده‌ها", "sa:resellers")],
         [("🎁 اکانت تست", "sa:test"), ("👥 پاداش دعوت", "sa:ref")],
         [("🧾 سفارش‌های در انتظار", "sa:pending"), ("💰 هزینه‌ها", "sa:cost")],
-        [("📲 تأیید خودکار پیامک", "sms:menu")],
+        [("📲 تأیید خودکار پیامک", "sms:menu"), ("⏰ تخفیف تمدید", "sa:renew")],
         [("👁 نمای مشتری", "sa:preview")],
     ])
 
@@ -554,17 +602,30 @@ ADMIN_PROMPTS = {
     "test": (ShopAdmin.test, "🎁 اکانت تست: <code>مگابایت | ساعت</code> مثلاً <code>500 | 24</code>\n"
                              "برای خاموش کردن: <code>off</code>"),
     "ref": (ShopAdmin.referral, "👥 چند درصد از هر خرید به کیف پول دعوت‌کننده برود؟ (۰ = خاموش)"),
+    "renew": (ShopAdmin.renew, "⏰ ۳ روز مانده به پایان (یا ۸۵٪ مصرف حجم) به مشتری یادآوری می‌شود. "
+                               "چند درصد تخفیف یک‌بارمصرف برای تمدید بدهد؟ (۰ = بدون تخفیف)"),
     "cost": (ShopAdmin.cost, "💰 جمع هزینه‌ی ماهانه‌ی همه‌ی سرورها (آلمان + ایران) به تومان؟\n"
                              "برای محاسبه‌ی سود ماهانه در صفحه‌ی فروشگاه."),
 }
 
 
-@router.callback_query(F.data.in_({"sa:card", "sa:test", "sa:ref", "sa:cost"}), h.admin)
+@router.callback_query(F.data.in_({"sa:card", "sa:test", "sa:ref", "sa:cost", "sa:renew"}), h.admin)
 async def shop_admin_ask(cb: CallbackQuery, state: FSMContext):
     await cb.answer()
     st, prompt = ADMIN_PROMPTS[cb.data[3:]]
     await state.set_state(st)
     await cb.message.answer(prompt, reply_markup=h.CANCEL_KB)
+
+
+@router.message(ShopAdmin.renew, h.admin)
+async def set_renew(msg: Message, state: FSMContext):
+    v = h.parse_number(msg.text)
+    if v is None or v >= 100:
+        await msg.answer("❌ یک عدد بین ۰ تا ۹۹ بفرستید.")
+        return
+    await state.clear()
+    db.set_setting("renew_discount", str(int(v)))
+    await msg.answer("✅ ذخیره شد.", reply_markup=h.ADMIN_KB)
 
 
 @router.message(ShopAdmin.cost, h.admin)
@@ -622,6 +683,7 @@ PRESETS = [
     ("📅 سه‌ماهه ۱۵۰ گیگ", 150, 90, 690_000),
     ("👨‍👩‍👧 خانوادگی ۳۰۰ گیگ", 300, 60, 1_250_000),
 ]
+ADDON_PRESETS = [(10, 70_000), (30, 180_000)]
 OLD_PRESET_PRICES = {"🌱 اقتصادی ۲۰ گیگ": 90_000, "⭐ استاندارد ۵۰ گیگ": 180_000,
                      "🔥 حرفه‌ای ۱۰۰ گیگ": 300_000, "💎 ویژه ۲۰۰ گیگ": 500_000,
                      "📅 سه‌ماهه ۱۵۰ گیگ": 420_000, "👨‍👩‍👧 خانوادگی ۳۰۰ گیگ": 750_000}
@@ -636,6 +698,11 @@ def apply_defaults() -> None:
             if OLD_PRESET_PRICES.get(p.title) == p.price:
                 shopdb.set_price(p.id, new[p.title])
         db.set_setting("shop_prices_v2", "1")
+    if not db.get_setting("shop_addons_seeded"):
+        db.set_setting("shop_addons_seeded", "1")
+        if not shopdb.addons(False):
+            for gb, price in ADDON_PRESETS:
+                shopdb.add_plan(f"حجم اضافه {gb} گیگ", gb, 0, price, kind="addon")
     if db.get_setting("shop_seeded"):
         return
     if not shopdb.plans(False):
@@ -653,8 +720,32 @@ def apply_defaults() -> None:
 def plans_admin():
     rows = [[(f"{'🟢' if p.active else '⚪️'} {p.title} — {toman(p.price)}", f"sp:t:{p.id}"),
              ("✏️", f"sp:e:{p.id}"), ("🗑", f"sp:d:{p.id}")] for p in shopdb.plans(False)]
+    rows += [[(f"{'🟢' if p.active else '⚪️'} ➕ {p.gb:g} گیگ اضافه — {toman(p.price)}", f"sp:t:{p.id}"),
+              ("✏️", f"sp:e:{p.id}"), ("🗑", f"sp:d:{p.id}")] for p in shopdb.addons(False)]
     rows.append([("➕ پلن جدید", "sp:add"), ("✨ پلن‌های پیشنهادی", "sp:presets")])
+    rows.append([("📦 بسته‌ی حجم اضافه‌ی جدید", "sp:addon")])
     return ("📋 <b>پلن‌ها</b>\nروی هر پلن بزنید تا فعال/غیرفعال شود؛ ✏️ تغییر قیمت، 🗑 حذف.", h.ikb(rows))
+
+
+@router.callback_query(F.data == "sp:addon", h.admin)
+async def addon_add_ask(cb: CallbackQuery, state: FSMContext):
+    await cb.answer()
+    await state.set_state(ShopAdmin.addon)
+    await cb.message.answer("📦 بسته‌ی حجم اضافه: <code>گیگ | قیمت تومان</code> مثلاً <code>10 | 70000</code>",
+                            reply_markup=h.CANCEL_KB)
+
+
+@router.message(ShopAdmin.addon, h.admin)
+async def addon_add(msg: Message, state: FSMContext):
+    nums = [h.parse_number(x.replace(",", "")) for x in (msg.text or "").split("|")]
+    if len(nums) != 2 or None in nums or not all(nums):
+        await msg.answer("❌ قالب: <code>10 | 70000</code>")
+        return
+    shopdb.add_plan(f"حجم اضافه {nums[0]:g} گیگ", nums[0], 0, int(nums[1]), kind="addon")
+    await state.clear()
+    await msg.answer("✅ اضافه شد.", reply_markup=h.ADMIN_KB)
+    text, kb = plans_admin()
+    await msg.answer(text, reply_markup=kb)
 
 
 @router.callback_query(F.data == "sp:presets", h.admin)
@@ -962,3 +1053,48 @@ async def sms_change(cb: CallbackQuery):
 @router.callback_query(F.data.in_({"sms:toggle", "sms:rekey"}), h.admin)
 async def sms_change_denied(cb: CallbackQuery):
     await cb.answer("فقط مالک ربات می‌تواند این را تغییر دهد", show_alert=True)
+
+
+# =====================================================================
+# renewal reminders with a personal discount
+# =====================================================================
+
+REMIND_DAYS = 3
+REMIND_TRAFFIC = 0.85
+
+
+async def renewal_reminders(bot: Bot) -> None:
+    if not shop_open():
+        return
+    pct = int(db.get_setting("renew_discount", "10") or 0)
+    now = time.time()
+    for u in db.active_users():
+        to = u.owner_tg or u.tg_id
+        if not to or u.note == "test":
+            continue
+        days_left = (u.expire_at - now) / db.DAY if u.expire_at else None
+        low_time = days_left is not None and 0 < days_left <= REMIND_DAYS
+        low_traffic = u.traffic_limit and u.used >= u.traffic_limit * REMIND_TRAFFIC
+        if not (low_time or low_traffic):
+            continue
+        tag = f"{u.expire_at}:{u.traffic_limit}"
+        if db.get_setting(f"remind:{u.id}") == tag:
+            continue
+        db.set_setting(f"remind:{u.id}", tag)
+        why = (f"تا {max(1, round(days_left))} روز دیگر تمام می‌شود" if low_time
+               else f"{round(u.used / u.traffic_limit * 100)}٪ حجمش مصرف شده")
+        text = f"⏰ اشتراک <b>{html.escape(u.name)}</b> {why}.\n\n{fmt.user_card(u)}"
+        buttons = []
+        if pct:
+            code = f"RN{u.id}X{random.randint(1000, 9999)}"
+            shopdb.add_discount(code, pct, 1, 7)
+            text += f"\n\n🎁 اگر تا ۷ روز تمدید کنید <b>{pct}٪ تخفیف</b> دارید (کد <code>{code}</code>)."
+            buttons.append((f"🔄 تمدید با {pct}٪ تخفیف", f"rnc:{u.id}:{code}"))
+        else:
+            buttons.append(("🔄 تمدید", f"rn:{u.id}"))
+        if low_traffic and not low_time and shopdb.addons():
+            buttons.append(("➕ حجم اضافه", f"ad:{u.id}"))
+        try:
+            await bot.send_message(to, text, reply_markup=h.ikb([buttons]))
+        except Exception:
+            pass

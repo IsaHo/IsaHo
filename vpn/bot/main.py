@@ -70,6 +70,7 @@ async def check_tunnels(bot: Bot) -> None:
         if n:
             if _tunnel_down.get(host, 0) >= DOWN_AFTER:
                 await notify_admins(bot, f"🟢 تانل {label} (<code>{host}</code>) دوباره وصل شد ({n} اتصال).")
+                await notify_status(bot, f"✅ سرور {label} دوباره در دسترس است.")
             _tunnel_seen[host] = True
             _tunnel_down[host] = 0
             continue
@@ -80,6 +81,9 @@ async def check_tunnels(bot: Bot) -> None:
             await notify_admins(bot, f"🔴 تانل {label} (<code>{host}</code>) قطع شد!\n"
                                      "کاربرانی که از این سرور واسط وصل‌اند الان قطع هستند.\n"
                                      "روی سرور ایران بررسی کنید: <code>systemctl status 'isaho-tunnel@*'</code>")
+            others = [lb for lb, _, _, k in tunnels.status() if k and lb != label]
+            await notify_status(bot, f"⚠️ سرور {label} موقتاً در دسترس نیست و در حال رفع مشکل است."
+                                     + (f"\nلطفاً فعلاً از کانفیگ {' یا '.join(others)} استفاده کنید." if others else ""))
 
 
 _device_warned = {}  # name -> last warning time
@@ -139,6 +143,16 @@ async def check_devices(bot: Bot) -> None:
             await notify(bot, u, f"⚠️ اکانت <b>{name}</b> روی {n} دستگاه هم‌زمان استفاده می‌شود (حد: {limit}).")
 
 
+async def notify_status(bot: Bot, text: str) -> None:
+    """Customer-facing status updates to the public status channel, if set."""
+    chat = db.get_setting("status_chat")
+    if chat:
+        try:
+            await bot.send_message(int(chat), text)
+        except Exception:
+            log.warning("cannot post to status channel")
+
+
 async def notify_admins(bot: Bot, text: str) -> None:
     for chat_id in db.admin_ids():
         try:
@@ -157,6 +171,7 @@ async def monitor(bot: Bot) -> None:
                 if o.wallet_used:
                     shopdb.add_balance(o.tg_id, o.wallet_used)
             await auto_real_ip(bot)
+            await shop.renewal_reminders(bot)
             await check_devices(bot)
             last = int(db.get_setting("last_backup", "0"))
             if time.time() - last > db.DAY:
