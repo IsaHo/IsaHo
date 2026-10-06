@@ -47,6 +47,32 @@ fs.file-max=1048576
 SYSCTL
 sysctl --system >/dev/null 2>&1 || true
 grep -q '^precedence ::ffff:0:0/96' /etc/gai.conf 2>/dev/null || echo 'precedence ::ffff:0:0/96  100' >>/etc/gai.conf
+
+echo "==> Direct proxy (port 8443 → Xray 443)"
+cat >/etc/systemd/system/isaho-direct.socket <<SOCK
+[Unit]
+Description=IsaHo direct path from IR relays (8443 -> Xray 127.0.0.1:443)
+[Socket]
+ListenStream=0.0.0.0:8443
+NoDelay=true
+Backlog=4096
+[Install]
+WantedBy=sockets.target
+SOCK
+cat >/etc/systemd/system/isaho-direct.service <<SVC
+[Unit]
+Description=IsaHo direct path proxy to Xray
+Requires=isaho-direct.socket
+After=isaho-direct.socket
+[Service]
+ExecStart=/lib/systemd/systemd-socket-proxyd --connections-max=4096 127.0.0.1:443
+LimitNOFILE=65536
+SVC
+systemctl daemon-reload
+systemctl enable -q --now isaho-direct.socket
+if command -v ufw >/dev/null && ufw status | grep -q "Status: active"; then
+    ufw allow 8443/tcp >/dev/null
+fi
 # no public VPN ports by default: users arrive through the Iranian relays' SSH tunnels
 # (switch the node to public in the bot and open 443/2053 yourself if you ever want direct links)
 

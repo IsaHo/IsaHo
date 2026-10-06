@@ -116,7 +116,7 @@ def build_config(users, node: bool = False) -> dict:
         "stats": {},
         "policy": {
             "levels": {"0": {"statsUserUplink": True, "statsUserDownlink": True, "statsUserOnline": True,
-                             "handshake": 4, "connIdle": 300, "bufferSize": 64}},
+                             "handshake": 4, "connIdle": 300, "bufferSize": 0}},
             "system": {"statsInboundUplink": True, "statsInboundDownlink": True},
         },
         "inbounds": [

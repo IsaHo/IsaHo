@@ -140,9 +140,11 @@ backend tunnels
     default-server on-marked-down shutdown-sessions
 CFG
         for i in $(seq 1 "$TUNNELS"); do echo "    server t$i 127.0.0.1:1000$i check inter 5s fall 2 rise 2$SEND_PROXY"; done
-        # extra foreign servers never get the PROXY header (only the main server reads it)
+        # extra foreign servers: direct path on port 8443 (no SSH overhead) first,
+        # SSH tunnels as backup so they only carry traffic when the direct path is down
         for j in $(seq 1 $(( ${#FOREIGNS[@]} - 1 ))); do
-            for i in $(seq 1 "$TUNNELS"); do echo "    server n${j}_$i 127.0.0.1:$((12000 + j * 10 + i)) check inter 5s fall 2 rise 2"; done
+            echo "    server d${j}_1 ${FOREIGNS[$j]}:8443 check inter 5s fall 2 rise 2 weight $TUNNELS"
+            for i in $(seq 1 "$TUNNELS"); do echo "    server n${j}_$i 127.0.0.1:$((12000 + j * 10 + i)) check inter 5s fall 2 rise 2 backup"; done
         done
         cat <<CFG
 
