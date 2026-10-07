@@ -1287,6 +1287,8 @@ CHUNK = 2 * 2**20  # هر تکه 2MB
 async def http_download(url: str, referer: str, dest_dir: str, limit_mb: int, depth=0, prog=None):
     """دانلود مستقیم تکه‌تکه با Range (بعضی CDNها مثل takcdn اتصال طولانی را قطع می‌کنند
     ولی درخواست‌های کوچک Range را جواب می‌دهند). اگر HTML برگشت، لینک ویدیو را از آن درمی‌آورد."""
+    if not url.startswith(("http://", "https://")):
+        return None
     hdr = {**HEADERS, "Referer": referer}
     async with httpx.AsyncClient(headers=hdr, follow_redirects=True, timeout=httpx.Timeout(30, read=60)) as c:
         r = await c.get(url, headers={"Range": "bytes=0-1023"})
@@ -1386,10 +1388,12 @@ async def ytdlp_download(url: str, referer: str, dest_dir: str, prog=None):
     base = ["yt-dlp", "-q", "--progress", "--newline", "--progress-template",
             "download:P %(progress.downloaded_bytes)s %(progress.total_bytes)s %(progress.total_bytes_estimate)s",
             "--no-playlist", "-f", "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/b",
-            "--merge-output-format", "mp4", "--no-check-certificates",
+            "--merge-output-format", "mp4",
             "--user-agent", HEADERS["User-Agent"], "--referer", referer,
             "--add-header", "Accept-Language:en-US,en;q=0.9",
             "--retries", "5", "--extractor-retries", "3", "-o", out]
+    if not url.startswith(("http://", "https://")):
+        raise RuntimeError(f"URL نامعتبر: {url[:80]}")
     err = b""
     for extra in (["--impersonate", "chrome124"], ["--impersonate", "chrome"], []):  # chrome124 برای Cloudflare
         code, err = await _run_ytdlp([*base, *extra, url], prog)
