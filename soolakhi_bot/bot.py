@@ -35,8 +35,15 @@ HEADERS = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chr
 
 BTN_SITES, BTN_NEW, BTN_FAVS = "🌐 سایت‌های من", "➕ افزودن سایت", "⭐ ذخیره‌ها"
 BTN_STOP, BTN_SEARCH, BTN_PANEL = "⏹ توقف", "🔎 جستجو", "⚙️ پنل"
-MENU = ReplyKeyboardMarkup([[BTN_SEARCH], [BTN_SITES, BTN_NEW], [BTN_FAVS, BTN_PANEL], [BTN_STOP]],
+BTN_GIF = "🎞 گیف"
+MENU = ReplyKeyboardMarkup([[BTN_SEARCH, BTN_GIF], [BTN_SITES, BTN_NEW], [BTN_FAVS, BTN_PANEL], [BTN_STOP]],
                            resize_keyboard=True)
+GIF_SOURCES = [
+    ("Tenor",  "https://tenor.com/search/{q}-gifs"),
+    ("Giphy",  "https://giphy.com/search/{q}"),
+]
+GIF_CACHE: dict[str, dict] = {}
+GIF_CACHE_MAX = 5000
 PAGE = 10  # تعداد آیتم در هر صفحه لیست‌ها
 START_TIME = __import__("time").time()
 
@@ -1118,6 +1125,99 @@ async def send_card(chat_id, i, v, ctx):
     await ctx.bot.send_message(chat_id, cap, reply_markup=video_kb(i))
 
 
+# ----------------------------- 🎞 GIF -----------------------------
+
+async def _gif_search(query: str, limit: int = 8) -> list[str]:
+    """جستجو در Tenor و Giphy با yt-dlp؛ نتایج را در GIF_CACHE ذخیره می‌کند."""
+    gids: list[str] = []
+    for source, tmpl in GIF_SOURCES:
+        url = tmpl.format(q=quote_plus(query))
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "yt-dlp", "--flat-playlist", "--dump-json", "--no-warnings",
+                "--playlist-items", f"1-{limit}",
+                url,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+            )
+            try:
+                out, _ = await asyncio.wait_for(proc.communicate(), 30)
+            except asyncio.TimeoutError:
+                proc.kill(); continue
+            for line in out.splitlines():
+                try:
+                    d = json.loads(line)
+                    page = d.get("webpage_url") or d.get("url") or ""
+                    if not page.startswith("http"):
+                        continue
+                    gid = hashlib.md5(page.encode()).hexdigest()[:12]
+                    GIF_CACHE[gid] = {
+                        "url": page, "title": (d.get("title") or query)[:200],
+                        "thumb": d.get("thumbnail"), "source": source,
+                    }
+                    gids.append(gid)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        if len(gids) >= limit:
+            break
+    if len(GIF_CACHE) > GIF_CACHE_MAX:
+        for k in list(GIF_CACHE)[:len(GIF_CACHE) - GIF_CACHE_MAX]:
+            GIF_CACHE.pop(k, None)
+    return gids[:limit]
+
+
+async def _send_gif_card(chat_id: int, gid: str, bot):
+    g = GIF_CACHE.get(gid)
+    if not g:
+        return
+    cap = f"🎞 {g['title']}\n🌐 {g['source']}"
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("⬇️ دانلود GIF", callback_data=f"gif_dl:{gid}")]])
+    if g.get("thumb"):
+        try:
+            await bot.send_photo(chat_id, g["thumb"], caption=cap, reply_markup=kb)
+            return
+        except Exception:
+            pass
+    await bot.send_message(chat_id, cap, reply_markup=kb)
+
+
+async def _download_send_gif(chat_id: int, gid: str, bot):
+    g = GIF_CACHE.get(gid)
+    if not g:
+        await bot.send_message(chat_id, "❌ GIF منقضی شده؛ دوباره سرچ کن.")
+        return
+    msg = await bot.send_message(chat_id, "⏳ در حال دانلود GIF ...")
+    with tempfile.TemporaryDirectory() as tmp:
+        proc = await asyncio.create_subprocess_exec(
+            "yt-dlp", "-q", "--no-playlist", "--no-warnings",
+            "-f", "gif/mp4/best", "-o", os.path.join(tmp, "gif.%(ext)s"),
+            g["url"],
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            _, err = await asyncio.wait_for(proc.communicate(), 120)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await msg.edit_text("❌ دانلود GIF timeout شد.")
+            return
+        files = [f for f in os.listdir(tmp) if not f.endswith((".part", ".ytdl"))]
+        if not files:
+            await msg.edit_text("❌ دانلود GIF ناموفق.")
+            log.warning("gif dl failed: %s", err.decode(errors="ignore")[-200:])
+            return
+        try:
+            await msg.delete()
+        except Exception:
+            pass
+        with open(os.path.join(tmp, files[0]), "rb") as f:
+            try:
+                await bot.send_animation(chat_id, f, caption=g["title"][:500])
+            except Exception:
+                with open(os.path.join(tmp, files[0]), "rb") as f2:
+                    await bot.send_document(chat_id, f2, caption=g["title"][:500])
+
+
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if allowed(update):
         await update.message.reply_text("از دکمه‌های پایین استفاده کن، یا لینک هر سایتی رو بفرست تا اسکنش کنم.",
@@ -1316,7 +1416,7 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     chat_id, text = update.effective_chat.id, update.message.text.strip()
     target = ctx.user_data.pop("newfolder", None)
-    if target and text not in (BTN_SITES, BTN_NEW, BTN_FAVS, BTN_STOP, BTN_SEARCH, BTN_PANEL):
+    if target and text not in (BTN_SITES, BTN_NEW, BTN_FAVS, BTN_STOP, BTN_SEARCH, BTN_PANEL, BTN_GIF):
         name = re.sub(r"\s+", " ", text)[:30]
         fid = str(FOLDERS["next"])
         FOLDERS["next"] += 1
@@ -1360,6 +1460,9 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                                         "https://example.com اسم دلخواه")
     elif text == BTN_FAVS:
         await show_fav_menu(chat_id, ctx)
+    elif text == BTN_GIF:
+        ctx.user_data["gif_mode"] = True
+        await update.message.reply_text("🎞 نام یا موضوع گیف مورد نظرت رو بنویس (مثلاً: cat, خنده):")
     elif text == BTN_SEARCH:
         await update.message.reply_text("🔎 کلمه یا عبارت مورد نظرت رو بنویس:")
     elif text == BTN_PANEL:
@@ -1381,6 +1484,15 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text("می‌خوای این سایت ذخیره بشه؟", reply_markup=InlineKeyboardMarkup(
                     [[InlineKeyboardButton("💾 ذخیره سایت", callback_data=f"savesite:{i}")]]))
             await start_scan(chat_id, url, ctx)
+    elif ctx.user_data.pop("gif_mode", False):  # جستجوی GIF
+        await update.message.reply_text(f"🔍 در حال جستجوی گیف «{text[:50]}» در Tenor و Giphy ...")
+        gids = await _gif_search(text[:100])
+        if not gids:
+            await update.message.reply_text("😕 هیچ گیفی پیدا نشد.")
+            return
+        for gid in gids:
+            await _send_gif_card(chat_id, gid, ctx.bot)
+            await asyncio.sleep(0.3)
     else:  # هر متن دیگری = جستجو: اول فهرست محلی (فوری)، بعد در صورت نیاز جستجوی زنده
         ctx.user_data["query"] = text[:100]
         ids = index_search(text)
@@ -1725,6 +1837,10 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return await send_batch(chat_id, ctx)
 
     action, i = q.data.split(":", 1)
+    if action == "gif_dl":
+        await q.answer("⏳ در حال دانلود ...")
+        asyncio.create_task(_download_send_gif(chat_id, i, ctx.bot))
+        return
     if action in ("sq", "sqs"):
         query = ctx.user_data.get("query")
         if not query:
