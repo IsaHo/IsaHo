@@ -36,12 +36,26 @@ HEADERS = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chr
 BTN_SITES, BTN_NEW, BTN_FAVS = "🌐 سایت‌های من", "➕ افزودن سایت", "⭐ ذخیره‌ها"
 BTN_STOP, BTN_SEARCH, BTN_PANEL = "⏹ توقف", "🔎 جستجو", "⚙️ پنل"
 BTN_GIF = "🎞 گیف"
+BTN_GIF_SEARCH = "🔍 جستجو گیف"
+BTN_GIF_SITES  = "🌐 سایت‌های گیف"
+BTN_GIF_ADD    = "➕ سایت گیف جدید"
 MENU = ReplyKeyboardMarkup([[BTN_SEARCH, BTN_GIF], [BTN_SITES, BTN_NEW], [BTN_FAVS, BTN_PANEL], [BTN_STOP]],
                            resize_keyboard=True)
-GIF_SOURCES = [
-    ("Tenor",  "https://tenor.com/search/{q}-gifs"),
-    ("Giphy",  "https://giphy.com/search/{q}"),
-]
+GIFMENU = ReplyKeyboardMarkup(
+    [[BTN_GIF_SEARCH], [BTN_GIF_SITES, BTN_GIF_ADD], [BTN_STOP]],
+    resize_keyboard=True
+)
+GIF_SITES_FILE = os.path.join(BASE_DIR, "gif_sites.json")
+_DEFAULT_GIF_SITES = {
+    hashlib.md5(b"tenor").hexdigest()[:12]:  {"name": "Tenor", "url": "https://tenor.com/",
+                                               "search": "https://tenor.com/search/{q}-gifs"},
+    hashlib.md5(b"giphy").hexdigest()[:12]:  {"name": "Giphy", "url": "https://giphy.com/",
+                                               "search": "https://giphy.com/search/{q}"},
+}
+GIF_SITES: dict = load_json(GIF_SITES_FILE, None)
+if GIF_SITES is None:
+    GIF_SITES = dict(_DEFAULT_GIF_SITES)
+    save_json(GIF_SITES_FILE, GIF_SITES)
 GIF_CACHE: dict[str, dict] = {}
 GIF_CACHE_MAX = 5000
 _GIF_DL_ACTIVE: dict[int, bool] = {}  # chat_id -> در حال دانلود
@@ -1111,44 +1125,69 @@ async def send_card(chat_id, i, v, ctx):
 
 # ----------------------------- 🎞 GIF -----------------------------
 
-async def _gif_search(query: str, limit: int = 8) -> list[str]:
-    """جستجو در Tenor و Giphy با yt-dlp؛ نتایج را در GIF_CACHE ذخیره می‌کند."""
+async def _gif_search(query: str, limit: int = 8,
+                       only_site: str | None = None) -> list[str]:
+    """جستجو در GIF_SITES: سایت‌های با search template → yt-dlp | بقیه → SearchCrawler."""
     gids: list[str] = []
-    for source, tmpl in GIF_SOURCES:
-        url = tmpl.format(q=quote_plus(query))
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                "yt-dlp", "--flat-playlist", "--dump-json", "--no-warnings",
-                "--playlist-items", f"1-{limit}",
-                url,
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
-            )
-            try:
-                out, _ = await asyncio.wait_for(proc.communicate(), 30)
-            except asyncio.TimeoutError:
-                proc.kill(); continue
-            for line in out.splitlines():
-                try:
-                    d = json.loads(line)
-                    page = d.get("webpage_url") or d.get("url") or ""
-                    if not page.startswith("http"):
-                        continue
-                    gid = hashlib.md5(page.encode()).hexdigest()[:12]
-                    GIF_CACHE[gid] = {
-                        "url": page, "title": (d.get("title") or query)[:200],
-                        "thumb": d.get("thumbnail"), "source": source,
-                    }
-                    gids.append(gid)
-                except Exception:
-                    pass
-        except Exception:
-            pass
-        if len(gids) >= limit:
+    sites = {k: v for k, v in GIF_SITES.items() if only_site is None or k == only_site}
+    for sid, site in sites.items():
+        remaining = limit - len(gids)
+        if remaining <= 0:
             break
+        tmpl = site.get("search", "")
+        if tmpl:  # yt-dlp (Tenor/Giphy و مشابه)
+            src_url = tmpl.format(q=quote_plus(query))
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    "yt-dlp", "--flat-playlist", "--dump-json", "--no-warnings",
+                    "--playlist-items", f"1-{remaining}",
+                    src_url,
+                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+                )
+                try:
+                    out, _ = await asyncio.wait_for(proc.communicate(), 30)
+                except asyncio.TimeoutError:
+                    proc.kill(); continue
+                for line in out.splitlines():
+                    try:
+                        d = json.loads(line)
+                        page = d.get("webpage_url") or d.get("url") or ""
+                        if not page.startswith("http"):
+                            continue
+                        gid = hashlib.md5(page.encode()).hexdigest()[:12]
+                        GIF_CACHE[gid] = {"url": page, "title": (d.get("title") or query)[:200],
+                                           "thumb": d.get("thumbnail"), "source": site["name"]}
+                        gids.append(gid)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+        else:  # سایت دلخواه → SearchCrawler
+            sc = SearchCrawler(query, [site["url"]])
+            try:
+                found = await asyncio.wait_for(sc.next_batch(), 60)
+                for i in found[:remaining]:
+                    v = VIDEOS.get(i) or {}
+                    gid = hashlib.md5((v.get("page") or i).encode()).hexdigest()[:12]
+                    GIF_CACHE[gid] = {"url": v.get("page", ""), "title": v.get("title", query)[:200],
+                                       "thumb": v.get("image"), "source": site["name"]}
+                    if gid not in gids:
+                        gids.append(gid)
+            except Exception:
+                pass
     if len(GIF_CACHE) > GIF_CACHE_MAX:
         for k in list(GIF_CACHE)[:len(GIF_CACHE) - GIF_CACHE_MAX]:
             GIF_CACHE.pop(k, None)
     return gids[:limit]
+
+
+def gif_sites_kb(page: int = 0) -> InlineKeyboardMarkup:
+    items = list(GIF_SITES.items())
+    rows = [[InlineKeyboardButton(f"🎞 {v['name']}", callback_data=f"gscan:{k}"),
+             InlineKeyboardButton("🗑", callback_data=f"gdel:{k}")]
+            for k, v in items[page * PAGE:(page + 1) * PAGE]]
+    rows += pager("gifpg", page, len(items))
+    return InlineKeyboardMarkup(rows)
 
 
 async def _send_gif_card(chat_id: int, gid: str, bot):
@@ -1407,7 +1446,8 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     chat_id, text = update.effective_chat.id, update.message.text.strip()
     target = ctx.user_data.pop("newfolder", None)
-    if target and text not in (BTN_SITES, BTN_NEW, BTN_FAVS, BTN_STOP, BTN_SEARCH, BTN_PANEL, BTN_GIF):
+    if target and text not in (BTN_SITES, BTN_NEW, BTN_FAVS, BTN_STOP, BTN_SEARCH, BTN_PANEL,
+                               BTN_GIF, BTN_GIF_SEARCH, BTN_GIF_SITES, BTN_GIF_ADD):
         name = re.sub(r"\s+", " ", text)[:30]
         fid = str(FOLDERS["next"])
         FOLDERS["next"] += 1
@@ -1418,6 +1458,14 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             save_favs()
             return await update.message.reply_text(f"📁 پوشهٔ «{name}» ساخته شد و ویدیو داخلش رفت.")
         return await update.message.reply_text(f"📁 پوشهٔ «{name}» ساخته شد.", reply_markup=fav_menu_kb())
+    if ctx.user_data.pop("gif_adding", False) and re.match(r"^(https?://)?[\w.-]+\.[a-z]{2,}", text, re.I):
+        url = text.strip() if text.startswith("http") else "https://" + text.strip()
+        sid = site_id(url)
+        name = urlparse(url).netloc.removeprefix("www.")
+        GIF_SITES[sid] = {"name": name, "url": url}
+        save_json(GIF_SITES_FILE, GIF_SITES)
+        return await update.message.reply_text(f"✅ «{name}» به سایت‌های گیف اضافه شد.",
+                                               reply_markup=GIFMENU)
     if ctx.user_data.pop("blocking", None) and re.match(r"^(https?://)?[\w.-]+\.[a-z]{2,}", text, re.I):
         d = host_of(text if text.startswith("http") else "https://" + text)
         if d not in BLOCKED:
@@ -1452,8 +1500,26 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     elif text == BTN_FAVS:
         await show_fav_menu(chat_id, ctx)
     elif text == BTN_GIF:
+        await update.message.reply_text(
+            f"🎞 بخش گیف ({len(GIF_SITES)} سایت ذخیره)",
+            reply_markup=GIFMENU)
+    elif text == BTN_GIF_SEARCH:
         ctx.user_data["gif_mode"] = True
-        await update.message.reply_text("🎞 نام یا موضوع گیف مورد نظرت رو بنویس (مثلاً: cat, خنده):")
+        ctx.user_data.pop("gif_site", None)
+        await update.message.reply_text("🔍 نام یا موضوع گیف رو بنویس:")
+    elif text == BTN_GIF_SITES:
+        if not GIF_SITES:
+            await update.message.reply_text("هیچ سایت گیفی نیست. با «➕ سایت گیف جدید» اضافه کن.")
+        else:
+            await update.message.reply_text(
+                f"🌐 {len(GIF_SITES)} سایت گیف ذخیره‌شده:",
+                reply_markup=gif_sites_kb())
+    elif text == BTN_GIF_ADD:
+        ctx.user_data["gif_adding"] = True
+        await update.message.reply_text(
+            "لینک سایت گیف رو بفرست:\n(مثلاً: https://example.com/)\n"
+            "برای سایت‌هایی که search template دارن (مثل Tenor/Giphy) می‌تونی بعداً از inline keyboard ویرایش کنی."\
+        )
     elif text == BTN_SEARCH:
         await update.message.reply_text("🔎 کلمه یا عبارت مورد نظرت رو بنویس:")
     elif text == BTN_PANEL:
@@ -1476,8 +1542,10 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     [[InlineKeyboardButton("💾 ذخیره سایت", callback_data=f"savesite:{i}")]]))
             await start_scan(chat_id, url, ctx)
     elif ctx.user_data.pop("gif_mode", False):  # جستجوی GIF
-        await update.message.reply_text(f"🔍 در حال جستجوی گیف «{text[:50]}» در Tenor و Giphy ...")
-        gids = await _gif_search(text[:100])
+        only = ctx.user_data.pop("gif_site", None)
+        where = GIF_SITES.get(only, {}).get("name") if only else f"{len(GIF_SITES)} سایت"
+        await update.message.reply_text(f"🔍 جستجوی گیف «{text[:50]}» در {where} ...")
+        gids = await _gif_search(text[:100], only_site=only)
         if not gids:
             await update.message.reply_text("😕 هیچ گیفی پیدا نشد.")
             return
@@ -1828,6 +1896,21 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return await send_batch(chat_id, ctx)
 
     action, i = q.data.split(":", 1)
+    if action == "gscan":
+        if i not in GIF_SITES:
+            return await q.answer("سایت حذف شده", show_alert=True)
+        await q.answer()
+        ctx.user_data["gif_mode"] = True
+        ctx.user_data["gif_site"] = i
+        return await q.message.reply_text("🔍 نام گیف رو بنویس:", reply_markup=GIFMENU)
+    if action == "gdel":
+        site = GIF_SITES.pop(i, None)
+        save_json(GIF_SITES_FILE, GIF_SITES)
+        await q.answer(f"🗑 {site['name']} حذف شد" if site else "قبلاً حذف شده")
+        return await q.edit_message_reply_markup(gif_sites_kb())
+    if action == "gifpg":
+        await q.answer()
+        return await q.edit_message_reply_markup(gif_sites_kb(int(i)))
     if action == "gif_dl":
         await q.answer("⏳ در حال دانلود ...")
         asyncio.create_task(_download_send_gif(chat_id, i, ctx.bot))
