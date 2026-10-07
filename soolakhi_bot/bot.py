@@ -699,28 +699,11 @@ class _SSRFGuardTransport(httpx.AsyncHTTPTransport):
             )
         except Exception:
             raise httpx.ConnectError("SSRF: connection blocked")
-        chosen = None
         for info in infos:
             ip = ipaddress.ip_address(info[4][0])
             if not ip.is_global:
                 raise httpx.ConnectError("SSRF: connection blocked")
-            chosen = chosen or info[4][0]
-        if not chosen:
-            raise httpx.ConnectError("SSRF: connection blocked")
-        # IP pinning: URL رو به IP مستقیم تغییر بده تا httpcore DNS مجدد نکنه
-        netloc = f"[{chosen}]" if ":" in chosen else chosen
-        if request.url.port:
-            netloc += f":{request.url.port}"
-        pinned_str = urlparse(str(request.url))._replace(netloc=netloc).geturl()
-        headers = {**dict(request.headers), "host": host}
-        pinned = httpx.Request(
-            method=request.method,
-            url=pinned_str,
-            headers=headers,
-            stream=request.stream,
-            extensions={**request.extensions, "sni_hostname": host.encode()},
-        )
-        return await super().handle_async_request(pinned)
+        return await super().handle_async_request(request)
 
 
 def _httpx(**kw) -> httpx.AsyncClient:
@@ -1192,8 +1175,8 @@ async def _download_send_gif(chat_id: int, gid: str, bot):
         await bot.send_message(chat_id, "❌ GIF منقضی شده؛ دوباره سرچ کن.")
         return
     _GIF_DL_ACTIVE[chat_id] = True
-    msg = await bot.send_message(chat_id, "⏳ در حال دانلود GIF ...")
     try:
+        msg = await bot.send_message(chat_id, "⏳ در حال دانلود GIF ...")
         with tempfile.TemporaryDirectory() as tmp:
             proc = await asyncio.create_subprocess_exec(
                 "yt-dlp", "-q", "--no-playlist", "--no-warnings",
