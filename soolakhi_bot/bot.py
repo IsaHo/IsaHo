@@ -630,17 +630,12 @@ _PRIVATE_HOST = re.compile(
 
 def _safe_url(url: str) -> bool:
     """URL باید https/http باشد و به آدرس خصوصی/لوکال اشاره نکند.
-    hostname یونیکود به ASCII/IDNA نرمالیزه می‌شود تا parser differential برطرف شود."""
+    hostname غیر ASCII رد می‌شود — هیچ IDNA2003/2008 differential ممکن نیست."""
     if not url.startswith(("http://", "https://")):
         return False
     host = (urlparse(url).hostname or "").lower()
-    if not host:
+    if not host or not host.isascii():
         return False
-    if not host.isascii():
-        try:
-            host = host.encode("idna").decode("ascii")
-        except (UnicodeError, UnicodeDecodeError):
-            return False
     return not _PRIVATE_HOST.match(host)
 
 
@@ -675,17 +670,17 @@ def _safe_url_dns(url: str) -> bool:
 
 
 async def _ssrf_redirect_guard(response) -> None:
-    """جلوگیری از redirect به آدرس‌های خصوصی — شامل DNS check."""
+    """جلوگیری از redirect به آدرس‌های خصوصی — defense-in-depth."""
     if getattr(response, "is_redirect", False):
         location = (response.headers or {}).get("location", "")
         if location:
             resolved = urljoin(str(response.url), location)
             if not await asyncio.to_thread(_safe_url_dns, resolved):
-                raise ValueError(f"ریدایرکت به آدرس مجاز نیست: {resolved[:80]}")
+                raise ValueError("SSRF: redirect blocked")
 
 
 class _SSRFGuardTransport(httpx.AsyncHTTPTransport):
-    """DNS validation درست قبل از connect — پنجرهٔ TOCTOU را به حداقل می‌رساند."""
+    """IP pinning: DNS resolve + validate → connect به IP مستقیم (حذف TOCTOU)."""
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         import socket, ipaddress
         host = request.url.host
@@ -694,13 +689,30 @@ class _SSRFGuardTransport(httpx.AsyncHTTPTransport):
             infos = await asyncio.to_thread(
                 socket.getaddrinfo, host, int(port), socket.AF_UNSPEC, socket.SOCK_STREAM
             )
-        except Exception as e:
-            raise httpx.ConnectError(f"DNS blocked: {host}") from e
+        except Exception:
+            raise httpx.ConnectError("SSRF: connection blocked")
+        chosen = None
         for info in infos:
             ip = ipaddress.ip_address(info[4][0])
             if not ip.is_global:
-                raise httpx.ConnectError(f"SSRF blocked: {host} → {ip}")
-        return await super().handle_async_request(request)
+                raise httpx.ConnectError("SSRF: connection blocked")
+            chosen = chosen or info[4][0]
+        if not chosen:
+            raise httpx.ConnectError("SSRF: connection blocked")
+        # IP pinning: URL رو به IP مستقیم تغییر بده تا httpcore DNS مجدد نکنه
+        netloc = f"[{chosen}]" if ":" in chosen else chosen
+        if request.url.port:
+            netloc += f":{request.url.port}"
+        pinned_str = urlparse(str(request.url))._replace(netloc=netloc).geturl()
+        headers = {**dict(request.headers), "host": host}
+        pinned = httpx.Request(
+            method=request.method,
+            url=pinned_str,
+            headers=headers,
+            stream=request.stream,
+            extensions={**request.extensions, "sni_hostname": host.encode()},
+        )
+        return await super().handle_async_request(pinned)
 
 
 def _httpx(**kw) -> httpx.AsyncClient:
@@ -749,7 +761,7 @@ def _stat(domain, key, code=None):
 async def _curl_get(url, referer=None, _hops=0):
     """curl_cffi با redirect دستی تا _safe_url قبل از هر hop اجرا شود (نه بعد)."""
     if not await asyncio.to_thread(_safe_url_dns, url):
-        raise ValueError(f"URL مجاز نیست: {url[:80]}")
+        raise ValueError("SSRF: connection blocked")
     from types import SimpleNamespace
     r = await _curl().get(url, headers={"Referer": referer} if referer else None, allow_redirects=False)
     if r.status_code in (301, 302, 303, 307, 308) and _hops < 10:
@@ -763,7 +775,7 @@ async def _curl_get(url, referer=None, _hops=0):
 async def smart_get(c, url, referer=None):
     """صفحه را می‌گیرد؛ اگر سایت جلوی ربات را گرفت، با شبیه‌سازی مرورگر دوباره امتحان می‌کند."""
     if not await asyncio.to_thread(_safe_url_dns, url):
-        raise ValueError(f"URL مجاز نیست: {url[:80]}")
+        raise ValueError("SSRF: connection blocked")
     dom = host_of(url)
     if dom not in IMPERSONATE:
         try:
@@ -1496,7 +1508,7 @@ async def ytdlp_download(url: str, referer: str, dest_dir: str, prog=None):
             "--add-header", "Accept-Language:en-US,en;q=0.9",
             "--retries", "5", "--extractor-retries", "3", "-o", out]
     if not await asyncio.to_thread(_safe_url_dns, url):
-        raise RuntimeError(f"URL نامعتبر یا خصوصی: {url[:80]}")
+        raise RuntimeError("SSRF: connection blocked")
     err = b""
     for extra in (["--impersonate", "chrome124"], ["--impersonate", "chrome"], []):  # chrome124 برای Cloudflare
         code, err = await _run_ytdlp([*base, *extra, url], prog)
