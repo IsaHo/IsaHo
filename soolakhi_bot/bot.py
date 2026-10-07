@@ -636,13 +636,16 @@ def _safe_url(url: str) -> bool:
     return bool(host) and not _PRIVATE_HOST.match(host)
 
 
-# کش DNS برای جلوگیری از lookup تکراری (ttl: ۶۰ ثانیه)
+# کش DNS با سقف ۱۰۰۰ ورودی و ttl ۶۰ ثانیه
+# توجه: TOCTOU inherent است — DNS check و connect جدا انجام می‌شوند؛
+# دفاع قطعی در لایهٔ شبکه (firewall/VPC) است، نه application.
 _dns_cache: dict[str, tuple[bool, float]] = {}
 _DNS_TTL = 60.0
+_DNS_CACHE_MAX = 1000
 
 
 def _safe_url_dns(url: str) -> bool:
-    """بررسی string + DNS resolve (در صورت نیاز) — جلوگیری از DNS rebinding."""
+    """بررسی string + DNS resolve — جلوگیری از DNS rebinding (با حد TOCTOU ذاتی)."""
     import ipaddress, socket
     if not _safe_url(url):
         return False
@@ -653,30 +656,31 @@ def _safe_url_dns(url: str) -> bool:
         return cached[0]
     try:
         infos = socket.getaddrinfo(host, None, 0, socket.SOCK_STREAM)
-        ok = all(
-            ipaddress.ip_address(i[4][0]).is_global
-            for i in infos
-        )
+        ok = all(ipaddress.ip_address(i[4][0]).is_global for i in infos)
     except Exception:
         ok = False
     _dns_cache[host] = (ok, now)
     if not ok:
         log.warning("SSRF DNS block: %s", host)
+    # سقف کش: قدیمی‌ترین‌ها حذف می‌شوند
+    if len(_dns_cache) > _DNS_CACHE_MAX:
+        for h in sorted(_dns_cache, key=lambda h: _dns_cache[h][1])[:len(_dns_cache) - _DNS_CACHE_MAX]:
+            _dns_cache.pop(h, None)
     return ok
 
 
-def _ssrf_redirect_guard(response) -> None:
-    """جلوگیری از redirect به آدرس‌های خصوصی (SSRF via redirect)."""
+async def _ssrf_redirect_guard(response) -> None:
+    """جلوگیری از redirect به آدرس‌های خصوصی — شامل DNS check."""
     if getattr(response, "is_redirect", False):
         location = (response.headers or {}).get("location", "")
         if location:
             resolved = urljoin(str(response.url), location)
-            if not _safe_url(resolved):
+            if not await asyncio.to_thread(_safe_url_dns, resolved):
                 raise ValueError(f"ریدایرکت به آدرس مجاز نیست: {resolved[:80]}")
 
 
 def _httpx(**kw) -> httpx.AsyncClient:
-    """AsyncClient با redirect guard یکپارچه."""
+    """AsyncClient با redirect guard (async) یکپارچه."""
     hooks = {"response": [_ssrf_redirect_guard]}
     return httpx.AsyncClient(event_hooks=hooks, **kw)
 
