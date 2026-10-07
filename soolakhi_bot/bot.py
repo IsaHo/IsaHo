@@ -629,23 +629,29 @@ _PRIVATE_HOST = re.compile(
 
 
 def _safe_url(url: str) -> bool:
-    """URL باید https/http باشد و به آدرس خصوصی/لوکال اشاره نکند."""
+    """URL باید https/http باشد و به آدرس خصوصی/لوکال اشاره نکند.
+    hostname یونیکود به ASCII/IDNA نرمالیزه می‌شود تا parser differential برطرف شود."""
     if not url.startswith(("http://", "https://")):
         return False
     host = (urlparse(url).hostname or "").lower()
-    return bool(host) and not _PRIVATE_HOST.match(host)
+    if not host:
+        return False
+    if not host.isascii():
+        try:
+            host = host.encode("idna").decode("ascii")
+        except (UnicodeError, UnicodeDecodeError):
+            return False
+    return not _PRIVATE_HOST.match(host)
 
 
 # کش DNS با سقف ۱۰۰۰ ورودی و ttl ۶۰ ثانیه
-# توجه: TOCTOU inherent است — DNS check و connect جدا انجام می‌شوند؛
-# دفاع قطعی در لایهٔ شبکه (firewall/VPC) است، نه application.
 _dns_cache: dict[str, tuple[bool, float]] = {}
 _DNS_TTL = 60.0
 _DNS_CACHE_MAX = 1000
 
 
 def _safe_url_dns(url: str) -> bool:
-    """بررسی string + DNS resolve — جلوگیری از DNS rebinding (با حد TOCTOU ذاتی)."""
+    """بررسی string + DNS resolve — جلوگیری از DNS rebinding."""
     import ipaddress, socket
     if not _safe_url(url):
         return False
@@ -662,7 +668,6 @@ def _safe_url_dns(url: str) -> bool:
     _dns_cache[host] = (ok, now)
     if not ok:
         log.warning("SSRF DNS block: %s", host)
-    # سقف کش: قدیمی‌ترین‌ها حذف می‌شوند
     if len(_dns_cache) > _DNS_CACHE_MAX:
         for h in sorted(_dns_cache, key=lambda h: _dns_cache[h][1])[:len(_dns_cache) - _DNS_CACHE_MAX]:
             _dns_cache.pop(h, None)
@@ -679,10 +684,33 @@ async def _ssrf_redirect_guard(response) -> None:
                 raise ValueError(f"ریدایرکت به آدرس مجاز نیست: {resolved[:80]}")
 
 
+class _SSRFGuardTransport(httpx.AsyncHTTPTransport):
+    """DNS validation درست قبل از connect — پنجرهٔ TOCTOU را به حداقل می‌رساند."""
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        import socket, ipaddress
+        host = request.url.host
+        port = request.url.port or (443 if request.url.scheme == "https" else 80)
+        try:
+            infos = await asyncio.to_thread(
+                socket.getaddrinfo, host, int(port), socket.AF_UNSPEC, socket.SOCK_STREAM
+            )
+        except Exception as e:
+            raise httpx.ConnectError(f"DNS blocked: {host}") from e
+        for info in infos:
+            ip = ipaddress.ip_address(info[4][0])
+            if not ip.is_global:
+                raise httpx.ConnectError(f"SSRF blocked: {host} → {ip}")
+        return await super().handle_async_request(request)
+
+
 def _httpx(**kw) -> httpx.AsyncClient:
-    """AsyncClient با redirect guard (async) یکپارچه."""
+    """AsyncClient با SSRFGuardTransport + redirect guard."""
     hooks = {"response": [_ssrf_redirect_guard]}
-    return httpx.AsyncClient(event_hooks=hooks, **kw)
+    return httpx.AsyncClient(
+        event_hooks=hooks,
+        transport=_SSRFGuardTransport(),
+        **kw
+    )
 
 
 # ----------------------------- دریافت هوشمند صفحه -----------------------------
