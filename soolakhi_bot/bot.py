@@ -619,6 +619,23 @@ def clean_title(t: str, site_name: str | None) -> str:
     return t
 
 
+# جلوگیری از SSRF: آدرس‌های خصوصی/محلی مجاز نیستند
+_PRIVATE_HOST = re.compile(
+    r"^(localhost|0\.0\.0\.0|127\.\d+\.\d+\.\d+|10\.\d+\.\d+\.\d+|"
+    r"192\.168\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+|"
+    r"169\.254\.\d+\.\d+|\[?::1\]?|\[?fc[0-9a-f]{2}:|\[?fd[0-9a-f]{2}:)",
+    re.I
+)
+
+
+def _safe_url(url: str) -> bool:
+    """URL باید https/http باشد و به آدرس خصوصی/لوکال اشاره نکند."""
+    if not url.startswith(("http://", "https://")):
+        return False
+    host = (urlparse(url).hostname or "").lower()
+    return bool(host) and not _PRIVATE_HOST.match(host)
+
+
 # ----------------------------- دریافت هوشمند صفحه -----------------------------
 # بعضی سایت‌ها جلوی ربات‌ها را می‌گیرند (Cloudflare، DDoS-Guard، صفحهٔ «Just a moment» یا 403).
 # در این حالت همان صفحه با شبیه‌سازی کامل مرورگر کروم (curl_cffi) دوباره گرفته می‌شود و
@@ -653,6 +670,8 @@ def _stat(domain, key, code=None):
 
 
 async def _curl_get(url, referer=None):
+    if not _safe_url(url):
+        raise ValueError(f"URL مجاز نیست: {url[:80]}")
     from types import SimpleNamespace
     r = await _curl().get(url, headers={"Referer": referer} if referer else None)
     return SimpleNamespace(status_code=r.status_code, text=r.text, content=r.content, url=str(r.url),
@@ -661,6 +680,8 @@ async def _curl_get(url, referer=None):
 
 async def smart_get(c, url, referer=None):
     """صفحه را می‌گیرد؛ اگر سایت جلوی ربات را گرفت، با شبیه‌سازی مرورگر دوباره امتحان می‌کند."""
+    if not _safe_url(url):
+        raise ValueError(f"URL مجاز نیست: {url[:80]}")
     dom = host_of(url)
     if dom not in IMPERSONATE:
         try:
@@ -1287,7 +1308,7 @@ CHUNK = 2 * 2**20  # هر تکه 2MB
 async def http_download(url: str, referer: str, dest_dir: str, limit_mb: int, depth=0, prog=None):
     """دانلود مستقیم تکه‌تکه با Range (بعضی CDNها مثل takcdn اتصال طولانی را قطع می‌کنند
     ولی درخواست‌های کوچک Range را جواب می‌دهند). اگر HTML برگشت، لینک ویدیو را از آن درمی‌آورد."""
-    if not url.startswith(("http://", "https://")):
+    if not _safe_url(url):
         return None
     hdr = {**HEADERS, "Referer": referer}
     async with httpx.AsyncClient(headers=hdr, follow_redirects=True, timeout=httpx.Timeout(30, read=60)) as c:
@@ -1392,8 +1413,8 @@ async def ytdlp_download(url: str, referer: str, dest_dir: str, prog=None):
             "--user-agent", HEADERS["User-Agent"], "--referer", referer,
             "--add-header", "Accept-Language:en-US,en;q=0.9",
             "--retries", "5", "--extractor-retries", "3", "-o", out]
-    if not url.startswith(("http://", "https://")):
-        raise RuntimeError(f"URL نامعتبر: {url[:80]}")
+    if not _safe_url(url):
+        raise RuntimeError(f"URL نامعتبر یا خصوصی: {url[:80]}")
     err = b""
     for extra in (["--impersonate", "chrome124"], ["--impersonate", "chrome"], []):  # chrome124 برای Cloudflare
         code, err = await _run_ytdlp([*base, *extra, url], prog)
