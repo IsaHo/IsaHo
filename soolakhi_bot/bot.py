@@ -1260,16 +1260,20 @@ async def _download_send_gif(chat_id: int, gid: str, bot):
         msg = await bot.send_message(chat_id, "⏳ در حال دانلود GIF ...")
         with tempfile.TemporaryDirectory() as tmp:
             path = None
+            limit_mb = 2000 if LOCAL_API else 50
             # ۱) دانلود مستقیم (Tenor/Giphy/سایت‌های دارای URL مستقیم)
             direct = g.get("url", "")
-            if direct and direct.startswith("http"):
+            if direct and _safe_url(direct):
                 try:
-                    path = await http_download(direct, g.get("page") or direct, tmp, 50)
+                    path = await http_download(direct, g.get("page") or direct, tmp, limit_mb)
                 except Exception:
                     path = None
             # ۲) yt-dlp روی page URL (برای سایت‌هایی که URL مستقیم ندارن)
             if not path:
                 yt_url = g.get("page") or direct
+                if not yt_url or not _safe_url(yt_url):
+                    await msg.edit_text("❌ دانلود GIF ناموفق.")
+                    return
                 if yt_url:
                     proc = await asyncio.create_subprocess_exec(
                         "yt-dlp", "-q", "--no-playlist", "--no-warnings",
