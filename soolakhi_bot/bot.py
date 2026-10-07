@@ -27,7 +27,7 @@ FAV_FILE = os.path.join(BASE_DIR, "favorites.json")
 SITES_FILE = os.path.join(BASE_DIR, "sites.json")
 BLOCK_FILE = os.path.join(BASE_DIR, "blocked.json")
 
-VID_EXTS = "mp4|mkv|webm|mov|avi|m4v|m3u8|mpd|flv|wmv|3gp|ts|ogv|mpg|mpeg"
+VID_EXTS = "mp4|mkv|webm|mov|avi|m4v|m3u8|mpd|flv|wmv|3gp|ts|ogv|mpg|mpeg|gif|gifv"
 IMG_EXTS = "jpg|jpeg|png|gif|webp|avif|bmp|svg|jfif"
 VIDEO_EXT = re.compile(rf"\.({VID_EXTS})(\?|$)", re.I)
 IMG_EXT = re.compile(rf"\.({IMG_EXTS})(\?|$)", re.I)
@@ -1125,56 +1125,98 @@ async def send_card(chat_id, i, v, ctx):
 
 # ----------------------------- 🎞 GIF -----------------------------
 
+async def _tenor_search(query: str, limit: int, source: str) -> list[str]:
+    """Tenor JSON API — بدون yt-dlp، URL مستقیم GIF/MP4."""
+    url = (f"https://tenor.com/backend/search?tag={quote_plus(query)}"
+           f"&locale=en&component=unauth_search&contentfilter=medium&limit={limit}")
+    try:
+        async with _httpx(headers=HEADERS, follow_redirects=True, timeout=15) as c:
+            r = await c.get(url)
+        if r.status_code != 200:
+            return []
+        data = r.json()
+    except Exception:
+        return []
+    gids = []
+    for item in data.get("results", []):
+        media = item.get("media_formats", {})
+        direct = (media.get("mp4", {}).get("url") or media.get("gif", {}).get("url")
+                  or media.get("tinygif", {}).get("url"))
+        if not direct:
+            continue
+        thumb = media.get("tinygif", {}).get("url") or media.get("nanogif", {}).get("url") or ""
+        page = f"https://tenor.com/view/{item.get('id', '')}"
+        gid = hashlib.md5(page.encode()).hexdigest()[:12]
+        GIF_CACHE[gid] = {"url": direct, "page": page,
+                           "title": (item.get("content_description") or query)[:200],
+                           "thumb": thumb, "source": source}
+        gids.append(gid)
+    return gids
+
+
+async def _giphy_search(query: str, limit: int, source: str) -> list[str]:
+    """Giphy JSON API — URL مستقیم MP4/GIF."""
+    url = (f"https://api.giphy.com/v1/gifs/search"
+           f"?api_key=dc6zaTOxFJmzC&q={quote_plus(query)}&limit={limit}&rating=r")
+    try:
+        async with _httpx(headers=HEADERS, follow_redirects=True, timeout=15) as c:
+            r = await c.get(url)
+        if r.status_code != 200:
+            return []
+        data = r.json()
+    except Exception:
+        return []
+    gids = []
+    for item in data.get("data", []):
+        imgs = item.get("images", {})
+        direct = (imgs.get("original", {}).get("mp4") or imgs.get("original", {}).get("url")
+                  or imgs.get("downsized", {}).get("url"))
+        thumb = imgs.get("fixed_height_small", {}).get("url") or imgs.get("downsized_small", {}).get("url") or ""
+        if not direct:
+            continue
+        page = item.get("url", direct)
+        gid = hashlib.md5(page.encode()).hexdigest()[:12]
+        GIF_CACHE[gid] = {"url": direct, "page": page,
+                           "title": (item.get("title") or query)[:200],
+                           "thumb": thumb, "source": source}
+        gids.append(gid)
+    return gids
+
+
 async def _gif_search(query: str, limit: int = 8,
                        only_site: str | None = None) -> list[str]:
-    """جستجو در GIF_SITES: سایت‌های با search template → yt-dlp | بقیه → SearchCrawler."""
+    """جستجو در GIF_SITES با API برای Tenor/Giphy و SearchCrawler برای سایت‌های دلخواه."""
     gids: list[str] = []
     sites = {k: v for k, v in GIF_SITES.items() if only_site is None or k == only_site}
     for sid, site in sites.items():
         remaining = limit - len(gids)
         if remaining <= 0:
             break
-        tmpl = site.get("search", "")
-        if tmpl:  # yt-dlp (Tenor/Giphy و مشابه)
-            src_url = tmpl.format(q=quote_plus(query))
-            try:
-                proc = await asyncio.create_subprocess_exec(
-                    "yt-dlp", "--flat-playlist", "--dump-json", "--no-warnings",
-                    "--playlist-items", f"1-{remaining}",
-                    src_url,
-                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
-                )
-                try:
-                    out, _ = await asyncio.wait_for(proc.communicate(), 30)
-                except asyncio.TimeoutError:
-                    proc.kill(); continue
-                for line in out.splitlines():
-                    try:
-                        d = json.loads(line)
-                        page = d.get("webpage_url") or d.get("url") or ""
-                        if not page.startswith("http"):
-                            continue
-                        gid = hashlib.md5(page.encode()).hexdigest()[:12]
-                        GIF_CACHE[gid] = {"url": page, "title": (d.get("title") or query)[:200],
-                                           "thumb": d.get("thumbnail"), "source": site["name"]}
-                        gids.append(gid)
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-        else:  # سایت دلخواه → SearchCrawler
-            sc = SearchCrawler(query, [site["url"]])
-            try:
-                found = await asyncio.wait_for(sc.next_batch(), 60)
-                for i in found[:remaining]:
-                    v = VIDEOS.get(i) or {}
-                    gid = hashlib.md5((v.get("page") or i).encode()).hexdigest()[:12]
-                    GIF_CACHE[gid] = {"url": v.get("page", ""), "title": v.get("title", query)[:200],
-                                       "thumb": v.get("image"), "source": site["name"]}
-                    if gid not in gids:
-                        gids.append(gid)
-            except Exception:
-                pass
+        url = site["url"]
+        name = site["name"]
+        # Tenor و Giphy از API مستقیم
+        if "tenor.com" in url:
+            gids.extend(await _tenor_search(query, remaining, name))
+            continue
+        if "giphy.com" in url:
+            gids.extend(await _giphy_search(query, remaining, name))
+            continue
+        # سایت دلخواه → SearchCrawler (gif در VID_EXTS هست)
+        sc = SearchCrawler(query, [url])
+        try:
+            found = await asyncio.wait_for(sc.next_batch(), 60)
+            for i in found[:remaining]:
+                v = VIDEOS.get(i) or {}
+                page_url = v.get("page", "")
+                direct_url = v.get("video") or page_url
+                gid = hashlib.md5(page_url.encode() if page_url else i.encode()).hexdigest()[:12]
+                GIF_CACHE[gid] = {"url": direct_url, "page": page_url,
+                                   "title": v.get("title", query)[:200],
+                                   "thumb": v.get("image"), "source": name}
+                if gid not in gids:
+                    gids.append(gid)
+        except Exception:
+            pass
     if len(GIF_CACHE) > GIF_CACHE_MAX:
         for k in list(GIF_CACHE)[:len(GIF_CACHE) - GIF_CACHE_MAX]:
             GIF_CACHE.pop(k, None)
@@ -1217,32 +1259,44 @@ async def _download_send_gif(chat_id: int, gid: str, bot):
     try:
         msg = await bot.send_message(chat_id, "⏳ در حال دانلود GIF ...")
         with tempfile.TemporaryDirectory() as tmp:
-            proc = await asyncio.create_subprocess_exec(
-                "yt-dlp", "-q", "--no-playlist", "--no-warnings",
-                "-f", "gif/mp4/best", "-o", os.path.join(tmp, "gif.%(ext)s"),
-                g["url"],
-                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
-            )
-            try:
-                _, err = await asyncio.wait_for(proc.communicate(), 120)
-            except asyncio.TimeoutError:
-                proc.kill()
-                await msg.edit_text("❌ دانلود GIF timeout شد.")
-                return
-            files = [f for f in os.listdir(tmp) if not f.endswith((".part", ".ytdl"))]
-            if not files:
+            path = None
+            # ۱) دانلود مستقیم (Tenor/Giphy/سایت‌های دارای URL مستقیم)
+            direct = g.get("url", "")
+            if direct and direct.startswith("http"):
+                try:
+                    path = await http_download(direct, g.get("page") or direct, tmp, 50)
+                except Exception:
+                    path = None
+            # ۲) yt-dlp روی page URL (برای سایت‌هایی که URL مستقیم ندارن)
+            if not path:
+                yt_url = g.get("page") or direct
+                if yt_url:
+                    proc = await asyncio.create_subprocess_exec(
+                        "yt-dlp", "-q", "--no-playlist", "--no-warnings",
+                        "-f", "gif/mp4/best", "-o", os.path.join(tmp, "gif.%(ext)s"),
+                        yt_url,
+                        stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
+                    )
+                    try:
+                        _, err = await asyncio.wait_for(proc.communicate(), 120)
+                    except asyncio.TimeoutError:
+                        proc.kill()
+                        await msg.edit_text("❌ دانلود GIF timeout شد.")
+                        return
+                    files = [f for f in os.listdir(tmp) if not f.endswith((".part", ".ytdl"))]
+                    path = os.path.join(tmp, files[0]) if files else None
+            if not path:
                 await msg.edit_text("❌ دانلود GIF ناموفق.")
-                log.warning("gif dl failed: %s", err.decode(errors="ignore")[-200:])
                 return
             try:
                 await msg.delete()
             except Exception:
                 pass
-            with open(os.path.join(tmp, files[0]), "rb") as f:
+            with open(path, "rb") as f:
                 try:
                     await bot.send_animation(chat_id, f, caption=g["title"][:500])
                 except Exception:
-                    with open(os.path.join(tmp, files[0]), "rb") as f2:
+                    with open(path, "rb") as f2:
                         await bot.send_document(chat_id, f2, caption=g["title"][:500])
     finally:
         _GIF_DL_ACTIVE.pop(chat_id, None)
