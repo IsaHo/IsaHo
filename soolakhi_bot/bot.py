@@ -58,6 +58,13 @@ FILE_HOSTS = re.compile(r"(nitroflare|rapidgator|uploaded|katfile|ddownload|turb
 CAPTCHA_HOSTS = re.compile(r"(ouo\.(io|press)|shrinkme|shrink\.|adf\.ly|linkvertise|exe\.io|exey\.io|"
                            r"shorte\.st|bc\.vc|clk\.sh|cuty\.io|gplinks|droplink|za\.gl|fc\.lc)", re.I)
 PLAYER_HINT = re.compile(r"(player|vid|embed|stream|watch|play|tube|dood|filemoon|voe|streamtape)", re.I)
+# پلیرهای embed شناخته‌شده: برای اینها http_download کارساز نیست → مستقیم yt-dlp
+KNOWN_PLAYERS = re.compile(
+    r"(dood(?:stream)?|streamtape|filemoon|voe\.sx?|upstream|mixdrop|fembed|"
+    r"streamlare|vidcloud|mcloud|streamhub|vupload|streamzz|supervideo|"
+    r"dailymotion|ok\.ru|vimeo\.com|youtu\.?be|vidhide|vidmoly|"
+    r"gofile\.io|sendvid|odnoklassniki|aparat\.com|nazar)\.", re.I
+)
 CARD_HINTS: dict[str, dict] = {}  # page url -> {title, image, dur, q} از کارت‌های صفحه لیست
 PAGE_META: dict[str, dict] = {}  # page url -> {dur, q}: مدت (ثانیه) و کیفیت ویدیوی صفحه
 
@@ -506,8 +513,13 @@ def parse_page(url: str, html: str, domain: str):
     # 4) لینک‌های ویدیو داخل جاوااسکریپت/JSON (مثل jwplayer, videojs, "file": "...")
     for m in re.findall(rf"""(https?:)?(\\?/\\?/[^"'\s<>]+?\.(?:{VID_EXTS})(?:\?[^"'\s<>]*)?)["'\s]""", html, re.I):
         videos.add(J((m[0] or "https:") + m[1].replace("\\/", "/")))
-    for m in re.findall(r"""["'](?:file|src|source|url|video_url|mp4|hls)["']\s*:\s*["']([^"']+)["']""", html):
+    for m in re.findall(r"""["'](?:file|src|source|url|video_url|mp4|hls|stream|m3u8)["']\s*:\s*["']([^"']+)["']""", html):
         if VIDEO_EXT.search(m): videos.add(J(m.replace("\\/", "/")))
+    # الگوهای رایج پلیرهای سفارشی (takcdn، آپارات، و مشابه)
+    for m in re.finditer(
+            r"""(?:sources?|playlist|videoUrl|videoSrc|hlsUrl|file)\s*[:=]\s*['\"]([^'"]{10,}\.(?:m3u8|mp4|mpd)[^'\"]*)['\"]""",
+            html, re.I):
+        videos.add(J(m.group(1).replace("\\/", "/")))
 
     # 5) iframe پلیرها
     iframes = [J(u) for f in soup.find_all("iframe") for u in _attr_urls(f, ["src", "data-src"])
@@ -623,7 +635,7 @@ def _curl():
     global _CURL
     if _CURL is None:
         from curl_cffi.requests import AsyncSession
-        _CURL = AsyncSession(impersonate="chrome", timeout=25, allow_redirects=True, max_clients=16)
+        _CURL = AsyncSession(impersonate="chrome124", timeout=30, allow_redirects=True, max_clients=16)
     return _CURL
 
 
@@ -778,9 +790,12 @@ async def process_page(url, html, domain, sent: set, found: list, query_words=No
             if True:
                 title, image, videos, iframes, links = await asyncio.to_thread(parse_page, url, html, domain)
                 if not videos and iframes:
-                    videos = {url}  # yt-dlp خودش از صفحه/iframe استخراج می‌کند
+                    # پلیر embed شناخته‌شده اول؛ در غیر این صورت خود صفحه
+                    player = next((u for u in iframes if KNOWN_PLAYERS.search(urlparse(u).netloc)), None)
+                    target = player or url
+                    videos = {target}
                     if not image:
-                        t2, img2 = await ytdlp_info(url)
+                        t2, img2 = await ytdlp_info(target)
                         title, image = t2 or title, img2 or image
                 hint = CARD_HINTS.pop(url, {})
                 pm = PAGE_META.pop(url, {})
@@ -1280,7 +1295,7 @@ async def http_download(url: str, referer: str, dest_dir: str, limit_mb: int, de
         if "text/html" in ctype:
             if depth:
                 return None
-            _, _, videos, _, _ = parse_page(str(r.url), r.text, urlparse(str(r.url)).netloc.removeprefix("www."))
+            _, _, videos, _, _ = await asyncio.to_thread(parse_page, str(r.url), r.text, urlparse(str(r.url)).netloc.removeprefix("www."))
             for u in videos:
                 if not re.search(r"\.(m3u8|mpd)(\?|$)", u, re.I):
                     p = await http_download(u, str(r.url), dest_dir, limit_mb, depth + 1, prog)
@@ -1370,11 +1385,13 @@ async def ytdlp_download(url: str, referer: str, dest_dir: str, prog=None):
     out = os.path.join(dest_dir, "video.%(ext)s")
     base = ["yt-dlp", "-q", "--progress", "--newline", "--progress-template",
             "download:P %(progress.downloaded_bytes)s %(progress.total_bytes)s %(progress.total_bytes_estimate)s",
-            "--no-playlist", "-f", "b[ext=mp4]/bv*+ba/b", "--merge-output-format", "mp4",
+            "--no-playlist", "-f", "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/b",
+            "--merge-output-format", "mp4", "--no-check-certificates",
             "--user-agent", HEADERS["User-Agent"], "--referer", referer,
-            "--add-header", "Accept-Language:en-US,en;q=0.9", "--retries", "5", "-o", out]
+            "--add-header", "Accept-Language:en-US,en;q=0.9",
+            "--retries", "5", "--extractor-retries", "3", "-o", out]
     err = b""
-    for extra in (["--impersonate", "chrome"], []):  # impersonate نیاز به curl_cffi دارد
+    for extra in (["--impersonate", "chrome124"], ["--impersonate", "chrome"], []):  # chrome124 برای Cloudflare
         code, err = await _run_ytdlp([*base, *extra, url], prog)
         files = [f for f in os.listdir(dest_dir) if not f.endswith((".part", ".ytdl"))]
         if code == 0 and files:
@@ -1388,18 +1405,22 @@ async def download_and_send(chat_id, v, ctx, prog=None):
     prog["phase"] = "dl"
     with tempfile.TemporaryDirectory() as tmp:
         path, errors = None, []
-        for attempt in range(2):  # 1) دانلود مستقیم
-            try:
-                path = await http_download(v["video"], v["page"], tmp, limit, prog=prog)
-                break
-            except RuntimeError as e:
-                if "محدودیت" in str(e):
-                    raise
-                errors.append(f"direct: {e}")
-                break
-            except Exception as e:
-                errors.append(f"direct#{attempt + 1}: {type(e).__name__}: {e}")
-                await asyncio.sleep(2)
+        # پلیر embed یا URL = صفحه → http_download کارساز نیست، مستقیم yt-dlp
+        is_player = bool(KNOWN_PLAYERS.search(v["video"]) or
+                         v["video"].rstrip("/") == v["page"].rstrip("/"))
+        if not is_player:
+            for attempt in range(2):  # 1) دانلود مستقیم
+                try:
+                    path = await http_download(v["video"], v["page"], tmp, limit, prog=prog)
+                    break
+                except RuntimeError as e:
+                    if "محدودیت" in str(e):
+                        raise
+                    errors.append(f"direct: {e}")
+                    break
+                except Exception as e:
+                    errors.append(f"direct#{attempt + 1}: {type(e).__name__}: {e}")
+                    await asyncio.sleep(2)
         for target in (v["video"], v["page"]):  # 2) yt-dlp روی لینک ویدیو، بعد روی صفحه
             if path:
                 break
