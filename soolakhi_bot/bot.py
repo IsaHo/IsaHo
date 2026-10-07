@@ -1271,7 +1271,7 @@ async def _download_send_gif(chat_id: int, gid: str, bot):
             # ۲) yt-dlp روی page URL (برای سایت‌هایی که URL مستقیم ندارن)
             if not path:
                 yt_url = g.get("page") or direct
-                if not yt_url or not _safe_url(yt_url):
+                if not yt_url or not await asyncio.to_thread(_safe_url_dns, yt_url):
                     await msg.edit_text("❌ دانلود GIF ناموفق.")
                     return
                 if yt_url:
