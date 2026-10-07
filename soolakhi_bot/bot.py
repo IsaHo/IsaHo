@@ -636,6 +636,35 @@ def _safe_url(url: str) -> bool:
     return bool(host) and not _PRIVATE_HOST.match(host)
 
 
+# کش DNS برای جلوگیری از lookup تکراری (ttl: ۶۰ ثانیه)
+_dns_cache: dict[str, tuple[bool, float]] = {}
+_DNS_TTL = 60.0
+
+
+def _safe_url_dns(url: str) -> bool:
+    """بررسی string + DNS resolve (در صورت نیاز) — جلوگیری از DNS rebinding."""
+    import ipaddress, socket
+    if not _safe_url(url):
+        return False
+    host = (urlparse(url).hostname or "").lower()
+    now = time.time()
+    cached = _dns_cache.get(host)
+    if cached and now - cached[1] < _DNS_TTL:
+        return cached[0]
+    try:
+        infos = socket.getaddrinfo(host, None, 0, socket.SOCK_STREAM)
+        ok = all(
+            ipaddress.ip_address(i[4][0]).is_global
+            for i in infos
+        )
+    except Exception:
+        ok = False
+    _dns_cache[host] = (ok, now)
+    if not ok:
+        log.warning("SSRF DNS block: %s", host)
+    return ok
+
+
 def _ssrf_redirect_guard(response) -> None:
     """جلوگیری از redirect به آدرس‌های خصوصی (SSRF via redirect)."""
     if getattr(response, "is_redirect", False):
@@ -685,21 +714,23 @@ def _stat(domain, key, code=None):
         st["codes"][str(code)] = st["codes"].get(str(code), 0) + 1
 
 
-async def _curl_get(url, referer=None):
-    if not _safe_url(url):
+async def _curl_get(url, referer=None, _hops=0):
+    """curl_cffi با redirect دستی تا _safe_url قبل از هر hop اجرا شود (نه بعد)."""
+    if not await asyncio.to_thread(_safe_url_dns, url):
         raise ValueError(f"URL مجاز نیست: {url[:80]}")
     from types import SimpleNamespace
-    r = await _curl().get(url, headers={"Referer": referer} if referer else None)
-    final = str(r.url)
-    if not _safe_url(final):
-        raise ValueError(f"ریدایرکت به آدرس مجاز نیست: {final[:80]}")
-    return SimpleNamespace(status_code=r.status_code, text=r.text, content=r.content, url=final,
+    r = await _curl().get(url, headers={"Referer": referer} if referer else None, allow_redirects=False)
+    if r.status_code in (301, 302, 303, 307, 308) and _hops < 10:
+        location = dict(r.headers or {}).get("location", "")
+        if location:
+            return await _curl_get(urljoin(url, location), referer, _hops + 1)
+    return SimpleNamespace(status_code=r.status_code, text=r.text, content=r.content, url=str(r.url),
                            headers={k.lower(): v for k, v in r.headers.items()})
 
 
 async def smart_get(c, url, referer=None):
     """صفحه را می‌گیرد؛ اگر سایت جلوی ربات را گرفت، با شبیه‌سازی مرورگر دوباره امتحان می‌کند."""
-    if not _safe_url(url):
+    if not await asyncio.to_thread(_safe_url_dns, url):
         raise ValueError(f"URL مجاز نیست: {url[:80]}")
     dom = host_of(url)
     if dom not in IMPERSONATE:
@@ -1327,7 +1358,7 @@ CHUNK = 2 * 2**20  # هر تکه 2MB
 async def http_download(url: str, referer: str, dest_dir: str, limit_mb: int, depth=0, prog=None):
     """دانلود مستقیم تکه‌تکه با Range (بعضی CDNها مثل takcdn اتصال طولانی را قطع می‌کنند
     ولی درخواست‌های کوچک Range را جواب می‌دهند). اگر HTML برگشت، لینک ویدیو را از آن درمی‌آورد."""
-    if not _safe_url(url):
+    if not await asyncio.to_thread(_safe_url_dns, url):
         return None
     hdr = {**HEADERS, "Referer": referer}
     async with _httpx(headers=hdr, follow_redirects=True, timeout=httpx.Timeout(30, read=60)) as c:
@@ -1432,7 +1463,7 @@ async def ytdlp_download(url: str, referer: str, dest_dir: str, prog=None):
             "--user-agent", HEADERS["User-Agent"], "--referer", referer,
             "--add-header", "Accept-Language:en-US,en;q=0.9",
             "--retries", "5", "--extractor-retries", "3", "-o", out]
-    if not _safe_url(url):
+    if not await asyncio.to_thread(_safe_url_dns, url):
         raise RuntimeError(f"URL نامعتبر یا خصوصی: {url[:80]}")
     err = b""
     for extra in (["--impersonate", "chrome124"], ["--impersonate", "chrome"], []):  # chrome124 برای Cloudflare
