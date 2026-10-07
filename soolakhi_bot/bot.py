@@ -636,6 +636,22 @@ def _safe_url(url: str) -> bool:
     return bool(host) and not _PRIVATE_HOST.match(host)
 
 
+def _ssrf_redirect_guard(response) -> None:
+    """جلوگیری از redirect به آدرس‌های خصوصی (SSRF via redirect)."""
+    if getattr(response, "is_redirect", False):
+        location = (response.headers or {}).get("location", "")
+        if location:
+            resolved = urljoin(str(response.url), location)
+            if not _safe_url(resolved):
+                raise ValueError(f"ریدایرکت به آدرس مجاز نیست: {resolved[:80]}")
+
+
+def _httpx(**kw) -> httpx.AsyncClient:
+    """AsyncClient با redirect guard یکپارچه."""
+    hooks = {"response": [_ssrf_redirect_guard]}
+    return httpx.AsyncClient(event_hooks=hooks, **kw)
+
+
 # ----------------------------- دریافت هوشمند صفحه -----------------------------
 # بعضی سایت‌ها جلوی ربات‌ها را می‌گیرند (Cloudflare، DDoS-Guard، صفحهٔ «Just a moment» یا 403).
 # در این حالت همان صفحه با شبیه‌سازی کامل مرورگر کروم (curl_cffi) دوباره گرفته می‌شود و
@@ -674,7 +690,10 @@ async def _curl_get(url, referer=None):
         raise ValueError(f"URL مجاز نیست: {url[:80]}")
     from types import SimpleNamespace
     r = await _curl().get(url, headers={"Referer": referer} if referer else None)
-    return SimpleNamespace(status_code=r.status_code, text=r.text, content=r.content, url=str(r.url),
+    final = str(r.url)
+    if not _safe_url(final):
+        raise ValueError(f"ریدایرکت به آدرس مجاز نیست: {final[:80]}")
+    return SimpleNamespace(status_code=r.status_code, text=r.text, content=r.content, url=final,
                            headers={k.lower(): v for k, v in r.headers.items()})
 
 
@@ -788,7 +807,7 @@ class Crawler:
         found = []
         self.seen.update(self.hi)
         limits = httpx.Limits(max_connections=CONCURRENCY, max_keepalive_connections=CONCURRENCY)
-        async with httpx.AsyncClient(headers=HEADERS, follow_redirects=True, timeout=20, limits=limits) as c:
+        async with _httpx(headers=HEADERS, follow_redirects=True, timeout=20, limits=limits) as c:
             while (self.hi or self.mid or self.lo) and self.pages < (self.max_pages or MAX_PAGES) \
                     and len(found) < (self.batch or BATCH):
                 batch = []
@@ -902,7 +921,7 @@ class SearchCrawler:
 
     async def next_batch(self):
         found = []
-        async with httpx.AsyncClient(headers=HEADERS, follow_redirects=True, timeout=25) as c:
+        async with _httpx(headers=HEADERS, follow_redirects=True, timeout=25) as c:
             if not self.ready:
                 await self._prepare(c)
             async def one(url):
@@ -969,7 +988,7 @@ def site_root(url: str) -> str:
 
 async def fetch_image(url: str, referer: str):
     """عکس را خودمان (با Referer) می‌گیریم و به JPEG تبدیل می‌کنیم؛ فقط در RAM و چند صد KB."""
-    async with httpx.AsyncClient(headers={**HEADERS, "Referer": referer}, follow_redirects=True, timeout=20) as c:
+    async with _httpx(headers={**HEADERS, "Referer": referer}, follow_redirects=True, timeout=20) as c:
         r = await smart_get(c, url, referer)
     if r.status_code >= 400 or not r.content or r.content[:15].lstrip().startswith((b"<", b"{")):
         r = await _curl_get(url, referer)        # hotlink بسته / صفحهٔ HTML به جای عکس → با مرورگر
@@ -1311,7 +1330,7 @@ async def http_download(url: str, referer: str, dest_dir: str, limit_mb: int, de
     if not _safe_url(url):
         return None
     hdr = {**HEADERS, "Referer": referer}
-    async with httpx.AsyncClient(headers=hdr, follow_redirects=True, timeout=httpx.Timeout(30, read=60)) as c:
+    async with _httpx(headers=hdr, follow_redirects=True, timeout=httpx.Timeout(30, read=60)) as c:
         r = await c.get(url, headers={"Range": "bytes=0-1023"})
         r.raise_for_status()
         ctype = r.headers.get("content-type", "").lower()
@@ -1936,7 +1955,7 @@ async def doctor_site(site) -> dict:
     bad = next((x for x in res["videos"] if not (x["title_ok"] and x["img_ok"])), None)
     if bad:
         urls.append(("video", bad["page"]))
-    async with httpx.AsyncClient(headers=HEADERS, follow_redirects=True, timeout=25) as c:
+    async with _httpx(headers=HEADERS, follow_redirects=True, timeout=25) as c:
         for kind, u in urls:
             try:
                 r = await smart_get(c, u)
@@ -2042,7 +2061,7 @@ async def cmd_debug(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not allowed(update) or not ctx.args:
         return await update.message.reply_text("استفاده: /debug https://site.com/video-page")
     url = ctx.args[0]
-    async with httpx.AsyncClient(headers=HEADERS, follow_redirects=True, timeout=30) as c:
+    async with _httpx(headers=HEADERS, follow_redirects=True, timeout=30) as c:
         r = await smart_get(c, url)
     title, image, videos, iframes, links = parse_page(url, r.text, urlparse(url).netloc.removeprefix("www."))
     mode = "🛡 مرورگر" if host_of(url) in IMPERSONATE else "عادی"
