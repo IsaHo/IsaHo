@@ -44,6 +44,7 @@ GIF_SOURCES = [
 ]
 GIF_CACHE: dict[str, dict] = {}
 GIF_CACHE_MAX = 5000
+_GIF_DL_ACTIVE: dict[int, bool] = {}  # chat_id -> در حال دانلود
 PAGE = 10  # تعداد آیتم در هر صفحه لیست‌ها
 START_TIME = __import__("time").time()
 
@@ -1183,39 +1184,46 @@ async def _send_gif_card(chat_id: int, gid: str, bot):
 
 
 async def _download_send_gif(chat_id: int, gid: str, bot):
+    if _GIF_DL_ACTIVE.get(chat_id):
+        await bot.send_message(chat_id, "⏳ یک دانلود GIF در جریانه، صبر کن.")
+        return
     g = GIF_CACHE.get(gid)
     if not g:
         await bot.send_message(chat_id, "❌ GIF منقضی شده؛ دوباره سرچ کن.")
         return
+    _GIF_DL_ACTIVE[chat_id] = True
     msg = await bot.send_message(chat_id, "⏳ در حال دانلود GIF ...")
-    with tempfile.TemporaryDirectory() as tmp:
-        proc = await asyncio.create_subprocess_exec(
-            "yt-dlp", "-q", "--no-playlist", "--no-warnings",
-            "-f", "gif/mp4/best", "-o", os.path.join(tmp, "gif.%(ext)s"),
-            g["url"],
-            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
-        )
-        try:
-            _, err = await asyncio.wait_for(proc.communicate(), 120)
-        except asyncio.TimeoutError:
-            proc.kill()
-            await msg.edit_text("❌ دانلود GIF timeout شد.")
-            return
-        files = [f for f in os.listdir(tmp) if not f.endswith((".part", ".ytdl"))]
-        if not files:
-            await msg.edit_text("❌ دانلود GIF ناموفق.")
-            log.warning("gif dl failed: %s", err.decode(errors="ignore")[-200:])
-            return
-        try:
-            await msg.delete()
-        except Exception:
-            pass
-        with open(os.path.join(tmp, files[0]), "rb") as f:
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            proc = await asyncio.create_subprocess_exec(
+                "yt-dlp", "-q", "--no-playlist", "--no-warnings",
+                "-f", "gif/mp4/best", "-o", os.path.join(tmp, "gif.%(ext)s"),
+                g["url"],
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
+            )
             try:
-                await bot.send_animation(chat_id, f, caption=g["title"][:500])
+                _, err = await asyncio.wait_for(proc.communicate(), 120)
+            except asyncio.TimeoutError:
+                proc.kill()
+                await msg.edit_text("❌ دانلود GIF timeout شد.")
+                return
+            files = [f for f in os.listdir(tmp) if not f.endswith((".part", ".ytdl"))]
+            if not files:
+                await msg.edit_text("❌ دانلود GIF ناموفق.")
+                log.warning("gif dl failed: %s", err.decode(errors="ignore")[-200:])
+                return
+            try:
+                await msg.delete()
             except Exception:
-                with open(os.path.join(tmp, files[0]), "rb") as f2:
-                    await bot.send_document(chat_id, f2, caption=g["title"][:500])
+                pass
+            with open(os.path.join(tmp, files[0]), "rb") as f:
+                try:
+                    await bot.send_animation(chat_id, f, caption=g["title"][:500])
+                except Exception:
+                    with open(os.path.join(tmp, files[0]), "rb") as f2:
+                        await bot.send_document(chat_id, f2, caption=g["title"][:500])
+    finally:
+        _GIF_DL_ACTIVE.pop(chat_id, None)
 
 
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
