@@ -46,16 +46,6 @@ GIFMENU = ReplyKeyboardMarkup(
     resize_keyboard=True
 )
 GIF_SITES_FILE = os.path.join(BASE_DIR, "gif_sites.json")
-_DEFAULT_GIF_SITES = {
-    hashlib.md5(b"tenor").hexdigest()[:12]:  {"name": "Tenor", "url": "https://tenor.com/",
-                                               "search": "https://tenor.com/search/{q}-gifs"},
-    hashlib.md5(b"giphy").hexdigest()[:12]:  {"name": "Giphy", "url": "https://giphy.com/",
-                                               "search": "https://giphy.com/search/{q}"},
-}
-GIF_SITES: dict = load_json(GIF_SITES_FILE, None)
-if GIF_SITES is None:
-    GIF_SITES = dict(_DEFAULT_GIF_SITES)
-    save_json(GIF_SITES_FILE, GIF_SITES)
 GIF_CACHE: dict[str, dict] = {}
 GIF_CACHE_MAX = 5000
 _GIF_DL_ACTIVE: dict[int, bool] = {}  # chat_id -> در حال دانلود
@@ -114,6 +104,16 @@ if SITES is None:
 
 
 BLOCKED: list[str] = load_json(BLOCK_FILE, [])  # دامنه‌هایی که در جستجو نمی‌آیند
+
+GIF_SITES: dict = load_json(GIF_SITES_FILE, None)
+if GIF_SITES is None:
+    GIF_SITES = {
+        hashlib.md5(b"tenor").hexdigest()[:12]: {"name": "Tenor", "url": "https://tenor.com/",
+                                                  "search": "https://tenor.com/search/{q}-gifs"},
+        hashlib.md5(b"giphy").hexdigest()[:12]: {"name": "Giphy", "url": "https://giphy.com/",
+                                                  "search": "https://giphy.com/search/{q}"},
+    }
+    save_json(GIF_SITES_FILE, GIF_SITES)
 
 
 def host_of(url: str) -> str:
