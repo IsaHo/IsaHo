@@ -274,25 +274,14 @@ def probe_outbound(link):
         "address": parsed.hostname, "port": parsed.port, "users": [user]
     }]}, "streamSettings": stream}
 
-def run_probe(job):
-    result = {"job_id": str(job.get("id", ""))[:80], "checked_at": int(time.time())}
-    started = time.monotonic()
-    try:
-        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-        with opener.open(str(job["sub_url"]), timeout=12) as response:
-            ok = response.status == 200
-        result["sub"] = {"ok": ok, "latency_ms": round((time.monotonic() - started) * 1000),
-                         "detail": f"HTTP {response.status}"}
-    except Exception as exc:
-        result["sub"] = {"ok": False, "latency_ms": round((time.monotonic() - started) * 1000),
-                         "detail": type(exc).__name__}
+def probe_vless(link):
     process, config_path = None, os.path.join(PROBE_DIR, "probe.json")
     started = time.monotonic()
     try:
         binary = ensure_probe_xray()
         config = {"log": {"loglevel": "warning"},
                   "inbounds": [{"listen": "127.0.0.1", "port": 31999, "protocol": "socks"}],
-                  "outbounds": [probe_outbound(str(job["link"]))]}
+                  "outbounds": [probe_outbound(link)]}
         with open(config_path, "w") as stream:
             json.dump(config, stream)
         os.chmod(config_path, 0o600)
@@ -308,11 +297,11 @@ def run_probe(job):
         code = fields[0] if fields else "000"
         latency = round(float(fields[1]) * 1000) if len(fields) > 1 else round((time.monotonic() - started) * 1000)
         ok = check.returncode == 0 and code == "204"
-        result["vpn"] = {"ok": ok, "latency_ms": latency,
-                         "detail": f"HTTP {code}" if ok else (check.stderr.strip() or f"HTTP {code}")[:200]}
+        return {"ok": ok, "latency_ms": latency,
+                "detail": f"HTTP {code}" if ok else (check.stderr.strip() or f"HTTP {code}")[:200]}
     except Exception as exc:
-        result["vpn"] = {"ok": False, "latency_ms": round((time.monotonic() - started) * 1000),
-                         "detail": type(exc).__name__}
+        return {"ok": False, "latency_ms": round((time.monotonic() - started) * 1000),
+                "detail": type(exc).__name__}
     finally:
         if process and process.poll() is None:
             process.terminate()
@@ -324,6 +313,25 @@ def run_probe(job):
             os.unlink(config_path)
         except OSError:
             pass
+
+def run_probe(job):
+    result = {"job_id": str(job.get("id", ""))[:80], "checked_at": int(time.time())}
+    started = time.monotonic()
+    try:
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open(str(job["sub_url"]), timeout=12) as response:
+            ok = response.status == 200
+        result["sub"] = {"ok": ok, "latency_ms": round((time.monotonic() - started) * 1000),
+                         "detail": f"HTTP {response.status}"}
+    except Exception as exc:
+        result["sub"] = {"ok": False, "latency_ms": round((time.monotonic() - started) * 1000),
+                         "detail": type(exc).__name__}
+    result["vpn"] = probe_vless(str(job["link"]))
+    result["nodes"] = {}
+    node_jobs = job.get("nodes") if isinstance(job.get("nodes"), list) else []
+    for item in node_jobs[:16]:
+        if isinstance(item, dict) and item.get("name") and item.get("link"):
+            result["nodes"][str(item["name"])[:32]] = probe_vless(str(item["link"]))
     return result
 
 mem = dict((l.split(":")[0], int(l.split()[1])) for l in open("/proc/meminfo"))
