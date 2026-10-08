@@ -92,6 +92,7 @@ BTN_CANCEL = "❌ لغو"
 BTN_MY = "📊 حساب من"
 BTN_DASH = "📈 داشبورد"
 BTN_HEALTH = "🧭 سلامت مسیرها"
+BTN_RESILIENCE = "🛡 مرکز تاب‌آوری"
 BTN_BULK = "🧰 عملیات گروهی"
 BTN_HELP = "📱 آموزش اتصال"
 BTN_SUPPORT = "🛟 پشتیبانی هوشمند"
@@ -106,7 +107,8 @@ ADMIN_KB = ReplyKeyboardMarkup(resize_keyboard=True, keyboard=[
     [KeyboardButton(text=BTN_ADD), KeyboardButton(text=BTN_USERS)],
     [KeyboardButton(text=BTN_SEARCH), KeyboardButton(text=BTN_STATUS)],
     [KeyboardButton(text=BTN_DASH), KeyboardButton(text=BTN_HEALTH)],
-    [KeyboardButton(text=BTN_BULK), KeyboardButton(text=BTN_SHOP)],
+    [KeyboardButton(text=BTN_RESILIENCE), KeyboardButton(text=BTN_BULK)],
+    [KeyboardButton(text=BTN_SHOP)],
     [KeyboardButton(text=BTN_SETTINGS), KeyboardButton(text=BTN_BACKUP)],
     [KeyboardButton(text=BTN_BROADCAST), KeyboardButton(text=BTN_TICKETS)],
 ])
@@ -882,8 +884,9 @@ async def nodes_add(msg: Message, state: FSMContext):
 
 def node_install_text(node) -> str:
     url = (f"https://raw.githubusercontent.com/IsaHo/IsaHo/{relays.current_ref()}/vpn/node.sh")
+    relay_ips = ",".join(host for host, _ in links.relays()) or "none"
     cmd = (f"curl -fsSL {url} | bash -s https://{cfg.server_ip}:{cfg.sub_port} {node['key']} "
-           f"{nodes.cert_fingerprint()} {node.get('domain') or 'node.local'}")
+           f"{nodes.cert_fingerprint()} {node.get('domain') or 'node.local'} {relay_ips}")
     return (f"🖥 <b>نصب روی {html.escape(node['name'])} ({node['ip']})</b>\nروی متن بزنید تا کپی شود:\n\n"
             f"<code>{html.escape(cmd)}</code>\n\n⚠️ این دستور کلید محرمانه دارد؛ به کسی ندهید.")
 

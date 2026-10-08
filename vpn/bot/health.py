@@ -265,6 +265,7 @@ def ingest_relay_result(data: dict) -> None:
     for name, title, kind in (
         ("vpn", f"{label} · اتصال واقعی از ایران", "relay"),
         ("sub", f"{label} · دریافت سابسکریپشن", "sub"),
+        ("cdn", f"{label} · مسیر CDN از ایران", "cdn"),
     ):
         item = result.get(name)
         if not isinstance(item, dict) or not isinstance(item.get("ok"), bool):
@@ -321,6 +322,7 @@ def relay_job(data: dict) -> dict | None:
     return {
         "id": f"{int(now)}-{_relay_label(ip)}",
         "link": links.reality_link(user, "127.0.0.1", 443, "health-check"),
+        "cdn_link": links.cdn_link(user, tag="health-cdn"),
         "sub_url": f"http://127.0.0.1:2096/sub/{user.sub_token}",
         "nodes": [
             {
@@ -387,6 +389,7 @@ def _expected_paths() -> dict[str, tuple[str, str]]:
     for index, (host, _) in enumerate(links.relays(), 1):
         paths[f"relay:{host}:vpn"] = (f"IR{index} · اتصال واقعی از ایران", "relay")
         paths[f"relay:{host}:sub"] = (f"IR{index} · دریافت سابسکریپشن", "sub")
+        paths[f"relay:{host}:cdn"] = (f"IR{index} · مسیر CDN از ایران", "cdn")
         for node in nodes.all_nodes():
             if node.get("private", True):
                 paths[f"relay:{host}:node:{node['name']}"] = (
@@ -404,11 +407,21 @@ def current_checks() -> list[healthdb.Check]:
 def overview() -> tuple[str, object]:
     rows = current_checks()
     expected = _expected_paths()
-    present = {row.path_key for row in rows}
-    missing = [(key, *meta) for key, meta in expected.items() if key not in present]
+    customer_expected = {
+        key: meta for key, meta in expected.items() if key.startswith("relay:")
+    }
+    customer_rows = [row for row in rows if row.origin == "iran"]
+    control_rows = [row for row in rows if row.origin != "iran"]
+    present = {row.path_key for row in customer_rows}
+    missing = [
+        (key, *meta) for key, meta in customer_expected.items() if key not in present
+    ]
     value = (
-        round(sum(healthdb.path_score(row) for row in rows) / len(expected))
-        if expected and rows
+        round(
+            sum(healthdb.path_score(row) for row in customer_rows)
+            / len(customer_expected)
+        )
+        if customer_expected and customer_rows
         else None
     )
     icon, grade = _grade(value)
@@ -420,7 +433,9 @@ def overview() -> tuple[str, object]:
         )
     else:
         healthy = sum(
-            1 for row in rows if row.ok and time.time() - row.checked_at <= FRESH
+            1
+            for row in customer_rows
+            if row.ok and time.time() - row.checked_at <= FRESH
         )
         score_line = (
             f"⚪️ امتیاز کل: <b>در حال تکمیل · {len(missing)} نتیجه باقی مانده</b>"
@@ -431,11 +446,11 @@ def overview() -> tuple[str, object]:
             "🧭 <b>مرکز سلامت مسیرها</b>",
             "",
             score_line,
-            f"مسیرهای تازه و سالم: <b>{healthy} از {len(expected)}</b>",
+            f"مسیرهای واقعی مشتری از ایران: <b>{healthy} از {len(customer_expected)}</b>",
             "",
-            "<b>آخرین وضعیت مسیرها</b>",
+            "🇮🇷 <b>دید واقعی از داخل ایران</b>",
         ]
-        for row in rows:
+        for row in customer_rows:
             state_icon, state = _status(row)
             latency = f" · {row.latency_ms}ms" if row.latency_ms else ""
             lines.append(
@@ -443,9 +458,17 @@ def overview() -> tuple[str, object]:
             )
         for _, label, _ in missing:
             lines.append(f"⚪️ {html.escape(label)} — منتظر اولین تست")
+        if control_rows:
+            lines += ["", "🖥 <b>کنترل داخلی سرور فعال</b>"]
+            for row in control_rows:
+                state_icon, state = _status(row)
+                latency = f" · {row.latency_ms}ms" if row.latency_ms else ""
+                lines.append(
+                    f"{state_icon} {html.escape(row.label)} — {state}{latency} · {_age(row.checked_at)}"
+                )
         lines += [
             "",
-            "ℹ️ تست‌های IR از داخل همان سرور ایران اجرا می‌شوند؛ بقیه از سرور اصلی.",
+            "ℹ️ امتیاز بالا فقط از تست‌های واقعی IR محاسبه می‌شود؛ تست کنترل‌پلین جداست.",
         ]
         text = "\n".join(lines)
     buttons = [[("🔬 آزمایش همین حالا", "ph:run"), ("🔄 تازه‌سازی", "ph:menu")]]
@@ -507,16 +530,25 @@ async def evaluate_alerts(bot: Bot) -> None:
     for row in healthdb.latest():
         if row.path_key not in expected:
             continue
+        # A stopped relay must not repeatedly trigger recovery from an old result.
+        if time.time() - row.checked_at > FRESH:
+            continue
         state_key = f"health-alert:{row.path_key}"
         state = db.get_setting(state_key)
-        if not row.ok and healthdb.failures(row.path_key, 2) >= 2 and state != "down":
-            db.set_setting(state_key, "down")
-            await _notify(
-                bot,
-                f"🔴 <b>هشدار مسیر</b>\n{html.escape(row.label)} در دو تست متوالی ناموفق بود.",
-            )
+        if not row.ok and healthdb.failures(row.path_key, 2) >= 2:
+            incident = healthdb.open_incident(row)
+            if state != "down":
+                db.set_setting(state_key, "down")
+                await _notify(
+                    bot,
+                    f"🔴 <b>هشدار مسیر</b>\n{html.escape(row.label)} در دو تست متوالی ناموفق بود.",
+                )
+            import resilience
+
+            await resilience.auto_recover(bot, row, incident)
         elif row.ok and state == "down":
             db.set_setting(state_key, "")
+            healthdb.close_incident(row.path_key)
             await _notify(
                 bot,
                 f"🟢 <b>بازیابی مسیر</b>\n{html.escape(row.label)} دوباره سالم است ({row.latency_ms}ms).",

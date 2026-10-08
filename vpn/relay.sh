@@ -327,6 +327,9 @@ def run_probe(job):
         result["sub"] = {"ok": False, "latency_ms": round((time.monotonic() - started) * 1000),
                          "detail": type(exc).__name__}
     result["vpn"] = probe_vless(str(job["link"]))
+    result["cdn"] = probe_vless(str(job["cdn_link"])) if job.get("cdn_link") else {
+        "ok": False, "latency_ms": 0, "detail": "missing CDN probe"
+    }
     result["nodes"] = {}
     node_jobs = job.get("nodes") if isinstance(job.get("nodes"), list) else []
     for item in node_jobs[:16]:
