@@ -14,6 +14,8 @@ import fmt
 import handlers
 import shop
 import shopdb
+import support
+import supportdb
 import devices
 import links
 import relays
@@ -209,6 +211,7 @@ async def main() -> None:
         raise SystemExit("BOT_TOKEN and ADMIN_IDS must be set in " + "/etc/isaho-vpn/vpn.env")
     db.init()
     shopdb.init()
+    supportdb.init()
     shop.apply_defaults()
     await xray.apply_all()
 
@@ -220,6 +223,7 @@ async def main() -> None:
 
     dp = Dispatcher()
     dp.include_router(shop.router)  # customer /start and shop states first
+    dp.include_router(support.router)
     dp.include_router(handlers.router)
 
     runner = await sub_server.start()
