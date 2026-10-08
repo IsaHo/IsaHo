@@ -10,6 +10,7 @@ from aiogram.enums import ParseMode
 from aiogram.types import BotCommand
 
 import db
+import admin_ui
 import fmt
 import handlers
 import health
@@ -230,6 +231,7 @@ async def main() -> None:
     dp.include_router(health.router)
     dp.include_router(resilience.router)
     dp.include_router(support.router)
+    dp.include_router(admin_ui.router)
     dp.include_router(handlers.router)
 
     runner = await sub_server.start()

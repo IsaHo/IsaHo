@@ -100,17 +100,18 @@ BTN_BUY = "🛒 خرید اشتراک"
 BTN_TEST = "🎁 اکانت تست"
 BTN_RENEW = "🔄 تمدید"
 BTN_INVITE = "👥 دعوت دوستان"
-BTN_SHOP = "🛒 فروشگاه"
-BTN_TICKETS = "🎫 تیکت‌های پشتیبانی"
+BTN_SHOP = "🛍 فروش و درآمد"
+BTN_TICKETS = "🎫 پشتیبانی"
+BTN_ADMIN_HOME = "🏠 مرکز فرماندهی"
+BTN_CUSTOMERS = "👥 مشتریان"
+BTN_OPERATIONS = "🧭 شبکه و سلامت"
+BTN_MANAGEMENT = "⚙️ مدیریت"
 
 ADMIN_KB = ReplyKeyboardMarkup(resize_keyboard=True, keyboard=[
-    [KeyboardButton(text=BTN_ADD), KeyboardButton(text=BTN_USERS)],
-    [KeyboardButton(text=BTN_SEARCH), KeyboardButton(text=BTN_STATUS)],
-    [KeyboardButton(text=BTN_DASH), KeyboardButton(text=BTN_HEALTH)],
-    [KeyboardButton(text=BTN_RESILIENCE), KeyboardButton(text=BTN_BULK)],
-    [KeyboardButton(text=BTN_SHOP)],
-    [KeyboardButton(text=BTN_SETTINGS), KeyboardButton(text=BTN_BACKUP)],
-    [KeyboardButton(text=BTN_BROADCAST), KeyboardButton(text=BTN_TICKETS)],
+    [KeyboardButton(text=BTN_ADMIN_HOME)],
+    [KeyboardButton(text=BTN_CUSTOMERS), KeyboardButton(text=BTN_SHOP)],
+    [KeyboardButton(text=BTN_OPERATIONS), KeyboardButton(text=BTN_TICKETS)],
+    [KeyboardButton(text=BTN_MANAGEMENT)],
 ])
 CANCEL_KB = ReplyKeyboardMarkup(resize_keyboard=True, keyboard=[[KeyboardButton(text=BTN_CANCEL)]])
 BTN_ORDERS = "🧾 سفارش‌های در انتظار"
@@ -125,10 +126,10 @@ def staff_kb(tg_id: int):
 
 
 USER_KB = ReplyKeyboardMarkup(resize_keyboard=True, keyboard=[
-    [KeyboardButton(text=BTN_BUY), KeyboardButton(text=BTN_MY)],
-    [KeyboardButton(text=BTN_RENEW), KeyboardButton(text=BTN_TEST)],
-    [KeyboardButton(text=BTN_INVITE), KeyboardButton(text=BTN_HELP)],
-    [KeyboardButton(text=BTN_SUPPORT)],
+    [KeyboardButton(text=BTN_MY), KeyboardButton(text=BTN_BUY)],
+    [KeyboardButton(text=BTN_RENEW), KeyboardButton(text=BTN_SUPPORT)],
+    [KeyboardButton(text=BTN_HELP), KeyboardButton(text=BTN_INVITE)],
+    [KeyboardButton(text=BTN_TEST)],
 ])
 
 
@@ -257,7 +258,11 @@ async def start_link(msg: Message, command: CommandObject):
 @router.message(F.text == BTN_CANCEL, admin)
 async def admin_start(msg: Message, state: FSMContext):
     await state.clear()
-    await msg.answer(f"👋 پنل مدیریت <b>{html.escape(cfg.brand)}</b>", reply_markup=ADMIN_KB)
+    await msg.answer(
+        f"👋 به پنل مدیریت <b>{html.escape(cfg.brand)}</b> خوش آمدید.\n"
+        "منوی اصلی خلوت شده؛ هر بخش ابزارهای مرتبط خودش را دارد.",
+        reply_markup=ADMIN_KB,
+    )
 
 
 @router.message(CommandStart())
@@ -686,7 +691,7 @@ async def settings_menu(msg: Message):
         [("🇮🇷 سرور واسط", "set:relays"), ("🌐 تنظیم IP تمیز کلادفلر", "set:cdn")],
         [("🧪 دستور تست سرور واسط", "set:relaytest")],
         [("🔌 پورت CDN: 443", "set:port:443"), (f"🔌 پورت CDN: {cfg.cdn_port}", f"set:port:{cfg.cdn_port}")],
-        [("🔄 ریستارت Xray", "set:restart"), ("🛠 بازسازی کانفیگ", "set:rebuild")],
+        [("🔄 ریستارت Xray", "nav:restart:ask"), ("🛠 بازسازی کانفیگ", "nav:rebuild:ask")],
     ]))
 
 
