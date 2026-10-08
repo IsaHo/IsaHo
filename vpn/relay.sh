@@ -222,7 +222,7 @@ CONF
     cat >/usr/local/bin/isaho-agent <<'AGENT'
 #!/usr/bin/env python3
 """Reports this relay's health to the bot (through the SSH tunnels) and runs queued actions."""
-import json, os, re, socket, subprocess, time, urllib.request
+import json, os, re, socket, subprocess, time, urllib.parse, urllib.request, zipfile
 
 conf = dict(l.split("=", 1) for l in open("/etc/isaho-relay.conf").read().split() if "=" in l)
 
@@ -237,6 +237,94 @@ def net_bytes():
             f = data.split()
             rx += int(f[0]); tx += int(f[8])
     return rx, tx
+
+PROBE_DIR = "/var/lib/isaho-agent"
+PROBE_RESULT = os.path.join(PROBE_DIR, "probe-result.json")
+PROBE_XRAY = os.path.join(PROBE_DIR, "xray")
+
+def ensure_probe_xray():
+    if os.path.exists(PROBE_XRAY):
+        return PROBE_XRAY
+    os.makedirs(PROBE_DIR, mode=0o700, exist_ok=True)
+    archive = os.path.join(PROBE_DIR, "xray.zip")
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    with opener.open("https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip",
+                     timeout=60) as response, open(archive, "wb") as out:
+        out.write(response.read())
+    with zipfile.ZipFile(archive) as package:
+        with package.open("xray") as source, open(PROBE_XRAY, "wb") as out:
+            out.write(source.read())
+    os.chmod(PROBE_XRAY, 0o700)
+    os.unlink(archive)
+    return PROBE_XRAY
+
+def probe_outbound(link):
+    parsed = urllib.parse.urlsplit(link)
+    query = {key: values[0] for key, values in urllib.parse.parse_qs(parsed.query).items()}
+    user = {"id": urllib.parse.unquote(parsed.username), "encryption": "none"}
+    if query.get("flow"):
+        user["flow"] = query["flow"]
+    stream = {"network": query.get("type", "tcp"), "security": query.get("security", "none")}
+    if stream["security"] == "reality":
+        stream["realitySettings"] = {
+            "serverName": query.get("sni"), "fingerprint": query.get("fp", "chrome"),
+            "publicKey": query.get("pbk"), "shortId": query.get("sid", ""),
+        }
+    return {"protocol": "vless", "settings": {"vnext": [{
+        "address": parsed.hostname, "port": parsed.port, "users": [user]
+    }]}, "streamSettings": stream}
+
+def run_probe(job):
+    result = {"job_id": str(job.get("id", ""))[:80], "checked_at": int(time.time())}
+    started = time.monotonic()
+    try:
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open(str(job["sub_url"]), timeout=12) as response:
+            ok = response.status == 200
+        result["sub"] = {"ok": ok, "latency_ms": round((time.monotonic() - started) * 1000),
+                         "detail": f"HTTP {response.status}"}
+    except Exception as exc:
+        result["sub"] = {"ok": False, "latency_ms": round((time.monotonic() - started) * 1000),
+                         "detail": type(exc).__name__}
+    process, config_path = None, os.path.join(PROBE_DIR, "probe.json")
+    started = time.monotonic()
+    try:
+        binary = ensure_probe_xray()
+        config = {"log": {"loglevel": "warning"},
+                  "inbounds": [{"listen": "127.0.0.1", "port": 31999, "protocol": "socks"}],
+                  "outbounds": [probe_outbound(str(job["link"]))]}
+        with open(config_path, "w") as stream:
+            json.dump(config, stream)
+        os.chmod(config_path, 0o600)
+        process = subprocess.Popen([binary, "run", "-c", config_path], stdout=subprocess.DEVNULL,
+                                   stderr=subprocess.DEVNULL)
+        time.sleep(1.5)
+        check = subprocess.run(
+            ["curl", "-sS", "--connect-timeout", "5", "-m", "12", "-o", "/dev/null",
+             "-w", "%{http_code} %{time_total}", "--socks5-hostname", "127.0.0.1:31999",
+             "https://www.gstatic.com/generate_204"], capture_output=True, text=True, timeout=15,
+            env={key: value for key, value in os.environ.items() if "proxy" not in key.lower()})
+        fields = check.stdout.strip().split()
+        code = fields[0] if fields else "000"
+        latency = round(float(fields[1]) * 1000) if len(fields) > 1 else round((time.monotonic() - started) * 1000)
+        ok = check.returncode == 0 and code == "204"
+        result["vpn"] = {"ok": ok, "latency_ms": latency,
+                         "detail": f"HTTP {code}" if ok else (check.stderr.strip() or f"HTTP {code}")[:200]}
+    except Exception as exc:
+        result["vpn"] = {"ok": False, "latency_ms": round((time.monotonic() - started) * 1000),
+                         "detail": type(exc).__name__}
+    finally:
+        if process and process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                process.kill()
+        try:
+            os.unlink(config_path)
+        except OSError:
+            pass
+    return result
 
 mem = dict((l.split(":")[0], int(l.split()[1])) for l in open("/proc/meminfo"))
 rx, tx = net_bytes()
@@ -255,9 +343,14 @@ report = {
     "rx": rx, "tx": tx,
     "uptime": int(float(open("/proc/uptime").read().split()[0])),
     "last": sh("tail -n 1 /var/log/isaho-update.log 2>/dev/null"),
-    "agent": 3,
+    "agent": 4,
     "proxy": "send-proxy-v2" in open("/etc/haproxy/haproxy.cfg").read(),
 }
+try:
+    if os.path.exists(PROBE_RESULT):
+        report["probe_result"] = json.load(open(PROBE_RESULT))
+except (OSError, ValueError):
+    pass
 opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 req = urllib.request.Request("http://127.0.0.1:2096/relay/report", data=json.dumps(report).encode(),
                              headers={"Content-Type": "application/json"})
@@ -265,6 +358,21 @@ try:
     reply = json.load(opener.open(req, timeout=15))
 except Exception as e:
     raise SystemExit(f"report failed: {e}")
+if "probe_result" in report:
+    try:
+        os.unlink(PROBE_RESULT)
+    except OSError:
+        pass
+
+job = reply.get("probe")
+if isinstance(job, dict) and job.get("id") and job.get("link") and job.get("sub_url"):
+    try:
+        os.makedirs(PROBE_DIR, mode=0o700, exist_ok=True)
+        with open(PROBE_RESULT + ".tmp", "w") as stream:
+            json.dump(run_probe(job), stream)
+        os.replace(PROBE_RESULT + ".tmp", PROBE_RESULT)
+    except Exception:
+        pass
 
 # the foreign server tells us whether it expects the PROXY header (real client IPs)
 want = reply.get("proxy")

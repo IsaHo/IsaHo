@@ -44,7 +44,12 @@ async def _relay_report(request: web.Request) -> web.Response:
         raise web.HTTPBadRequest()
     if not isinstance(data, dict):
         raise web.HTTPBadRequest()
-    return web.json_response(relays.record(data))
+    reply = relays.record(data)
+    import health
+    probe = health.relay_job(data)
+    if probe:
+        reply["probe"] = probe
+    return web.json_response(reply)
 
 
 async def _pay_sms(request: web.Request) -> web.Response:
