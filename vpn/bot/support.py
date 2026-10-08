@@ -9,6 +9,7 @@ import db
 import devices
 import fmt
 import handlers as h
+import health
 import links
 import psutil
 import shopdb
@@ -187,6 +188,10 @@ def diagnostic_report(
             f"{'🟢' if config_count else '🔴'} کانفیگ‌های قابل دریافت: <b>{config_count}</b>"
         )
         if not config_count:
+            priority = "urgent"
+        real_check, urgent = health.support_summary(category)
+        lines += ["", real_check]
+        if urgent:
             priority = "urgent"
 
     if category in {"slow", "account"}:

@@ -5,13 +5,16 @@ import unittest
 from dataclasses import replace
 from unittest import mock
 
+# ruff: noqa: E402
+
 BOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "bot"))
 sys.path.insert(0, BOT_DIR)
 
-import db  # noqa: E402
-import shopdb  # noqa: E402
-import support  # noqa: E402
-import supportdb  # noqa: E402
+import db
+import healthdb
+import shopdb
+import support
+import supportdb
 
 
 class SupportDatabaseTests(unittest.TestCase):
@@ -22,6 +25,7 @@ class SupportDatabaseTests(unittest.TestCase):
         db.init()
         shopdb.init()
         supportdb.init()
+        healthdb.init()
 
     def tearDown(self):
         db.cfg = self.old_cfg

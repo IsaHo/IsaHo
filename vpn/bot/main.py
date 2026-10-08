@@ -12,6 +12,8 @@ from aiogram.types import BotCommand
 import db
 import fmt
 import handlers
+import health
+import healthdb
 import shop
 import shopdb
 import support
@@ -212,6 +214,7 @@ async def main() -> None:
     db.init()
     shopdb.init()
     supportdb.init()
+    healthdb.init()
     shop.apply_defaults()
     await xray.apply_all()
 
@@ -223,11 +226,13 @@ async def main() -> None:
 
     dp = Dispatcher()
     dp.include_router(shop.router)  # customer /start and shop states first
+    dp.include_router(health.router)
     dp.include_router(support.router)
     dp.include_router(handlers.router)
 
     runner = await sub_server.start()
     task = asyncio.create_task(monitor(bot))
+    health_task = asyncio.create_task(health.monitor(bot))
     for admin_id in cfg.admin_ids:
         try:
             await bot.send_message(admin_id, "🚀 ربات و سرور VPN روشن شد. /start")
@@ -237,6 +242,7 @@ async def main() -> None:
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     finally:
         task.cancel()
+        health_task.cancel()
         await runner.cleanup()
         await xray.flush_stats()
 

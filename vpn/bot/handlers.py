@@ -91,6 +91,7 @@ BTN_BROADCAST = "📢 پیام همگانی"
 BTN_CANCEL = "❌ لغو"
 BTN_MY = "📊 حساب من"
 BTN_DASH = "📈 داشبورد"
+BTN_HEALTH = "🧭 سلامت مسیرها"
 BTN_BULK = "🧰 عملیات گروهی"
 BTN_HELP = "📱 آموزش اتصال"
 BTN_SUPPORT = "🛟 پشتیبانی هوشمند"
@@ -104,8 +105,8 @@ BTN_TICKETS = "🎫 تیکت‌های پشتیبانی"
 ADMIN_KB = ReplyKeyboardMarkup(resize_keyboard=True, keyboard=[
     [KeyboardButton(text=BTN_ADD), KeyboardButton(text=BTN_USERS)],
     [KeyboardButton(text=BTN_SEARCH), KeyboardButton(text=BTN_STATUS)],
-    [KeyboardButton(text=BTN_DASH), KeyboardButton(text=BTN_BULK)],
-    [KeyboardButton(text=BTN_SHOP)],
+    [KeyboardButton(text=BTN_DASH), KeyboardButton(text=BTN_HEALTH)],
+    [KeyboardButton(text=BTN_BULK), KeyboardButton(text=BTN_SHOP)],
     [KeyboardButton(text=BTN_SETTINGS), KeyboardButton(text=BTN_BACKUP)],
     [KeyboardButton(text=BTN_BROADCAST), KeyboardButton(text=BTN_TICKETS)],
 ])
