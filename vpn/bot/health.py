@@ -133,17 +133,6 @@ def build_specs(user) -> list[Spec]:
                 url=links.cdn_sub_url(user),
             ),
         ]
-    for node in nodes.all_nodes():
-        specs.append(
-            Spec(
-                f"node:{node['name']}",
-                f"نود {node['name']} از مسیر مستقیم رله",
-                "node",
-                "xray",
-                f"{node['ip']}:8443",
-                _reality(node["ip"], 8443, user.uuid),
-            )
-        )
     return specs
 
 
@@ -290,6 +279,27 @@ def ingest_relay_result(data: dict) -> None:
             str(item.get("detail") or "")[:300],
             int(result.get("checked_at") or time.time()),
         )
+    node_results = result.get("nodes")
+    configured_nodes = {str(node["name"]): node for node in nodes.all_nodes()}
+    if isinstance(node_results, dict):
+        for node_name, item in node_results.items():
+            node = configured_nodes.get(str(node_name))
+            if (
+                not node
+                or not isinstance(item, dict)
+                or not isinstance(item.get("ok"), bool)
+            ):
+                continue
+            healthdb.add(
+                f"relay:{ip}:node:{node_name}",
+                f"{label} → نود {node_name}",
+                "node",
+                "iran",
+                item["ok"],
+                int(item.get("latency_ms") or 0),
+                str(item.get("detail") or "")[:300],
+                int(result.get("checked_at") or time.time()),
+            )
 
 
 def relay_job(data: dict) -> dict | None:
@@ -312,6 +322,16 @@ def relay_job(data: dict) -> dict | None:
         "id": f"{int(now)}-{_relay_label(ip)}",
         "link": links.reality_link(user, "127.0.0.1", 443, "health-check"),
         "sub_url": f"http://127.0.0.1:2096/sub/{user.sub_token}",
+        "nodes": [
+            {
+                "name": str(node["name"]),
+                "link": links.reality_link(
+                    user, str(node["ip"]), 8443, f"health-{node['name']}"
+                ),
+            }
+            for node in nodes.all_nodes()
+            if node.get("private", True)
+        ],
     }
 
 
@@ -367,6 +387,12 @@ def _expected_paths() -> dict[str, tuple[str, str]]:
     for index, (host, _) in enumerate(links.relays(), 1):
         paths[f"relay:{host}:vpn"] = (f"IR{index} · اتصال واقعی از ایران", "relay")
         paths[f"relay:{host}:sub"] = (f"IR{index} · دریافت سابسکریپشن", "sub")
+        for node in nodes.all_nodes():
+            if node.get("private", True):
+                paths[f"relay:{host}:node:{node['name']}"] = (
+                    f"IR{index} → نود {node['name']}",
+                    "node",
+                )
     return paths
 
 

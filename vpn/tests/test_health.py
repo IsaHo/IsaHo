@@ -76,7 +76,7 @@ class HealthProbeTests(unittest.TestCase):
         self.assertTrue(all(row.origin == "iran" for row in rows))
         self.assertNotIn("uuid", " ".join(row.detail for row in rows).lower())
 
-    def test_build_specs_includes_main_cdn_node_and_subscription(self):
+    def test_build_specs_includes_main_cdn_and_subscription(self):
         fake_cfg = replace(
             health.cfg,
             server_ip="82.115.18.62",
@@ -90,24 +90,37 @@ class HealthProbeTests(unittest.TestCase):
         with (
             mock.patch.object(health, "cfg", fake_cfg),
             mock.patch(
-                "health.nodes.all_nodes",
-                return_value=[
-                    {
-                        "name": "FR",
-                        "ip": "202.133.88.44",
-                        "private": True,
-                    }
-                ],
-            ),
-            mock.patch(
                 "health.links.cdn_sub_url",
                 return_value="https://vpn.example.com/sub/token",
             ),
         ):
             specs = health.build_specs(user)
 
+        self.assertEqual({"vpn:main", "vpn:cdn", "sub:cdn"}, {s.key for s in specs})
+
+    def test_relay_result_includes_each_private_node(self):
+        report = {
+            "ip": "94.184.47.122",
+            "probe_result": {
+                "checked_at": int(time.time()),
+                "nodes": {
+                    "FR": {"ok": True, "latency_ms": 220, "detail": "HTTP 204"},
+                    "unknown": {"ok": True, "latency_ms": 1, "detail": "ignored"},
+                },
+            },
+        }
+        with (
+            mock.patch("health.links.relays", return_value=[("94.184.47.122", 443)]),
+            mock.patch(
+                "health.nodes.all_nodes",
+                return_value=[{"name": "FR", "ip": "202.133.88.44", "private": True}],
+            ),
+        ):
+            health.ingest_relay_result(report)
+
+        rows = healthdb.latest()
         self.assertEqual(
-            {"vpn:main", "vpn:cdn", "sub:cdn", "node:FR"}, {s.key for s in specs}
+            ["relay:94.184.47.122:node:FR"], [row.path_key for row in rows]
         )
 
     def test_current_checks_ignores_removed_paths(self):
