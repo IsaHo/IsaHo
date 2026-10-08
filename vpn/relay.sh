@@ -270,6 +270,18 @@ def probe_outbound(link):
             "serverName": query.get("sni"), "fingerprint": query.get("fp", "chrome"),
             "publicKey": query.get("pbk"), "shortId": query.get("sid", ""),
         }
+    elif stream["security"] == "tls":
+        stream["tlsSettings"] = {
+            "serverName": query.get("sni") or query.get("host", ""),
+            "fingerprint": query.get("fp", "chrome"),
+            "alpn": [item for item in query.get("alpn", "").split(",") if item],
+        }
+    if stream["network"] == "xhttp":
+        stream["xhttpSettings"] = {
+            "host": query.get("host", ""),
+            "path": query.get("path", "/"),
+            "mode": query.get("mode", "auto"),
+        }
     return {"protocol": "vless", "settings": {"vnext": [{
         "address": parsed.hostname, "port": parsed.port, "users": [user]
     }]}, "streamSettings": stream}
