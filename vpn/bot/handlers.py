@@ -77,8 +77,6 @@ class Edit(StatesGroup):
     ip_limit = State()
     ip_default = State()
     bulk_gb = State()
-    support = State()
-    reply = State()
 
 
 # ---------- keyboards ----------
@@ -95,12 +93,13 @@ BTN_MY = "📊 حساب من"
 BTN_DASH = "📈 داشبورد"
 BTN_BULK = "🧰 عملیات گروهی"
 BTN_HELP = "📱 آموزش اتصال"
-BTN_SUPPORT = "💬 پشتیبانی"
+BTN_SUPPORT = "🛟 پشتیبانی هوشمند"
 BTN_BUY = "🛒 خرید اشتراک"
 BTN_TEST = "🎁 اکانت تست"
 BTN_RENEW = "🔄 تمدید"
 BTN_INVITE = "👥 دعوت دوستان"
 BTN_SHOP = "🛒 فروشگاه"
+BTN_TICKETS = "🎫 تیکت‌های پشتیبانی"
 
 ADMIN_KB = ReplyKeyboardMarkup(resize_keyboard=True, keyboard=[
     [KeyboardButton(text=BTN_ADD), KeyboardButton(text=BTN_USERS)],
@@ -108,11 +107,14 @@ ADMIN_KB = ReplyKeyboardMarkup(resize_keyboard=True, keyboard=[
     [KeyboardButton(text=BTN_DASH), KeyboardButton(text=BTN_BULK)],
     [KeyboardButton(text=BTN_SHOP)],
     [KeyboardButton(text=BTN_SETTINGS), KeyboardButton(text=BTN_BACKUP)],
-    [KeyboardButton(text=BTN_BROADCAST)],
+    [KeyboardButton(text=BTN_BROADCAST), KeyboardButton(text=BTN_TICKETS)],
 ])
 CANCEL_KB = ReplyKeyboardMarkup(resize_keyboard=True, keyboard=[[KeyboardButton(text=BTN_CANCEL)]])
 BTN_ORDERS = "🧾 سفارش‌های در انتظار"
-SUPPORT_KB = ReplyKeyboardMarkup(resize_keyboard=True, keyboard=[[KeyboardButton(text=BTN_ORDERS)]])
+SUPPORT_KB = ReplyKeyboardMarkup(resize_keyboard=True, keyboard=[
+    [KeyboardButton(text=BTN_TICKETS)],
+    [KeyboardButton(text=BTN_ORDERS)],
+])
 
 
 def staff_kb(tg_id: int):
@@ -1391,7 +1393,7 @@ HELP_TEXT = """📱 <b>آموزش اتصال</b>
 <b>اگر وصل نشد</b>
 • یک بار سابسکریپشن را آپدیت کنید (وقتی VPN خاموش است).
 • اینترنت را یک بار قطع و وصل کنید.
-• از «💬 پشتیبانی» به ما پیام بدهید."""
+• از «🛟 پشتیبانی هوشمند» بررسی خودکار را اجرا کنید."""
 
 
 @router.message(F.text == BTN_HELP)
@@ -1399,50 +1401,7 @@ async def help_cmd(msg: Message):
     await msg.answer(HELP_TEXT, disable_web_page_preview=True)
 
 
-@router.message(F.text == BTN_SUPPORT)
-async def support_start(msg: Message, state: FSMContext):
-    await state.set_state(Edit.support)
-    await msg.answer("💬 پیامتان را بنویسید (می‌توانید عکس هم بفرستید):", reply_markup=CANCEL_KB)
-
-
 @router.message(F.text == BTN_CANCEL)
 async def user_cancel(msg: Message, state: FSMContext):
     await state.clear()
     await msg.answer("لغو شد.", reply_markup=USER_KB)
-
-
-@router.message(Edit.support)
-async def support_send(msg: Message, state: FSMContext, bot: Bot):
-    await state.clear()
-    accounts = ", ".join(u.name for u in db.owned_by(msg.from_user.id)) or "ندارد"
-    who = html.escape(msg.from_user.full_name or "")
-    header = (f"💬 <b>پیام پشتیبانی</b>\nاز: {who} (<code>{msg.from_user.id}</code>)\n"
-              f"اکانت: {html.escape(accounts)}")
-    for admin_id in db.staff_ids():
-        try:
-            await bot.send_message(admin_id, header,
-                                   reply_markup=ikb([[("↩️ پاسخ", f"rep:{msg.from_user.id}")]]))
-            await msg.copy_to(admin_id)
-        except Exception:
-            pass
-    await msg.answer("✅ پیامتان برای پشتیبانی فرستاده شد.", reply_markup=USER_KB)
-
-
-@router.callback_query(F.data.startswith("rep:"), staff)
-async def support_reply_ask(cb: CallbackQuery, state: FSMContext):
-    await cb.answer()
-    await state.set_state(Edit.reply)
-    await state.update_data(reply_to=int(cb.data[4:]))
-    await cb.message.answer("✍️ پاسخ را بنویسید:", reply_markup=CANCEL_KB)
-
-
-@router.message(Edit.reply, staff)
-async def support_reply_send(msg: Message, state: FSMContext, bot: Bot):
-    target = (await state.get_data()).get("reply_to")
-    await state.clear()
-    try:
-        await bot.send_message(target, "💬 <b>پاسخ پشتیبانی:</b>")
-        await msg.copy_to(target)
-        await msg.answer("✅ پاسخ فرستاده شد.", reply_markup=staff_kb(msg.from_user.id))
-    except Exception:
-        await msg.answer("❌ ارسال نشد (شاید کاربر ربات را بلاک کرده).", reply_markup=ADMIN_KB)
