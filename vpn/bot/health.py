@@ -471,7 +471,10 @@ def overview() -> tuple[str, object]:
             "ℹ️ امتیاز بالا فقط از تست‌های واقعی IR محاسبه می‌شود؛ تست کنترل‌پلین جداست.",
         ]
         text = "\n".join(lines)
-    buttons = [[("🔬 آزمایش همین حالا", "ph:run"), ("🔄 تازه‌سازی", "ph:menu")]]
+    buttons = [
+        [("🔬 آزمایش همین حالا", "ph:run"), ("🔄 تازه‌سازی", "ph:menu")],
+        [("↩️ شبکه و سلامت", "nav:ops"), ("🏠 خانه", "nav:home")],
+    ]
     if rows:
         buttons.append([("📈 تاریخچه مسیرها", "ph:history")])
         detail = [

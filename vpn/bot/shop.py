@@ -595,15 +595,58 @@ def profit_text(month_sales: int) -> str:
 
 def shop_admin_kb():
     return h.ikb([
-        [("📋 پلن‌ها", "sa:plans"), ("💳 کارت", "sa:card")],
-        [("🎟 کدهای تخفیف", "sa:codes"), ("🤝 نماینده‌ها", "sa:resellers")],
-        [("🎁 اکانت تست", "sa:test"), ("👥 پاداش دعوت", "sa:ref")],
-        [("🧾 سفارش‌های در انتظار", "sa:pending"), ("💰 هزینه‌ها", "sa:cost")],
-        [("📲 تأیید خودکار پیامک", "sms:menu"), ("⏰ تخفیف تمدید", "sa:renew")],
-        [("👋 تخفیف برگشت", "sa:winback"), ("📈 سقف ظرفیت", "sa:capacity")],
-        [("📅 گزارش ۷ روز اخیر", "sa:report")],
-        [("👁 نمای مشتری", "sa:preview")],
+        [("🧾 سفارش‌های در انتظار", "sa:pending")],
+        [("📦 محصولات و قیمت", "sa:section:products"), ("📣 رشد فروش", "sa:section:growth")],
+        [("💳 پرداخت و مالی", "sa:section:payment"), ("📊 گزارش و ظرفیت", "sa:section:insights")],
+        [("👁 نمای مشتری", "sa:preview"), ("🏠 مرکز فرماندهی", "nav:home")],
     ])
+
+
+SHOP_SECTIONS = {
+    "products": (
+        "📦 <b>فروشگاه › محصولات و قیمت</b>\n\nپلن‌ها، بسته‌های حجم و اکانت تست را مدیریت کنید.",
+        [[("📋 پلن‌ها و حجم اضافه", "sa:plans"), ("🎁 اکانت تست", "sa:test")]],
+    ),
+    "growth": (
+        "📣 <b>فروشگاه › رشد فروش</b>\n\nابزارهای جذب، بازگشت و وفاداری مشتری.",
+        [
+            [("🎟 کدهای تخفیف", "sa:codes"), ("🤝 نماینده‌ها", "sa:resellers")],
+            [("👥 پاداش دعوت", "sa:ref"), ("⏰ تخفیف تمدید", "sa:renew")],
+            [("👋 کمپین بازگشت", "sa:winback")],
+        ],
+    ),
+    "payment": (
+        "💳 <b>فروشگاه › پرداخت و مالی</b>\n\nاطلاعات دریافت وجه، تأیید خودکار و محاسبه سود.",
+        [
+            [("💳 اطلاعات کارت", "sa:card"), ("📲 تأیید خودکار پیامک", "sms:menu")],
+            [("💰 هزینه ماهانه", "sa:cost")],
+        ],
+    ),
+    "insights": (
+        "📊 <b>فروشگاه › گزارش و ظرفیت</b>\n\nعملکرد فروش و ظرفیت سرویس را یکجا ببینید.",
+        [
+            [("📅 گزارش ۷ روز اخیر", "sa:report"), ("📈 سقف ظرفیت", "sa:capacity")],
+            [("👁 نمای مشتری", "sa:preview")],
+        ],
+    ),
+}
+
+
+@router.callback_query(F.data == "sa:home", h.admin)
+async def shop_home(cb: CallbackQuery):
+    await cb.answer()
+    await cb.message.edit_text(shop_admin_text(), reply_markup=shop_admin_kb())
+
+
+@router.callback_query(F.data.startswith("sa:section:"), h.admin)
+async def shop_section(cb: CallbackQuery):
+    await cb.answer()
+    section = SHOP_SECTIONS.get(cb.data.rsplit(":", 1)[1])
+    if not section:
+        return
+    text, rows = section
+    rows = [*rows, [("↩️ فروشگاه", "sa:home"), ("🏠 خانه", "nav:home")]]
+    await cb.message.edit_text(text, reply_markup=h.ikb(rows))
 
 
 ADMIN_PROMPTS = {
@@ -759,6 +802,7 @@ def plans_admin():
               ("✏️", f"sp:e:{p.id}"), ("🗑", f"sp:d:{p.id}")] for p in shopdb.addons(False)]
     rows.append([("➕ پلن جدید", "sp:add"), ("✨ پلن‌های پیشنهادی", "sp:presets")])
     rows.append([("📦 بسته‌ی حجم اضافه‌ی جدید", "sp:addon")])
+    rows.append([("↩️ محصولات و قیمت", "sa:section:products"), ("🏠 خانه", "nav:home")])
     return ("📋 <b>پلن‌ها</b>\nروی هر پلن بزنید تا فعال/غیرفعال شود؛ ✏️ تغییر قیمت، 🗑 حذف.", h.ikb(rows))
 
 
@@ -872,6 +916,7 @@ def codes_admin():
         lines.append(f"<code>{d['code']}</code> — {d['percent']}٪ | استفاده {uses} | {exp}")
         rows.append([(f"🗑 {d['code']}", f"sc:d:{d['code']}")])
     rows.append([("➕ کد جدید", "sc:add")])
+    rows.append([("↩️ رشد فروش", "sa:section:growth"), ("🏠 خانه", "nav:home")])
     return "\n".join(lines), h.ikb(rows)
 
 
@@ -923,6 +968,7 @@ def resellers_admin():
         lines.append(f"• {html.escape(c.name or str(c.tg_id))} (<code>{c.tg_id}</code>) — {c.reseller_percent}٪ | {n} اکانت")
         rows.append([(f"❌ حذف {c.tg_id}", f"sr:d:{c.tg_id}")])
     rows.append([("➕ نماینده‌ی جدید", "sr:add")])
+    rows.append([("↩️ رشد فروش", "sa:section:growth"), ("🏠 خانه", "nav:home")])
     return "\n".join(lines), h.ikb(rows)
 
 
@@ -1069,6 +1115,7 @@ def sms_admin():
     kb = h.ikb([
         [(("🔴 خاموش کردن" if on else "🟢 روشن کردن"), "sms:toggle"), ("🔑 کلید جدید", "sms:rekey")],
         [("📜 پیامک‌های اخیر", "sms:menu")],
+        [("↩️ پرداخت و مالی", "sa:section:payment"), ("🏠 خانه", "nav:home")],
     ])
     return "\n".join(lines), kb
 

@@ -96,6 +96,7 @@ def overview() -> tuple[str, object]:
         [("🩺 تست دوباره از ایران", "rs:probe"), ("🔄 تازه‌سازی", "rs:menu")],
         [("⚙️ تغییر حالت عملیات", "rs:modes"), ("📜 تاریخچه رخدادها", "rs:history")],
         [("🚀 آمادگی انتقال کنترل‌پلین", "rs:standby")],
+        [("↩️ شبکه و سلامت", "nav:ops"), ("🏠 خانه", "nav:home")],
     ]
     if incidents:
         buttons.append([("🪄 تعمیر رخدادهای قابل‌ترمیم", "rs:repair")])
