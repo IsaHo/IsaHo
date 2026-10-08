@@ -1,18 +1,19 @@
 #!/usr/bin/env bash
 # Secondary foreign server ("node"): Xray only. Pulls its config (same users/keys as the main
 # server) from the bot every minute and reports traffic back.
-#   usage: bash node.sh <main-url e.g. https://1.2.3.4:2096> <node-key> <main-cert-sha256> [cdn-domain]
+#   usage: bash node.sh <main-url> <node-key> <main-cert-sha256> [cdn-domain] [relay-ips]
 set -euo pipefail
 MAIN=${1:?usage: bash node.sh <main-url> <node-key> <main-cert-sha256> [cdn-domain]}
 KEY=${2:?node key missing}
 PIN=${3:?main certificate fingerprint missing}
 DOMAIN=${4:-node.local}
+RELAYS=${5:-}
 CONF_DIR=/etc/isaho-node
 [[ $EUID -eq 0 ]] || { echo "run as root"; exit 1; }
 
 echo "==> Packages"
 export DEBIAN_FRONTEND=noninteractive
-apt-get update -qq && apt-get install -y -qq curl unzip openssl python3 ca-certificates >/dev/null
+apt-get update -qq && apt-get install -y -qq curl unzip openssl python3 ca-certificates nftables >/dev/null
 
 echo "==> Xray"
 bash -c "$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install -u root >/dev/null
@@ -52,6 +53,8 @@ echo "==> Direct proxy (port 8443 → Xray 443)"
 cat >/etc/systemd/system/isaho-direct.socket <<SOCK
 [Unit]
 Description=IsaHo direct path from IR relays (8443 -> Xray 127.0.0.1:443)
+Requires=isaho-direct-fw.service
+After=isaho-direct-fw.service
 [Socket]
 ListenStream=0.0.0.0:8443
 NoDelay=true
@@ -68,12 +71,59 @@ After=isaho-direct.socket
 ExecStart=/lib/systemd/systemd-socket-proxyd --connections-max=4096 127.0.0.1:443
 LimitNOFILE=65536
 SVC
-systemctl daemon-reload
-systemctl enable -q --now isaho-direct.socket
-if command -v ufw >/dev/null && ufw status | grep -q "Status: active"; then
-    ufw allow 8443/tcp >/dev/null
+if [[ $RELAYS =~ ^[0-9.,]+$ ]]; then
+    cat >/etc/isaho-direct.nft <<NFT
+table inet isaho_direct {
+    chain input {
+        type filter hook input priority filter - 10; policy accept;
+        tcp dport 8443 ip saddr { ${RELAYS//,/ , } } accept
+        tcp dport 8443 drop
+    }
+}
+NFT
+    chmod 600 /etc/isaho-direct.nft
+    cat >/etc/systemd/system/isaho-direct-fw.service <<FW
+[Unit]
+Description=IsaHo direct-node port 8443 allowlist (relays only)
+Before=network-pre.target isaho-direct.socket
+Wants=network-pre.target
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStartPre=-/usr/sbin/nft delete table inet isaho_direct
+ExecStart=/usr/sbin/nft -f /etc/isaho-direct.nft
+ExecStop=/usr/sbin/nft delete table inet isaho_direct
+[Install]
+WantedBy=multi-user.target
+FW
+else
+    cat >/etc/isaho-direct.nft <<NFT
+table inet isaho_direct {
+    chain input {
+        type filter hook input priority filter - 10; policy accept;
+        tcp dport 8443 drop
+    }
+}
+NFT
+    chmod 600 /etc/isaho-direct.nft
+    cat >/etc/systemd/system/isaho-direct-fw.service <<FW
+[Unit]
+Description=IsaHo direct-node port 8443 deny-all fallback
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStartPre=-/usr/sbin/nft delete table inet isaho_direct
+ExecStart=/usr/sbin/nft -f /etc/isaho-direct.nft
+ExecStop=/usr/sbin/nft delete table inet isaho_direct
+[Install]
+WantedBy=multi-user.target
+FW
 fi
-# no public VPN ports by default: users arrive through the Iranian relays' SSH tunnels
+systemctl daemon-reload
+systemctl enable -q isaho-direct-fw.service isaho-direct.socket
+systemctl restart isaho-direct-fw.service
+systemctl start isaho-direct.socket
+# no public VPN ports by default: 8443 accepts only the supplied Iranian relay IPs
 # (switch the node to public in the bot and open 443/2053 yourself if you ever want direct links)
 
 echo "==> Sync agent"
@@ -144,10 +194,10 @@ if text != old:
     else:
         print("new config failed validation; keeping the old one", file=sys.stderr)
 
-# hourly standby copy of the bot (DB, settings, certificate) so this node can take over
+# five-minute standby copy of the bot so a promotion loses at most a few minutes of state
 STANDBY = "/etc/isaho-node/standby"
 stamp = os.path.join(STANDBY, "at")
-if not os.path.exists(stamp) or time.time() - os.path.getmtime(stamp) > 3600:
+if not os.path.exists(stamp) or time.time() - os.path.getmtime(stamp) > 300:
     try:
         b = request("GET", "/node/backup")
         os.makedirs(STANDBY, mode=0o700, exist_ok=True)
@@ -179,9 +229,14 @@ cat >/usr/local/bin/isaho-takeover <<'TAKEOVER'
 set -euo pipefail
 S=/etc/isaho-node/standby
 [[ -f $S/isaho.db && -f $S/vpn.env ]] || { echo "no standby copy yet"; exit 1; }
+[[ -f $S/at ]] || { echo "standby timestamp is missing"; exit 1; }
+AGE=$(( $(date +%s) - $(cat "$S/at") ))
+(( AGE <= 600 )) || { echo "standby copy is stale (${AGE}s); sync it before takeover"; exit 1; }
 echo "Standby copy from: $(date -d @"$(cat $S/at)")"
-read -rp "Is the main server really down and should this server become the main one? [yes/N] " a </dev/tty
-[[ $a == yes ]] || exit 1
+if [[ ${1:-} != --yes ]]; then
+    read -rp "Is the main server really down and should this server become the main one? [yes/N] " a </dev/tty
+    [[ $a == yes ]] || exit 1
+fi
 MY_IP=$(ip -4 route get 1.1.1.1 | awk '{for(i=1;i<NF;i++) if($i=="src") print $(i+1)}')
 mkdir -p /etc/isaho-vpn /var/lib/isaho-vpn && chmod 700 /etc/isaho-vpn /var/lib/isaho-vpn
 sed "s/^SERVER_IP=.*/SERVER_IP=$MY_IP/" $S/vpn.env >/etc/isaho-vpn/vpn.env
