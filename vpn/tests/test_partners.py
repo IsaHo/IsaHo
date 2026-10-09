@@ -298,7 +298,7 @@ class PartnerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_expired_confirmation_never_creates_withdrawal(self):
         cb = SimpleNamespace(data='rp:submit', from_user=SimpleNamespace(id=10), answer=mock.AsyncMock(),
-                             message=SimpleNamespace(answer=mock.AsyncMock()))
+                             message=SimpleNamespace(answer=mock.AsyncMock(), chat=SimpleNamespace(type='private')))
         state = mock.AsyncMock()
         state.get_state.return_value = None
         await partners.callback(cb, state, mock.AsyncMock())

@@ -324,6 +324,9 @@ async def checkout(msg: Message, state: FSMContext, tg_id: int) -> None:
 @router.callback_query(F.data == "code")
 async def ask_code(cb: CallbackQuery, state: FSMContext):
     await cb.answer()
+    if (await state.get_data()).get('workspace'):
+        await cb.message.answer("کد تخفیف اضافه برای بستهٔ گروهی نیست؛ از پیش‌نمایش خود بسته پرداخت کنید.")
+        return
     if not (await state.get_data()).get("plan_id"):
         return
     await state.set_state(Buy.discount)
@@ -354,6 +357,9 @@ async def pay(cb: CallbackQuery, state: FSMContext, bot: Bot):
         await cb.answer("ابتدا عضویت در کانال را تأیید کنید", show_alert=True)
         return
     data = await state.get_data()
+    if data.get('workspace'):
+        await cb.answer("از دکمهٔ پرداخت پیش‌نمایش گروهی استفاده کنید", show_alert=True)
+        return
     if not data.get("plan_id"):
         await cb.answer("فاکتور منقضی شده؛ دوباره پلن را انتخاب کنید", show_alert=True)
         return
@@ -362,14 +368,17 @@ async def pay(cb: CallbackQuery, state: FSMContext, bot: Bot):
     q = quote(data, cb.from_user.id)
     if q["final"]:
         q["final"] = smspay.unique_amount(q["final"])  # last digits identify this order's deposit
-    if q["wallet"]:
-        shopdb.add_balance(cb.from_user.id, -q["wallet"])
-    o = shopdb.create_order(
-        tg_id=cb.from_user.id, plan_id=q["plan"].id,
-        kind=data.get("kind") or ("renew" if data.get("user_id") else "new"),
-        user_id=data.get("user_id"), account_name=data.get("name", ""), price=q["price"],
-        discount_code=q["discount"]["code"] if q["discount"] else "", wallet_used=q["wallet"],
-        final_price=q["final"], status="pending" if q["final"] == 0 else "waiting")
+    try:
+        o = shopdb.create_order(
+            reserve_wallet=True, tg_id=cb.from_user.id, plan_id=q["plan"].id,
+            kind=data.get("kind") or ("renew" if data.get("user_id") else "new"),
+            user_id=data.get("user_id"), account_name=data.get("name", ""), price=q["price"],
+            discount_code=q["discount"]["code"] if q["discount"] else "", wallet_used=q["wallet"],
+            final_price=q["final"], status="pending" if q["final"] == 0 else "waiting")
+    except ValueError:
+        await cb.message.answer("موجودی تغییر کرده؛ فاکتور تازه را بررسی کنید.")
+        await checkout(cb.message, state, cb.from_user.id)
+        return
     await state.clear()
     if q["final"] == 0:
         shopdb.decide_order(o.id, "approved", 0)
@@ -402,15 +411,21 @@ async def got_receipt(msg: Message, state: FSMContext, bot: Bot):
         await msg.answer("سفارش پیدا نشد.", reply_markup=h.USER_KB)
         return
     file_id = msg.photo[-1].file_id if msg.photo else msg.document.file_id
-    shopdb.update_order(o.id, status="pending", receipt=file_id)
+    if not shopdb.submit_receipt(o.id, msg.from_user.id, file_id):
+        await msg.answer("وضعیت سفارش تغییر کرده؛ دوباره باز نشد. وضعیت را در پنل بررسی کنید.", reply_markup=h.USER_KB)
+        return
     await msg.answer("✅ رسید دریافت شد. بعد از تأیید، اشتراک برایتان فرستاده می‌شود.", reply_markup=h.USER_KB)
     p = shopdb.plan(o.plan_id)
     who = html.escape(msg.from_user.full_name or "")
     target = f"{'حجم اضافه' if o.kind == 'addon' else 'تمدید'} {html.escape(db.get(o.user_id).name)}" if o.user_id else (
         f"اکانت جدید {html.escape(o.account_name)}" if o.account_name else "اکانت جدید")
     caption = (f"🧾 <b>سفارش #{o.id}</b>\nاز: {who} (<code>{msg.from_user.id}</code>)\n"
-               f"{html.escape(plan_line(p))}\n{target}\n💰 {toman(o.final_price)}"
+               f"{html.escape(plan_line(p) if p else 'پلن سفارش')}\n{target}\n💰 {toman(o.final_price)}"
                + (f"\n🎟 {o.discount_code}" if o.discount_code else ""))
+    if o.kind == 'bulk':
+        import workdb
+        batch = workdb.batch(o.tg_id, o.id)
+        caption += f"\n📦 ساخت گروهی: {batch['quantity']} اکانت"
     kb = h.ikb([[("✅ تأیید", f"ord:ok:{o.id}"), ("❌ رد", f"ord:no:{o.id}")]])
     for admin_id in db.staff_ids():
         try:
@@ -438,6 +453,10 @@ def unique_name(base: str) -> str:
 
 
 async def fulfill(bot: Bot, o) -> None:
+    if o.kind == 'bulk':
+        import partnerwork
+        await partnerwork.fulfill_bulk(bot, o)
+        return
     await membership.reconcile_user(bot, o.tg_id)
     p = shopdb.plan(o.plan_id)
     buyer = shopdb.customer(o.tg_id)
@@ -575,8 +594,6 @@ async def decide(cb: CallbackQuery, bot: Bot):
             log.exception("fulfil failed")
             await cb.message.answer(f"❌ خطا در ساخت اکانت سفارش #{o.id}: <code>{html.escape(str(e))}</code>")
     else:
-        if o.wallet_used:
-            shopdb.add_balance(o.tg_id, o.wallet_used)
         try:
             await bot.send_message(o.tg_id, f"❌ سفارش #{o.id} تأیید نشد. اگر واریز کرده‌اید از «💬 پشتیبانی» پیام بدهید.")
         except Exception:
@@ -1056,6 +1073,10 @@ async def send_pending(chat_id: int, bot: Bot):
         p = shopdb.plan(o.plan_id)
         caption = (f"🧾 <b>سفارش #{o.id}</b> از <code>{o.tg_id}</code>\n"
                    f"{html.escape(plan_line(p) if p else '?')}\n💰 {toman(o.final_price)}")
+        if o.kind == 'bulk':
+            import workdb
+            batch = workdb.batch(o.tg_id, o.id)
+            caption += f"\n📦 ساخت گروهی: {batch['quantity']} اکانت"
         kb = h.ikb([[("✅ تأیید", f"ord:ok:{o.id}"), ("❌ رد", f"ord:no:{o.id}")]])
         try:
             await bot.send_photo(chat_id, o.receipt, caption=caption, reply_markup=kb)

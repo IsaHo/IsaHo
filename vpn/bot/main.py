@@ -27,6 +27,7 @@ import reports
 import resilience
 import routing
 import partners
+import partnerwork
 import sub_server
 import tunnels
 import xray
@@ -189,15 +190,14 @@ async def monitor(bot: Bot) -> None:
             await xray.flush_stats()
             await check_users(bot)
             await check_tunnels(bot)
-            for o in shopdb.expire_waiting(int(time.time()) - 2 * db.DAY):
-                if o.wallet_used:
-                    shopdb.add_balance(o.tg_id, o.wallet_used)
+            shopdb.expire_waiting(int(time.time()) - 2 * db.DAY)
             await auto_real_ip(bot)
             await shop.renewal_reminders(bot)
             await reports.winback(bot, handlers.ikb)
             await reports.weekly_report(bot, notify_admins)
             await reports.capacity(bot, notify_admins)
             await check_devices(bot)
+            await partnerwork.recover(bot)
             last = int(db.get_setting("last_backup", "0"))
             if time.time() - last > db.DAY:
                 db.set_setting("last_backup", str(int(time.time())))
@@ -233,6 +233,7 @@ async def main() -> None:
 
     dp = Dispatcher()
     dp.include_router(membership.router)
+    dp.include_router(partnerwork.router)
     dp.include_router(partners.router)
     dp.include_router(shop.router)  # customer /start and shop states first
     dp.include_router(health.router)

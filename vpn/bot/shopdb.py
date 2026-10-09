@@ -109,6 +109,8 @@ def init() -> None:
             c.execute("ALTER TABLE plans ADD COLUMN kind TEXT NOT NULL DEFAULT 'plan'")
     import partnerdb
     partnerdb.init()
+    import workdb
+    workdb.init()
 
 
 # ---------- plans ----------
@@ -237,10 +239,15 @@ def use_discount(code: str) -> None:
 
 # ---------- orders ----------
 
-def create_order(**fields) -> Order:
+def create_order(*, reserve_wallet=False, **fields) -> Order:
     fields.setdefault("created_at", int(time.time()))
     cols = ", ".join(fields)
     with db.connect() as c:
+        if reserve_wallet and fields.get('wallet_used', 0):
+            wallet = fields['wallet_used']
+            if wallet < 0 or c.execute('UPDATE customers SET balance=balance-? WHERE tg_id=? AND balance>=?',
+                                      (wallet, fields['tg_id'], wallet)).rowcount != 1:
+                raise ValueError('موجودی کیف پول تغییر کرده؛ فاکتور را تازه کنید')
         cur = c.execute(f"INSERT INTO orders ({cols}) VALUES ({', '.join('?' * len(fields))})", tuple(fields.values()))
         o = order(cur.lastrowid, c)
         import partnerdb
@@ -265,7 +272,16 @@ def decide_order(order_id: int, status: str, admin_id: int) -> bool:
     with db.connect() as c:
         cur = c.execute("UPDATE orders SET status=?, decided_at=?, decided_by=? WHERE id=? AND status='pending'",
                         (status, int(time.time()), admin_id, order_id))
+        if cur.rowcount == 1 and status == 'rejected':
+            r = c.execute('SELECT tg_id,wallet_used FROM orders WHERE id=?', (order_id,)).fetchone()
+            c.execute('UPDATE customers SET balance=balance+? WHERE tg_id=?', (r['wallet_used'], r['tg_id']))
         return cur.rowcount == 1
+
+
+def submit_receipt(order_id: int, tg_id: int, receipt: str) -> bool:
+    with db.connect() as c:
+        return c.execute("UPDATE orders SET status='pending',receipt=? WHERE id=? AND tg_id=? AND status='waiting'",
+                         (receipt, order_id, tg_id)).rowcount == 1
 
 
 def auto_approve(order_id: int) -> bool:
@@ -283,11 +299,15 @@ def open_orders(since: int) -> list:
 
 
 def expire_waiting(before: int) -> list:
-    """Cancel unpaid orders (no receipt) older than `before`; returns them so wallets can be refunded."""
+    """Atomically cancel expired unpaid orders and restore their reserved purchase wallets."""
     with db.connect() as c:
+        c.execute('BEGIN IMMEDIATE')
         rows = [Order(**dict(r)) for r in c.execute(
             "SELECT * FROM orders WHERE status='waiting' AND created_at<?", (before,))]
         c.execute("UPDATE orders SET status='canceled' WHERE status='waiting' AND created_at<?", (before,))
+        for o in rows:
+            if o.wallet_used:
+                c.execute('UPDATE customers SET balance=balance+? WHERE tg_id=?', (o.wallet_used, o.tg_id))
         return rows
 
 
