@@ -181,6 +181,7 @@ def _xray_check(spec: Spec) -> tuple[bool, int, str]:
             ],
             capture_output=True,
             text=True,
+            check=False,
             env={
                 key: value
                 for key, value in os.environ.items()
@@ -255,6 +256,30 @@ def _relay_label(ip: str) -> str:
     return ip
 
 
+def public_probe_links(user):
+    paths = {"main": links.reality_link(user, tag="health-main")}
+    for node in nodes.public_nodes():
+        name = str(node["name"])
+        paths[f"public:{name}"] = links.reality_link(user, node["ip"], cfg.reality_port, f"health-{name}")
+        if node.get("domain"):
+            paths[f"cdn:{name}"] = links.cdn_link(user, node["domain"], f"health-{name}-cdn")
+    return paths
+
+
+def _add_relay_check(key, title, kind, item, stamp):
+    if not isinstance(item, dict) or not isinstance(item.get("ok"), bool):
+        return
+    # Retransmitted reports are not independent evidence of failure/recovery.
+    now = int(time.time())
+    if not now - FRESH <= stamp <= now + 30:
+        return
+    with db.connect() as c:
+        if c.execute("SELECT 1 FROM path_checks WHERE path_key=? AND checked_at>=?", (key, stamp)).fetchone():
+            return
+    healthdb.add(key, title, kind, "iran", item["ok"], int(item.get("latency_ms") or 0),
+                 str(item.get("detail") or "")[:300], stamp)
+
+
 def ingest_relay_result(data: dict) -> None:
     ip = str(data.get("ip") or "")[:64]
     result = data.get("probe_result")
@@ -262,24 +287,17 @@ def ingest_relay_result(data: dict) -> None:
     if not ip or ip not in configured or not isinstance(result, dict):
         return
     label = _relay_label(ip)
+    try:
+        stamp = int(result.get("checked_at") or time.time())
+    except (ValueError, TypeError):
+        return
     for name, title, kind in (
         ("vpn", f"{label} · اتصال واقعی از ایران", "relay"),
         ("sub", f"{label} · دریافت سابسکریپشن", "sub"),
         ("cdn", f"{label} · مسیر CDN از ایران", "cdn"),
     ):
         item = result.get(name)
-        if not isinstance(item, dict) or not isinstance(item.get("ok"), bool):
-            continue
-        healthdb.add(
-            f"relay:{ip}:{name}",
-            title,
-            kind,
-            "iran",
-            item["ok"],
-            int(item.get("latency_ms") or 0),
-            str(item.get("detail") or "")[:300],
-            int(result.get("checked_at") or time.time()),
-        )
+        _add_relay_check(f"relay:{ip}:{name}", title, kind, item, stamp)
     node_results = result.get("nodes")
     configured_nodes = {str(node["name"]): node for node in nodes.all_nodes()}
     if isinstance(node_results, dict):
@@ -291,16 +309,20 @@ def ingest_relay_result(data: dict) -> None:
                 or not isinstance(item.get("ok"), bool)
             ):
                 continue
-            healthdb.add(
-                f"relay:{ip}:node:{node_name}",
-                f"{label} → نود {node_name}",
-                "node",
-                "iran",
-                item["ok"],
-                int(item.get("latency_ms") or 0),
-                str(item.get("detail") or "")[:300],
-                int(result.get("checked_at") or time.time()),
-            )
+            _add_relay_check(f"relay:{ip}:node:{node_name}", f"{label} → نود {node_name}", "node", item, stamp)
+    paths = result.get("paths")
+    allowed = {"main": "Reality مستقیم آلمان"}
+    for node in nodes.public_nodes():
+        allowed[f"public:{node['name']}"] = f"Reality مستقیم {node['name']}"
+        if node.get("domain"):
+            allowed[f"cdn:{node['name']}"] = f"CDN {node['name']}"
+    if isinstance(paths, dict):
+        for key, item in paths.items():
+            if key in allowed:
+                _add_relay_check(f"relay:{ip}:{key}", f"{label} · {allowed[key]}",
+                                 "cdn" if key.startswith("cdn:") else "vpn", item, stamp)
+    import routing
+    routing.refresh()
 
 
 def relay_job(data: dict) -> dict | None:
@@ -323,6 +345,7 @@ def relay_job(data: dict) -> dict | None:
         "id": f"{int(now)}-{_relay_label(ip)}",
         "link": links.reality_link(user, "127.0.0.1", 443, "health-check"),
         "cdn_link": links.cdn_link(user, tag="health-cdn"),
+        "paths": public_probe_links(user),
         "sub_url": f"http://127.0.0.1:2096/sub/{user.sub_token}",
         "nodes": [
             {
@@ -390,6 +413,11 @@ def _expected_paths() -> dict[str, tuple[str, str]]:
         paths[f"relay:{host}:vpn"] = (f"IR{index} · اتصال واقعی از ایران", "relay")
         paths[f"relay:{host}:sub"] = (f"IR{index} · دریافت سابسکریپشن", "sub")
         paths[f"relay:{host}:cdn"] = (f"IR{index} · مسیر CDN از ایران", "cdn")
+        paths[f"relay:{host}:main"] = (f"IR{index} · Reality مستقیم آلمان", "vpn")
+        for node in nodes.public_nodes():
+            paths[f"relay:{host}:public:{node['name']}"] = (f"IR{index} · Reality مستقیم {node['name']}", "vpn")
+            if node.get("domain"):
+                paths[f"relay:{host}:cdn:{node['name']}"] = (f"IR{index} · CDN {node['name']}", "cdn")
         for node in nodes.all_nodes():
             if node.get("private", True):
                 paths[f"relay:{host}:node:{node['name']}"] = (
@@ -564,6 +592,9 @@ async def monitor(bot: Bot) -> None:
         try:
             await run_local_checks()
             await evaluate_alerts(bot)
+            import routing
+            routing.refresh()
+            await routing.notify_changes(bot)
             healthdb.prune()
         except Exception:
             log.exception("path-health monitor failed")

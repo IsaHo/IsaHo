@@ -66,22 +66,27 @@ def toggle_type(t: str) -> set:
     return types
 
 
-def all_links(u) -> list:
+def route_entries(u) -> list:
     types, links = enabled_types(), []
     if "relay" in types and cfg.reality_public_key:
         for i, (host, port) in enumerate(relays(), 1):
-            links.append(reality_link(u, host, port, f"IR{i}"))
+            links.append((f"relay:{host}", reality_link(u, host, port, f"IR{i}")))
     if "reality" in types and cfg.server_ip and cfg.reality_public_key:
-        links.append(reality_link(u))
+        links.append(("main", reality_link(u)))
     if "cdn" in types and cfg.domain:
-        links.append(cdn_link(u))
+        links.append(("cdn", cdn_link(u)))
     if "node" in types and cfg.reality_public_key:
         import nodes
         for n in nodes.public_nodes():
-            links.append(reality_link(u, n["ip"], cfg.reality_port, f"{n['name']}-Reality"))
+            links.append((f"node:{n['name']}", reality_link(u, n["ip"], cfg.reality_port, f"{n['name']}-Reality")))
             if n.get("domain"):
-                links.append(cdn_link(u, n["domain"], f"{n['name']}-CDN"))
+                links.append((f"cdn:{n['name']}", cdn_link(u, n["domain"], f"{n['name']}-CDN")))
     return links
+
+
+def all_links(u) -> list:
+    import routing
+    return [link for _, link in routing.choose(route_entries(u))]
 
 
 def cdn_sub_url(u) -> str:
@@ -103,7 +108,10 @@ def sub_url(u) -> str:
 
 
 def sub_body(u) -> str:
-    return base64.b64encode("\n".join(all_links(u)).encode()).decode()
+    import routing
+    entries = routing.choose(route_entries(u))
+    routing.record_delivery(u.id, entries)
+    return base64.b64encode("\n".join(link for _, link in entries).encode()).decode()
 
 
 def sub_userinfo(u) -> str:
