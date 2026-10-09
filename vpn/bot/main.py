@@ -8,6 +8,7 @@ from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.types import BotCommand
+from telegram_session import TelegramSession
 
 import db
 import admin_ui
@@ -225,7 +226,8 @@ async def main() -> None:
     shop.apply_defaults()
     await xray.ensure_started()
 
-    bot = Bot(cfg.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    bot = Bot(cfg.bot_token, session=TelegramSession(),
+              default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     shop.BOT = bot
     me = await bot.get_me()
     db.set_setting("bot_username", me.username)

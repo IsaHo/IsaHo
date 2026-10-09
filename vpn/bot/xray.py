@@ -148,8 +148,14 @@ async def _run(*args, timeout: int = 15) -> tuple:
         *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     try:
         out, err = await asyncio.wait_for(proc.communicate(), timeout)
+    except asyncio.CancelledError:
+        if proc.returncode is None:
+            proc.kill()
+        await proc.wait()
+        raise
     except asyncio.TimeoutError:
         proc.kill()
+        await proc.wait()
         return 1, "", "timeout"
     return proc.returncode, out.decode(errors="replace"), err.decode(errors="replace")
 

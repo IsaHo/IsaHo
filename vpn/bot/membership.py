@@ -18,6 +18,8 @@ from config import cfg
 router = Router()
 log = logging.getLogger(__name__)
 _lock = asyncio.Lock()
+STATUS_TIMEOUT = 5
+GATE_TIMEOUT = 8
 
 
 def required() -> bool:
@@ -62,11 +64,14 @@ async def status(bot: Bot, tg_id: int):
     """None means unknown: never interpret an API/admin failure as a departure."""
     if not required() or tg_id in db.admin_ids():
         return True
-    try:
+    async def query():
         own = await bot.get_chat_member(channel_id(), bot.id)
         if own.status not in ("creator", "administrator"):
             return None
         return is_member(await bot.get_chat_member(channel_id(), tg_id))
+    try:
+        # One deadline covers BOTH Telegram calls, including DNS/connect waits.
+        return await asyncio.wait_for(query(), timeout=STATUS_TIMEOUT)
     except (TelegramAPIError, TimeoutError, OSError, ValueError):
         log.warning("membership check unavailable (account state unchanged)")
         return None
@@ -105,7 +110,12 @@ async def reconcile_user(bot: Bot, tg_id: int, *, notify: bool = True):
 
 
 async def ensure(bot: Bot, tg_id: int, message) -> bool:
-    joined = await reconcile_user(bot, tg_id)
+    try:
+        # Includes queueing behind reconciliation and pending Xray hot updates.
+        joined = await asyncio.wait_for(reconcile_user(bot, tg_id), timeout=GATE_TIMEOUT)
+    except TimeoutError:
+        joined = None
+        log.warning("membership gate deadline reached (no access granted)")
     if joined is True:
         return True
     text = JOIN_TEXT if joined is False else (
