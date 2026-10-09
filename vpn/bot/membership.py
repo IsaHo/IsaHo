@@ -1,0 +1,200 @@
+"""Announcement-channel membership, independent from account billing restrictions."""
+import asyncio
+import logging
+
+import db
+import xray
+from aiogram import Bot, F, Router
+from aiogram.exceptions import TelegramAPIError
+from aiogram.types import (
+    CallbackQuery,
+    ChatMemberUpdated,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+)
+from config import cfg
+
+router = Router()
+log = logging.getLogger(__name__)
+_lock = asyncio.Lock()
+
+
+def required() -> bool:
+    return db.get_setting("membership_enabled") == "1" and bool(channel_id())
+
+
+def channel_id():
+    value = db.get_setting("membership_channel") or db.get_setting("status_chat")
+    return int(value) if value and value.lstrip("-").isdigit() else None
+
+
+def controller(user):
+    # A linked end user takes precedence over the reseller who purchased it.
+    return user.tg_id or user.owner_tg
+
+
+def is_member(member) -> bool:
+    return member.status in ("creator", "administrator", "member") or (
+        member.status == "restricted" and bool(getattr(member, "is_member", False)))
+
+
+def keyboard() -> InlineKeyboardMarkup:
+    rows = []
+    url = db.get_setting("membership_url")
+    if url.startswith("https://t.me/"):
+        rows.append([InlineKeyboardButton(text="📣 عضویت در کانال اطلاع‌رسانی", url=url)])
+    rows.append([InlineKeyboardButton(text="✅ عضو شدم؛ بررسی کن", callback_data="membership:check")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+JOIN_TEXT = (
+    "📣 <b>باخبر بمان؛ متصل بمان</b>\n\n"
+    "وضعیت اتصال از ایران و اطلاعیه‌های سرویس در کانال EisaVPN منتشر می‌شود.\n"
+    "برای دریافت تست، خرید و استفاده از اشتراک، عضو کانال شوید.\n\n"
+    "۱. دکمهٔ عضویت را بزنید.\n۲. برگردید و «عضو شدم؛ بررسی کن» را بزنید.\n\n"
+    "⏸ خروج از کانال دسترسی را موقتاً متوقف می‌کند؛ با عضویت دوباره، "
+    "اشتراک معتبر باز می‌شود. حجم ریست نمی‌شود و تاریخ انقضا طبق روال ادامه دارد."
+)
+
+
+async def status(bot: Bot, tg_id: int):
+    """None means unknown: never interpret an API/admin failure as a departure."""
+    if not required() or tg_id in db.admin_ids():
+        return True
+    try:
+        own = await bot.get_chat_member(channel_id(), bot.id)
+        if own.status not in ("creator", "administrator"):
+            return None
+        return is_member(await bot.get_chat_member(channel_id(), tg_id))
+    except (TelegramAPIError, TimeoutError, OSError, ValueError):
+        log.warning("membership check unavailable (account state unchanged)")
+        return None
+
+
+async def reconcile_user(bot: Bot, tg_id: int):
+    async with _lock:
+        joined = await status(bot, tg_id)
+        if joined is None:
+            return None
+        changed = False
+        for user in db.all_users():
+            if controller(user) != tg_id:
+                continue
+            blocked = int(not joined)
+            if user.channel_blocked != blocked:
+                db.update(user.id, channel_blocked=blocked, channel_pending=1)
+                changed = True
+            current = db.get(user.id)
+            if current.channel_pending:
+                try:
+                    await xray.sync_user(current, current.accessible, allow_restart=False)
+                except (RuntimeError, OSError, ValueError):
+                    log.warning("membership hot-update pending for account %s", user.id)
+                else:
+                    db.update(user.id, channel_pending=0)
+        if changed:
+            try:
+                text = ("✅ <b>عضویت تأیید شد</b>\nتعلیق عضویت برداشته شد؛ اکانت‌های دارای "
+                        "اعتبار و حجم قابل استفاده‌اند." if joined else
+                        "⏸ <b>عضویت در کانال لازم است</b>\nبرای بازشدن دسترسی، دوباره عضو شوید.\n\n" + JOIN_TEXT)
+                await bot.send_message(tg_id, text, reply_markup=None if joined else keyboard())
+            except (TelegramAPIError, TimeoutError, OSError):
+                log.debug("membership notification unavailable")
+        return joined
+
+
+async def ensure(bot: Bot, tg_id: int, message) -> bool:
+    joined = await reconcile_user(bot, tg_id)
+    if joined is True:
+        return True
+    text = JOIN_TEXT if joined is False else (
+        "⚠️ بررسی عضویت فعلاً ممکن نیست؛ چند لحظه بعد دوباره امتحان کنید. "
+        "وضعیت فعلی اشتراک شما به علت این خطا تغییر نکرده است.")
+    await message.answer(text, reply_markup=keyboard())
+    return False
+
+
+async def prepare_account(bot: Bot, user, *, new: bool = False):
+    """Paid orders are fulfilled, but never activated before membership is verified."""
+    who = controller(user)
+    joined = await status(bot, who) if who else True
+    if required() and (joined is False or (new and joined is None)):
+        db.update(user.id, channel_blocked=1, channel_pending=1)
+    elif joined is True and user.channel_blocked:
+        db.update(user.id, channel_blocked=0, channel_pending=1)
+    return db.get(user.id)
+
+
+@router.chat_member()
+async def member_changed(event: ChatMemberUpdated, bot: Bot):
+    if required() and event.chat.id == channel_id() and not event.new_chat_member.user.is_bot:
+        # Requery live state: delayed leave events must not suspend someone who rejoined.
+        await reconcile_user(bot, event.new_chat_member.user.id)
+
+
+@router.callback_query(F.data == "membership:check")
+async def check_callback(cb: CallbackQuery, bot: Bot):
+    await cb.answer("در حال بررسی عضویت…")
+    if await ensure(bot, cb.from_user.id, cb.message):
+        await cb.message.answer("✅ عضویت تأیید شد. اکنون تست یا خرید را از منوی اصلی انتخاب کنید.")
+
+
+def settings_view():
+    blocked = sum(bool(u.channel_blocked) for u in db.all_users())
+    state = "فعال" if required() else "خاموش"
+    rows = [[InlineKeyboardButton(text="⏸ خاموش‌کردن شرط عضویت" if required() else
+                                 "🔐 فعال‌کردن شرط عضویت", callback_data="membership:toggle")],
+            [InlineKeyboardButton(text="↩️ داده و اعلان‌ها", callback_data="nav:set:data")]]
+    return ((f"📣 <b>عضویت کانال اطلاع‌رسانی</b>\n\nوضعیت: {state}\nاکانت‌های متوقف: {blocked}\n\n"
+            "تست و خرید نیازمند عضویت است. خروج، دسترسی را موقتاً متوقف می‌کند.\n"
+            "با خاموش‌کردن این قابلیت فقط تعلیق عضویت برداشته می‌شود؛ سایر محدودیت‌ها باقی می‌ماند."),
+            InlineKeyboardMarkup(inline_keyboard=rows))
+
+
+@router.callback_query(F.data == "membership:menu")
+async def settings_callback(cb: CallbackQuery):
+    if cb.from_user.id not in db.admin_ids():
+        await cb.answer("فقط مدیر ربات", show_alert=True)
+        return
+    await cb.answer()
+    text, kb = settings_view()
+    await cb.message.edit_text(text, reply_markup=kb)
+
+
+@router.callback_query(F.data == "membership:toggle")
+async def toggle_callback(cb: CallbackQuery, bot: Bot):
+    if cb.from_user.id not in cfg.admin_ids:
+        await cb.answer("فقط مالک ربات", show_alert=True)
+        return
+    if not required():
+        if not channel_id() or not db.get_setting("membership_url"):
+            await cb.answer("ابتدا کانال و لینک عضویت تنظیم شود", show_alert=True)
+            return
+        try:
+            own = await bot.get_chat_member(channel_id(), bot.id)
+            if own.status not in ("creator", "administrator"):
+                raise ValueError("not admin")
+        except (TelegramAPIError, TimeoutError, OSError, ValueError):
+            await cb.answer("دسترسی ادمین ربات به کانال تأیید نشد", show_alert=True)
+            return
+    db.set_setting("membership_enabled", "0" if required() else "1")
+    await cb.answer("✅ تنظیم ذخیره شد؛ حداکثر یک دقیقه تا همگام‌سازی")
+    text, kb = settings_view()
+    await cb.message.edit_text(text, reply_markup=kb)
+
+
+async def reconcile(bot: Bot):
+    targets = {controller(u) for u in db.all_users()
+               if controller(u) and (u.enabled or u.channel_blocked or u.channel_pending)}
+    for tg_id in sorted(targets):
+        await reconcile_user(bot, tg_id)
+        await asyncio.sleep(0.1)
+
+
+async def monitor(bot: Bot):
+    while True:
+        try:
+            await reconcile(bot)
+        except Exception:
+            log.exception("membership reconciliation failed")
+        await asyncio.sleep(60)

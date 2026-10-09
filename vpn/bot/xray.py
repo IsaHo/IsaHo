@@ -246,17 +246,24 @@ async def _api_remove(name: str) -> bool:
     return ok
 
 
-async def sync_user(user, enabled: bool) -> None:
+async def sync_user(user, enabled: bool, *, allow_restart: bool = True) -> None:
     """Persist config, then apply to the running Xray without dropping other users.
     Falls back to a full restart when the API call fails."""
     async with _lock:
+        await flush_stats()
         await write_config()
+        current = db.get(user.id)
+        enabled = bool(enabled and current and current.accessible)
+        if current:
+            user = current
         if enabled:
             await _api_remove(user.name)  # no-op if absent; avoids duplicate errors
             ok = await _api_add(user)
         else:
             ok = await _api_remove(user.name)
         if not ok:
+            if not allow_restart:
+                raise RuntimeError("Xray hot-update unavailable; retry without restart")
             log.warning("xray API failed for %s, restarting xray", user.name)
             await restart()
 
@@ -265,3 +272,11 @@ async def apply_all() -> None:
     async with _lock:
         await write_config()
         await restart()
+
+
+async def ensure_started() -> None:
+    """Bot-only updates must not restart an already running customer data plane."""
+    async with _lock:
+        await write_config()
+        if not await is_active():
+            await restart()

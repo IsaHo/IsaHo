@@ -203,6 +203,14 @@ def qr_png(data: str) -> bytes:
 
 
 async def apply_user(u) -> None:
+    if u.channel_blocked:
+        db.update(u.id, channel_pending=1)
+        try:
+            await xray.sync_user(u, False, allow_restart=False)
+        except (RuntimeError, OSError, ValueError):
+            return  # membership monitor retries without restarting other customers
+        db.update(u.id, channel_pending=0)
+        return
     await xray.sync_user(u, bool(u.enabled))
 
 

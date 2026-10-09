@@ -25,6 +25,8 @@ def remaining_days(u) -> str:
 
 
 def status_icon(u) -> str:
+    if getattr(u, "channel_blocked", 0):
+        return "⏸"
     if not u.enabled:
         return "🔴"
     if (u.traffic_limit and u.used >= u.traffic_limit * 0.9) or (
@@ -68,6 +70,8 @@ def user_card(u) -> str:
             u.disabled_reason, "استفاده روی دستگاه‌های زیاد (موقت)" if u.disabled_reason.startswith("iplimit:")
             else u.disabled_reason)
         lines.append(f"⛔ علت غیرفعال: {html.escape(reason)}")
+    if getattr(u, "channel_blocked", 0):
+        lines.append("⏸ دسترسی متوقف است؛ عضو کانال اطلاع‌رسانی شوید و «بررسی عضویت» را بزنید.")
     if u.tg_id:
         lines.append(f"👤 تلگرام: <code>{u.tg_id}</code>")
     if u.note:

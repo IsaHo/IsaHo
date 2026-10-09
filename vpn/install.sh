@@ -18,6 +18,37 @@ die() { red "✖ $*"; exit 1; }
 command -v apt-get >/dev/null || die "Only Debian/Ubuntu are supported"
 [[ -f $SRC_DIR/bot/main.py ]] || die "bot/ directory not found next to install.sh"
 
+# Existing deployments update application code only. Infrastructure changes must
+# be requested explicitly with --full; normal `isaho update` never touches Xray,
+# secrets, firewall, SSH, certificates or kernel/network settings.
+if [[ ${1:-} == --bot-only || ( -f $ENV_FILE && -d $APP_DIR/venv && ${1:-} != --full ) ]]; then
+    [[ -f $ENV_FILE && -d $APP_DIR/bot && -x $APP_DIR/venv/bin/python ]] || die "Existing bot install required"
+    [[ $SRC_DIR != "$APP_DIR" ]] || die "Run bot-only update from the Git checkout"
+    stage=$(mktemp -d "$APP_DIR/bot-update.XXXXXX")
+    cp -a "$SRC_DIR/bot" "$stage/bot"
+    "$APP_DIR/venv/bin/python" -m compileall -q "$stage/bot"
+    "$APP_DIR/venv/bin/pip" install -q -r "$stage/bot/requirements.txt"
+    previous=$(mktemp -d "$APP_DIR/bot-backup.XXXXXX")
+    systemctl stop isaho-bot
+    mv "$APP_DIR/bot" "$previous/bot"
+    mv "$stage/bot" "$APP_DIR/bot"
+    cp "$SRC_DIR/install.sh" "$APP_DIR/install.sh"
+    git -C "$SRC_DIR" rev-parse --show-toplevel >"$APP_DIR/repo_path"
+    if ! systemctl start isaho-bot; then
+        yellow "Bot start failed; checking rollback."
+    fi
+    sleep 5
+    if ! systemctl is-active -q isaho-bot; then
+        mv "$APP_DIR/bot" "$previous/failed-bot"
+        mv "$previous/bot" "$APP_DIR/bot"
+        systemctl start isaho-bot
+        die "Bot update failed; previous code restored. Check isaho logs privately."
+    fi
+    rmdir "$stage"
+    green "Bot updated; Xray and infrastructure unchanged. Previous code: $previous/bot"
+    exit 0
+fi
+
 ask() { # ask VAR "prompt" "default"
     local var=$1 prompt=$2 def=${3:-} val
     if [[ -n ${!var:-} ]]; then return; fi
