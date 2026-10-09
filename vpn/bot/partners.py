@@ -77,8 +77,11 @@ def dashboard(tg_id):
             f"🎯 پورسانت فروش مستقیم: <b>{p['percent']}٪</b>\n\n"
             "خرید، تمدید و حجم اضافهٔ مشتریِ معرفی‌شده، پس از تأیید پرداخت و تحویل سرویس، "
             "پورسانت دارد. مبنا فقط مبلغ پرداخت نقدی است؛ اعتبار هدیه شامل آن نمی‌شود.")
-    rows = [[("🔗 لینک اختصاصی", "rp:link"), ("👥 مشتری‌ها", "rp:customers:0")],
-            [("📒 ریز درآمد", "rp:sales:0"), ("🧾 برداشت‌های من", "rp:withdrawals:0")]]
+    rows = [[("🗂 مشتری‌های اختصاصی", "pw:contacts:0"), ("🔗 لینک معرفی", "rp:link")],
+            [("📦 بسته‌ها و QR", "pw:batches:0"), ("📊 سود و حسابداری", "pw:finance")],
+            [("💎 پورسانت مستقیم", "rp:sales:0"), ("🧾 برداشت‌ها", "rp:withdrawals:0")]]
+    if p['enabled']:
+        rows.insert(1, [("✨ ساخت گروهی", "pw:bulk")])
     if s['available'] > 0:
         rows.append([("💸 درخواست برداشت", "rp:withdraw")])
     rows.append([("🔄 تازه‌سازی", "rp:home")])
@@ -88,6 +91,9 @@ def dashboard(tg_id):
 @router.message(Command("partner"))
 @router.message(F.text == BUTTON)
 async def home(msg: Message, state: FSMContext):
+    if msg.chat.type != 'private':
+        await msg.answer("پنل نمایندگی را در گفت‌وگوی خصوصی با ربات باز کنید.")
+        return
     await state.clear()
     if not allowed(msg.from_user.id):
         await msg.answer("پنل ویژهٔ نمایندگان تأییدشده است؛ برای درخواست نمایندگی با پشتیبانی تماس بگیرید.")
@@ -107,6 +113,9 @@ def paged(kind, page, has_next):
 
 @router.callback_query(F.data.startswith("rp:"))
 async def callback(cb: CallbackQuery, state: FSMContext, bot):
+    if getattr(getattr(getattr(cb, 'message', None), 'chat', None), 'type', None) != 'private':
+        await cb.answer("پنل را در گفت‌وگوی خصوصی با ربات باز کنید", show_alert=True)
+        return
     if not allowed(cb.from_user.id):
         await cb.answer("نمایندگی ثبت نشده است", show_alert=True)
         return
