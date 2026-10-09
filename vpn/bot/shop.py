@@ -18,6 +18,7 @@ import db
 import fmt
 import handlers as h
 import links
+import membership
 import shopdb
 import smspay
 from config import cfg
@@ -180,8 +181,10 @@ def plans_kb(target: str):
 
 
 @router.message(F.text == h.BTN_BUY)
-async def buy(msg: Message, state: FSMContext):
+async def buy(msg: Message, state: FSMContext, bot: Bot):
     await state.clear()
+    if not await membership.ensure(bot, msg.from_user.id, msg):
+        return
     if not shop_open():
         await msg.answer("فروش فعلاً بسته است. از «💬 پشتیبانی» پیام بدهید.")
         return
@@ -345,6 +348,9 @@ async def pay_cancel(cb: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data == "pay")
 async def pay(cb: CallbackQuery, state: FSMContext, bot: Bot):
+    if not await membership.ensure(bot, cb.from_user.id, cb.message):
+        await cb.answer("ابتدا عضویت در کانال را تأیید کنید", show_alert=True)
+        return
     data = await state.get_data()
     if not data.get("plan_id"):
         await cb.answer("فاکتور منقضی شده؛ دوباره پلن را انتخاب کنید", show_alert=True)
@@ -430,6 +436,7 @@ def unique_name(base: str) -> str:
 
 
 async def fulfill(bot: Bot, o) -> None:
+    await membership.reconcile_user(bot, o.tg_id)
     p = shopdb.plan(o.plan_id)
     buyer = shopdb.customer(o.tg_id)
     now = int(time.time())
@@ -440,7 +447,9 @@ async def fulfill(bot: Bot, o) -> None:
         else:
             db.update(u.id, tg_id=o.tg_id)
         u = db.get(u.id)
-        await h.apply_user(u)
+        u = await membership.prepare_account(bot, u, new=True)
+        if not u.channel_blocked:
+            await h.apply_user(u)
         head = "🎉 خرید شما تأیید شد!"
     elif o.kind == "addon":
         u = db.get(o.user_id)
@@ -463,6 +472,10 @@ async def fulfill(bot: Bot, o) -> None:
         head = "✅ تمدید شما انجام شد!"
     if o.discount_code:
         shopdb.use_discount(o.discount_code)
+    # Recheck at fulfillment: a paid order can finish after the customer leaves.
+    u = await membership.prepare_account(bot, db.get(u.id))
+    await membership.reconcile_user(bot, membership.controller(u))
+    u = db.get(u.id)
     # referral reward
     pct = int(db.get_setting("shop_ref_percent", "0") or 0)
     if pct and buyer.referrer and o.final_price:
@@ -478,6 +491,8 @@ async def fulfill(bot: Bot, o) -> None:
         await bot.send_photo(o.tg_id, BufferedInputFile(h.qr_png(links.sub_url(u)), "qr.png"),
                              caption=h.links_text(u).rsplit("\n🤖", 1)[0])
         await bot.send_message(o.tg_id, h.HELP_TEXT, reply_markup=h.USER_KB)
+        if u.channel_blocked:
+            await bot.send_message(o.tg_id, membership.JOIN_TEXT, reply_markup=membership.keyboard())
     except Exception:
         log.warning("could not deliver order %s", o.id)
 
@@ -486,6 +501,8 @@ async def fulfill(bot: Bot, o) -> None:
 
 @router.message(F.text == h.BTN_TEST)
 async def test_account(msg: Message, bot: Bot):
+    if not await membership.ensure(bot, msg.from_user.id, msg):
+        return
     raw = db.get_setting("shop_test", "")
     if not raw:
         await msg.answer("اکانت تست فعلاً فعال نیست.")

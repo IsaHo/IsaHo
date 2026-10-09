@@ -170,6 +170,12 @@ def update_customer(tg_id: int, **fields) -> None:
         c.execute(f"UPDATE customers SET {cols} WHERE tg_id=?", (*fields.values(), tg_id))
 
 
+def reset_trial_history() -> int:
+    """Allow one fresh trial per customer; preserve accounts, wallets and orders."""
+    with db.connect() as c:
+        return c.execute("UPDATE customers SET test_used=0 WHERE test_used<>0").rowcount
+
+
 def add_balance(tg_id: int, amount: int) -> None:
     with db.connect() as c:
         c.execute("UPDATE customers SET balance=balance+? WHERE tg_id=?", (amount, tg_id))

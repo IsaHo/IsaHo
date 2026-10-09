@@ -39,6 +39,11 @@ CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS channel_membership (
+    user_id INTEGER PRIMARY KEY,
+    blocked INTEGER NOT NULL DEFAULT 0,
+    pending INTEGER NOT NULL DEFAULT 0
+);
 """
 
 
@@ -61,6 +66,12 @@ class User:
     pending_days: int = 0  # >0: validity starts at first use
     ip_limit: int = 0      # max simultaneous devices (distinct IPs); 0 = use the default
     owner_tg: Optional[int] = None  # reseller who bought it (shop)
+    channel_blocked: int = 0  # independent of manual/expiry/device restrictions
+    channel_pending: int = 0  # retry a failed hot-update after restart
+
+    @property
+    def accessible(self) -> bool:
+        return bool(self.enabled and not self.channel_blocked and not self.expired and not self.over_limit)
 
     @property
     def used(self) -> int:
@@ -93,7 +104,16 @@ def init() -> None:
 
 
 def _row(r) -> Optional[User]:
-    return User(**dict(r)) if r else None
+    if not r:
+        return None
+    data = dict(r)
+    # Separate table keeps the users schema compatible with a code rollback.
+    with connect() as c:
+        membership = c.execute("SELECT blocked,pending FROM channel_membership WHERE user_id=?",
+                               (data["id"],)).fetchone()
+    if membership:
+        data.update(channel_blocked=membership["blocked"], channel_pending=membership["pending"])
+    return User(**data)
 
 
 def create_user(name: str, limit_gb: float, days: int, first_use: bool = False) -> User:
@@ -150,7 +170,7 @@ def all_users() -> list:
 
 
 def active_users() -> list:
-    return [u for u in all_users() if u.enabled]
+    return [u for u in all_users() if u.accessible]
 
 
 def search(q: str) -> list:
@@ -162,9 +182,16 @@ def search(q: str) -> list:
 def update(user_id: int, **fields) -> None:
     if not fields:
         return
-    cols = ", ".join(f"{k}=?" for k in fields)
+    channel = {k.removeprefix("channel_"): fields.pop(k) for k in ("channel_blocked", "channel_pending")
+               if k in fields}
     with connect() as c:
-        c.execute(f"UPDATE users SET {cols} WHERE id=?", (*fields.values(), user_id))
+        if fields:
+            cols = ", ".join(f"{k}=?" for k in fields)
+            c.execute(f"UPDATE users SET {cols} WHERE id=?", (*fields.values(), user_id))
+        if channel:
+            c.execute("INSERT OR IGNORE INTO channel_membership(user_id) VALUES (?)", (user_id,))
+            cols = ", ".join(f"{k}=?" for k in channel)
+            c.execute(f"UPDATE channel_membership SET {cols} WHERE user_id=?", (*channel.values(), user_id))
 
 
 def add_traffic(stats: dict) -> None:
@@ -207,6 +234,7 @@ def daily_totals(days: int = 7) -> list:
 def delete(user_id: int) -> None:
     with connect() as c:
         c.execute("DELETE FROM users WHERE id=?", (user_id,))
+        c.execute("DELETE FROM channel_membership WHERE user_id=?", (user_id,))
 
 
 def extra_admins() -> list:

@@ -21,6 +21,7 @@ import support
 import supportdb
 import devices
 import links
+import membership
 import relays
 import reports
 import resilience
@@ -51,12 +52,14 @@ async def notify(bot: Bot, user, text: str) -> None:
 
 async def check_users(bot: Bot) -> None:
     now = time.time()
-    for u in db.active_users():
+    for u in db.all_users():
+        if not u.enabled:
+            continue
         name = html.escape(u.name)
         reason = "expired" if u.expired else "traffic" if u.over_limit else ""
         if reason:
             db.update(u.id, enabled=0, disabled_reason=reason)
-            await xray.sync_user(u, False)
+            await handlers.apply_user(db.get(u.id))
             why = "تاریخ انقضا رسید" if reason == "expired" else "حجم تمام شد"
             await notify(bot, u, f"⛔ اکانت <b>{name}</b> غیرفعال شد: {why}.")
             continue
@@ -130,7 +133,7 @@ async def check_devices(bot: Bot) -> None:
     for u in db.all_users():
         if not u.enabled and u.disabled_reason.startswith("iplimit:") and now >= int(u.disabled_reason[8:]):
             db.update(u.id, enabled=1, disabled_reason="")
-            await xray.sync_user(db.get(u.id), True)
+            await handlers.apply_user(db.get(u.id))
     if db.get_setting("real_ip") != "1":
         return
     devices.scan()
@@ -150,7 +153,7 @@ async def check_devices(bot: Bot) -> None:
         nets = ", ".join(devices.networks(u.name)[:8])
         if action == "disable":
             db.update(u.id, enabled=0, disabled_reason=f"iplimit:{int(now + DEVICE_BAN)}")
-            await xray.sync_user(u, False)
+            await handlers.apply_user(db.get(u.id))
             await notify(bot, u, f"⛔ اکانت <b>{name}</b> با {n} دستگاه هم‌زمان (حد: {limit}) "
                                  "استفاده شد و ۱۵ دقیقه قطع شد.")
         elif now - _device_warned.get(u.name, 0) > 6 * 3600:
@@ -218,7 +221,7 @@ async def main() -> None:
     supportdb.init()
     healthdb.init()
     shop.apply_defaults()
-    await xray.apply_all()
+    await xray.ensure_started()
 
     bot = Bot(cfg.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     shop.BOT = bot
@@ -227,6 +230,7 @@ async def main() -> None:
     await bot.set_my_commands([BotCommand(command="start", description="منوی اصلی")])
 
     dp = Dispatcher()
+    dp.include_router(membership.router)
     dp.include_router(shop.router)  # customer /start and shop states first
     dp.include_router(health.router)
     dp.include_router(resilience.router)
@@ -237,6 +241,7 @@ async def main() -> None:
     runner = await sub_server.start()
     task = asyncio.create_task(monitor(bot))
     health_task = asyncio.create_task(health.monitor(bot))
+    membership_task = asyncio.create_task(membership.monitor(bot))
     for admin_id in cfg.admin_ids:
         try:
             await bot.send_message(admin_id, "🚀 ربات و سرور VPN روشن شد. /start")
@@ -247,6 +252,7 @@ async def main() -> None:
     finally:
         task.cancel()
         health_task.cancel()
+        membership_task.cancel()
         await runner.cleanup()
         await xray.flush_stats()
 

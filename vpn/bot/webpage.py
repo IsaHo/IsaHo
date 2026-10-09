@@ -24,7 +24,9 @@ def render(u) -> str:
     qr = segno.make(sub, error="m").svg_inline(scale=5, dark="#111827", light="#ffffff", border=2)
     used, total = u.used, u.traffic_limit
     pct = min(100, round(used / total * 100)) if total else 0
-    if not u.enabled:
+    if getattr(u, "channel_blocked", 0):
+        state, color = "نیازمند عضویت در کانال", "#d97706"
+    elif not u.enabled:
         state, color = "غیرفعال", "#dc2626"
     elif (total and pct >= 90) or (u.expire_at and u.expire_at - time.time() < 3 * db.DAY):
         state, color = "رو به اتمام", "#d97706"

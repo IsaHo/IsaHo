@@ -179,6 +179,7 @@ def data_settings_view() -> tuple[str, object]:
             [
                 [("💾 بکاپ همین حالا", "nav:backup")],
                 [("📦 کانال بکاپ", "set:bchat"), ("📣 کانال وضعیت", "set:schat")],
+                [("🔐 عضویت کانال اطلاع‌رسانی", "membership:menu")],
                 [("↩️ مدیریت", "nav:manage"), ("🏠 خانه", "nav:home")],
             ]
         ),

@@ -162,6 +162,8 @@ def diagnostic_report(
         lines.append("🔴 وضعیت: زمان اشتراک به پایان رسیده است.")
     elif u.over_limit:
         lines.append("🔴 وضعیت: حجم اشتراک تمام شده است.")
+    elif u.channel_blocked:
+        lines.append("⏸ دسترسی به دلیل عضو نبودن در کانال متوقف است؛ عضو شوید و عضویت را بررسی کنید.")
     else:
         lines.append("🟢 حساب فعال است و حجم/زمان آن تمام نشده.")
     limit = fmt.size(u.traffic_limit) if u.traffic_limit else "نامحدود"
@@ -209,7 +211,7 @@ def diagnostic_report(
             "📥 لینک سابسکریپشن:",
             f"<code>{html.escape(links.sub_url(u))}</code>",
         ]
-    elif category == "connect" and u.enabled and not u.expired and not u.over_limit:
+    elif category == "connect" and u.accessible:
         lines += [
             "",
             "پیشنهاد سریع:",
@@ -228,6 +230,8 @@ def diagnostic_report(
 
 def diagnostic_kb(category: str, user_id: int | None, u=None):
     rows = []
+    if u and u.channel_blocked:
+        rows.append([("📣 عضویت و بررسی کانال", "membership:check")])
     if u and (u.expired or u.disabled_reason == "expired"):
         rows.append([("🔄 تمدید همین حساب", f"rn:{u.id}")])
     if u and (u.over_limit or u.disabled_reason == "traffic") and shopdb.addons():
