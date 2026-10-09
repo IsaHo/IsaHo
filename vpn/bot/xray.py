@@ -242,7 +242,11 @@ async def _api_remove(name: str) -> bool:
     for tag in all_tags():
         code, out, err = await _run(cfg.xray_bin, "api", "rmu", f"--server={cfg.api_addr}",
                                     f"-tag={tag}", name)
-        ok = ok and code == 0 and "error" not in (out + err).lower()
+        response = out + err
+        # A repeated removal has already achieved its goal. Do not keep old
+        # expired users in the retry queue or restart Xray for this response.
+        absent = f"proxy/vless: User {name} not found." in response
+        ok = ok and code == 0 and ("error" not in response.lower() or absent)
     return ok
 
 
