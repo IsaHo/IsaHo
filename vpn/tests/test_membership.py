@@ -52,6 +52,32 @@ class MembershipTests(unittest.IsolatedAsyncioTestCase):
     def user(self):
         return db.get(self.u.id)
 
+    async def test_slow_telegram_is_bounded_without_blocking_account(self):
+        async def slow(*args):
+            await asyncio.sleep(60)
+        self.bot.get_chat_member.side_effect = slow
+        with mock.patch.object(membership, 'STATUS_TIMEOUT', 0.02):
+            self.assertIsNone(await asyncio.wait_for(membership.status(self.bot, 101), 0.2))
+        self.assertFalse(self.user().channel_blocked)
+
+    async def test_gate_cannot_queue_indefinitely_or_bypass_membership(self):
+        message = SimpleNamespace(answer=mock.AsyncMock())
+        async with membership._lock:
+            with mock.patch.object(membership, 'GATE_TIMEOUT', 0.02):
+                self.assertFalse(await asyncio.wait_for(membership.ensure(self.bot, 101, message), 0.2))
+        self.assertFalse(self.user().channel_blocked)
+        self.sync.assert_not_awaited()
+        message.answer.assert_awaited_once()
+
+    async def test_telegram_session_keeps_tls_and_uses_ipv4(self):
+        import socket
+
+        from telegram_session import TelegramSession
+        session = TelegramSession()
+        self.assertEqual(session._connector_init['family'], socket.AF_INET)
+        self.assertTrue(session._connector_init['ssl'].check_hostname)
+        await session.close()
+
     async def test_leave_suspends_without_changing_billing(self):
         before = self.user()
         self.joined = False
