@@ -146,6 +146,8 @@ def user_kb(u) -> InlineKeyboardMarkup:
         [("♻️ ریست مصرف", f"rst:{u.id}"), ("🔑 تغییر UUID", f"uuid:{u.id}")],
         [toggle, ("📝 یادداشت", f"note:{u.id}")],
         [("📱 محدودیت دستگاه", f"ipl:{u.id}")],
+        [("🔐 بازگرداندن شرط عضویت" if u.channel_exempt else "🔓 دسترسی بدون عضویت",
+          f"membership:exempt:{u.id}")],
         [("🗑 حذف", f"del:{u.id}"), ("🔄 بروزرسانی", f"u:{u.id}")],
         [("🔙 لیست کاربران", "list:0")],
     ])

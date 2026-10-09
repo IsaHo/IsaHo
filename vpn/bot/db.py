@@ -42,7 +42,8 @@ CREATE TABLE IF NOT EXISTS settings (
 CREATE TABLE IF NOT EXISTS channel_membership (
     user_id INTEGER PRIMARY KEY,
     blocked INTEGER NOT NULL DEFAULT 0,
-    pending INTEGER NOT NULL DEFAULT 0
+    pending INTEGER NOT NULL DEFAULT 0,
+    exempt INTEGER NOT NULL DEFAULT 0
 );
 """
 
@@ -68,6 +69,7 @@ class User:
     owner_tg: Optional[int] = None  # reseller who bought it (shop)
     channel_blocked: int = 0  # independent of manual/expiry/device restrictions
     channel_pending: int = 0  # retry a failed hot-update after restart
+    channel_exempt: int = 0  # owner-approved per-account membership exception
 
     @property
     def accessible(self) -> bool:
@@ -101,6 +103,9 @@ def init() -> None:
             c.execute("ALTER TABLE users ADD COLUMN pending_days INTEGER NOT NULL DEFAULT 0")
         if "ip_limit" not in cols:
             c.execute("ALTER TABLE users ADD COLUMN ip_limit INTEGER NOT NULL DEFAULT 0")
+        membership_cols = {r["name"] for r in c.execute("PRAGMA table_info(channel_membership)")}
+        if "exempt" not in membership_cols:
+            c.execute("ALTER TABLE channel_membership ADD COLUMN exempt INTEGER NOT NULL DEFAULT 0")
 
 
 def _row(r) -> Optional[User]:
@@ -109,10 +114,11 @@ def _row(r) -> Optional[User]:
     data = dict(r)
     # Separate table keeps the users schema compatible with a code rollback.
     with connect() as c:
-        membership = c.execute("SELECT blocked,pending FROM channel_membership WHERE user_id=?",
+        membership = c.execute("SELECT blocked,pending,exempt FROM channel_membership WHERE user_id=?",
                                (data["id"],)).fetchone()
     if membership:
-        data.update(channel_blocked=membership["blocked"], channel_pending=membership["pending"])
+        data.update(channel_blocked=membership["blocked"], channel_pending=membership["pending"],
+                    channel_exempt=membership["exempt"])
     return User(**data)
 
 
@@ -182,7 +188,8 @@ def search(q: str) -> list:
 def update(user_id: int, **fields) -> None:
     if not fields:
         return
-    channel = {k.removeprefix("channel_"): fields.pop(k) for k in ("channel_blocked", "channel_pending")
+    channel = {k.removeprefix("channel_"): fields.pop(k)
+               for k in ("channel_blocked", "channel_pending", "channel_exempt")
                if k in fields}
     with connect() as c:
         if fields:
