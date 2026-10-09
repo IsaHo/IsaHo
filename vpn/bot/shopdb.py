@@ -107,6 +107,8 @@ def init() -> None:
             c.execute("ALTER TABLE users ADD COLUMN owner_tg INTEGER")
         if "kind" not in {r["name"] for r in c.execute("PRAGMA table_info(plans)")}:
             c.execute("ALTER TABLE plans ADD COLUMN kind TEXT NOT NULL DEFAULT 'plan'")
+    import partnerdb
+    partnerdb.init()
 
 
 # ---------- plans ----------
@@ -240,7 +242,10 @@ def create_order(**fields) -> Order:
     cols = ", ".join(fields)
     with db.connect() as c:
         cur = c.execute(f"INSERT INTO orders ({cols}) VALUES ({', '.join('?' * len(fields))})", tuple(fields.values()))
-        return order(cur.lastrowid, c)
+        o = order(cur.lastrowid, c)
+        import partnerdb
+        partnerdb.snapshot(c, o)
+        return o
 
 
 def order(order_id: int, conn=None) -> Optional[Order]:

@@ -26,6 +26,7 @@ import relays
 import reports
 import resilience
 import routing
+import partners
 import sub_server
 import tunnels
 import xray
@@ -232,6 +233,7 @@ async def main() -> None:
 
     dp = Dispatcher()
     dp.include_router(membership.router)
+    dp.include_router(partners.router)
     dp.include_router(shop.router)  # customer /start and shop states first
     dp.include_router(health.router)
     dp.include_router(resilience.router)

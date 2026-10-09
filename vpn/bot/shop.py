@@ -20,6 +20,8 @@ import handlers as h
 import links
 import membership
 import shopdb
+import partnerdb
+import partners
 import smspay
 from config import cfg
 
@@ -130,15 +132,15 @@ async def support_start(msg: Message, state: FSMContext):
 @router.message(CommandStart(deep_link=True, magic=F.args.startswith("ref_")), ~h.admin)
 async def start_ref(msg: Message, command: CommandObject):
     ref = command.args[4:]
-    shopdb.customer(msg.from_user.id, msg.from_user.full_name or "", int(ref) if ref.isdigit() else None)
-    await msg.answer(WELCOME.format(brand=html.escape(cfg.brand)), reply_markup=h.USER_KB)
+    shopdb.customer(msg.from_user.id, msg.from_user.full_name or "", partners.integer(ref))
+    await msg.answer(WELCOME.format(brand=html.escape(cfg.brand)), reply_markup=partners.customer_kb(msg.from_user.id))
 
 
 @router.message(CommandStart(magic=F.args.is_(None)), ~h.admin)
 async def start_plain(msg: Message, state: FSMContext):
     await state.clear()
     shopdb.customer(msg.from_user.id, msg.from_user.full_name or "")
-    await msg.answer(WELCOME.format(brand=html.escape(cfg.brand)), reply_markup=h.USER_KB)
+    await msg.answer(WELCOME.format(brand=html.escape(cfg.brand)), reply_markup=partners.customer_kb(msg.from_user.id))
 
 
 @router.message(F.text == h.BTN_MY)
@@ -476,14 +478,18 @@ async def fulfill(bot: Bot, o) -> None:
     u = await membership.prepare_account(bot, db.get(u.id))
     await membership.reconcile_user(bot, membership.controller(u))
     u = db.get(u.id)
-    # referral reward
-    pct = int(db.get_setting("shop_ref_percent", "0") or 0)
-    if pct and buyer.referrer and o.final_price:
-        reward = o.final_price * pct // 100
-        shopdb.add_balance(buyer.referrer, reward)
+    # Commission / generic referral reward is snapshotted and credited exactly once.
+    credit = partnerdb.settle(o.id)
+    if credit:
         try:
-            await bot.send_message(buyer.referrer, f"🎁 یکی از دوستانی که دعوت کردید خرید کرد؛ "
-                                                   f"{toman(reward)} به کیف پولتان اضافه شد.")
+            if credit['kind'] == 'commission':
+                await bot.send_message(credit['partner_id'], f"💎 فروش تازه از لینک شما!\n"
+                    f"سفارش #{o.id} • پورسانت {credit['percent']}٪\n"
+                    f"<b>+{toman(credit['amount'])}</b> به موجودی قابل برداشت اضافه شد.",
+                    reply_markup=h.ikb([[("🤝 مشاهده نمایندگی", "rp:home")]]))
+            else:
+                await bot.send_message(credit['partner_id'], f"🎁 یکی از دوستان شما خرید کرد؛ "
+                    f"{toman(credit['amount'])} به کیف پول خریدتان اضافه شد.")
         except Exception:
             pass
     try:
@@ -529,6 +535,10 @@ async def test_account(msg: Message, bot: Bot):
 
 @router.message(F.text == h.BTN_INVITE)
 async def invite(msg: Message):
+    if partners.allowed(msg.from_user.id):
+        await msg.answer("🤝 دعوت‌های شما در پنل نمایندگی مدیریت می‌شود.",
+                         reply_markup=h.ikb([[("🔗 لینک و پنل نمایندگی", "rp:home")]]))
+        return
     c = shopdb.customer(msg.from_user.id, msg.from_user.full_name or "")
     pct = int(db.get_setting("shop_ref_percent", "0") or 0)
     link = f"https://t.me/{db.get_setting('bot_username')}?start=ref_{msg.from_user.id}"
@@ -977,16 +987,7 @@ async def code_add(msg: Message, state: FSMContext):
 # ---------- resellers ----------
 
 def resellers_admin():
-    lines, rows = ["🤝 <b>نماینده‌ها</b>",
-                   "نماینده‌ها با تخفیف خودشان می‌خرند، برای هر خرید نام اکانت می‌دهند و اکانت‌هایشان را "
-                   "از «📊 حساب من» مدیریت و تمدید می‌کنند.", ""], []
-    for c in shopdb.resellers():
-        n = len(db.owned_by(c.tg_id))
-        lines.append(f"• {html.escape(c.name or str(c.tg_id))} (<code>{c.tg_id}</code>) — {c.reseller_percent}٪ | {n} اکانت")
-        rows.append([(f"❌ حذف {c.tg_id}", f"sr:d:{c.tg_id}")])
-    rows.append([("➕ نماینده‌ی جدید", "sr:add")])
-    rows.append([("↩️ رشد فروش", "sa:section:growth"), ("🏠 خانه", "nav:home")])
-    return "\n".join(lines), h.ikb(rows)
+    return partners.admin_dashboard()
 
 
 @router.callback_query(F.data == "sa:resellers", h.admin)
@@ -996,15 +997,12 @@ async def resellers_menu(cb: CallbackQuery):
     await cb.message.answer(text, reply_markup=kb)
 
 
-@router.callback_query(F.data.startswith("sr:d:"), h.admin)
+@router.callback_query(F.data.startswith("sr:d:"), h.owner)
 async def reseller_delete(cb: CallbackQuery):
-    shopdb.update_customer(int(cb.data[5:]), reseller_percent=0)
-    await cb.answer("🗑")
-    text, kb = resellers_admin()
-    await cb.message.edit_text(text, reply_markup=kb)
+    await cb.answer("حذف سریع غیرفعال است؛ از کارت نماینده، توقف را تأیید کنید", show_alert=True)
 
 
-@router.callback_query(F.data == "sr:add", h.admin)
+@router.callback_query(F.data == "sr:add", h.owner)
 async def reseller_add_ask(cb: CallbackQuery, state: FSMContext):
     await cb.answer()
     await state.set_state(ShopAdmin.reseller)
@@ -1012,20 +1010,26 @@ async def reseller_add_ask(cb: CallbackQuery, state: FSMContext):
                             "(باید یک بار ربات را /start کرده باشد)", reply_markup=h.CANCEL_KB)
 
 
-@router.message(ShopAdmin.reseller, h.admin)
+@router.message(ShopAdmin.reseller, h.owner)
 async def reseller_add(msg: Message, state: FSMContext, bot: Bot):
-    parts = [h.parse_number(x) for x in (msg.text or "").split("|")]
-    if len(parts) != 2 or None in parts or not 0 < parts[1] < 100:
+    parts = [partners.integer(x) for x in (msg.text or "").split("|")]
+    if (len(parts) != 2 or None in parts or any(x != int(x) for x in parts)
+            or parts[0] <= 0 or not 0 <= parts[1] < 100):
         await msg.answer("❌ قالب: <code>123456789 | 30</code>")
         return
     tg_id, pct = int(parts[0]), int(parts[1])
     shopdb.customer(tg_id)
     shopdb.update_customer(tg_id, reseller_percent=pct)
+    if not partnerdb.profile(tg_id):
+        partnerdb.configure(tg_id, 0, owner_id=msg.from_user.id)
     await state.clear()
-    await msg.answer("✅ نماینده اضافه شد.", reply_markup=h.ADMIN_KB)
+    await msg.answer("✅ نماینده اضافه شد؛ پورسانت مستقیم فعلاً صفر است. از کارت او تعیین کنید.", reply_markup=h.ADMIN_KB)
+    text, kb = partners.admin_dashboard()
+    await msg.answer(text, reply_markup=kb)
     try:
-        await bot.send_message(tg_id, f"🤝 شما نماینده‌ی {html.escape(cfg.brand)} شدید؛ همه‌ی پلن‌ها برای شما "
-                                      f"{pct}٪ تخفیف دارند. /start")
+        await bot.send_message(tg_id, f"🤝 شما نماینده‌ی {html.escape(cfg.brand)} شدید؛ پلن‌ها برای شما "
+            f"{pct}٪ تخفیف دارند.\nلینک اختصاصی و تسویه‌ها در «🤝 پنل نمایندگی» است؛ "
+            "درصد پورسانت فروش مستقیم را مالک جداگانه تعیین می‌کند.", reply_markup=partners.customer_kb(tg_id))
     except Exception:
         await msg.answer("ℹ️ نتوانستم به او پیام بدهم؛ باید یک بار ربات را /start کند.")
 
