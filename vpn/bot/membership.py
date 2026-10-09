@@ -71,7 +71,7 @@ async def status(bot: Bot, tg_id: int):
         return None
 
 
-async def reconcile_user(bot: Bot, tg_id: int):
+async def reconcile_user(bot: Bot, tg_id: int, *, notify: bool = True):
     async with _lock:
         joined = await status(bot, tg_id)
         if joined is None:
@@ -92,7 +92,7 @@ async def reconcile_user(bot: Bot, tg_id: int):
                     log.warning("membership hot-update pending for account %s", user.id)
                 else:
                     db.update(user.id, channel_pending=0)
-        if changed:
+        if changed and notify:
             try:
                 text = ("✅ <b>عضویت تأیید شد</b>\nتعلیق عضویت برداشته شد؛ اکانت‌های دارای "
                         "اعتبار و حجم قابل استفاده‌اند." if joined else
@@ -129,7 +129,27 @@ async def prepare_account(bot: Bot, user, *, new: bool = False):
 async def member_changed(event: ChatMemberUpdated, bot: Bot):
     if required() and event.chat.id == channel_id() and not event.new_chat_member.user.is_bot:
         # Requery live state: delayed leave events must not suspend someone who rejoined.
-        await reconcile_user(bot, event.new_chat_member.user.id)
+        tg_id = event.new_chat_member.user.id
+        previous = getattr(event, "old_chat_member", None)
+        entering = previous is not None and is_member(event.new_chat_member) and not is_member(previous)
+        joined = await reconcile_user(bot, tg_id, notify=not entering)
+        if entering and joined is True:
+            with db.connect() as conn:
+                known = conn.execute("SELECT 1 FROM customers WHERE tg_id=?", (tg_id,)).fetchone()
+            accounts = [u for u in db.all_users() if controller(u) == tg_id]
+            if known or accounts:
+                pending = any(u.channel_pending for u in accounts)
+                text = (
+                    "🛡 <b>EisaVPN | عضویت شما تأیید شد</b>\n\n"
+                    "به جمع همراهان کانال خوش آمدید 🌿\n"
+                    + ("دسترسی اشتراک در حال همگام‌سازی است؛ لطفاً کمی صبر کنید.\n" if pending else
+                       "تعلیق عضویت برداشته شد؛ اشتراک دارای اعتبار و حجم قابل استفاده است.\n")
+                    + "🎁 برای دریافت تست یا خرید، به منوی اصلی ربات برگردید."
+                )
+                try:
+                    await bot.send_message(tg_id, text)
+                except (TelegramAPIError, TimeoutError, OSError):
+                    log.debug("membership confirmation delivery unavailable")
 
 
 @router.callback_query(F.data == "membership:check")

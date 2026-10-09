@@ -148,6 +148,47 @@ class MembershipTests(unittest.IsolatedAsyncioTestCase):
         await membership.member_changed(event, self.bot)
         self.bot.get_chat_member.assert_not_awaited()
 
+    async def test_join_confirms_registered_customer_without_account(self):
+        shopdb.customer(303)
+        event = SimpleNamespace(chat=SimpleNamespace(id=-100123),
+                                old_chat_member=SimpleNamespace(status="left"),
+                                new_chat_member=SimpleNamespace(status="member", user=SimpleNamespace(id=303, is_bot=False)))
+        await membership.member_changed(event, self.bot)
+        self.bot.send_message.assert_awaited_once()
+        self.assertIn("عضویت شما تأیید شد", self.bot.send_message.call_args.args[1])
+
+    async def test_join_has_one_confirmation_for_existing_account(self):
+        db.update(self.u.id, channel_blocked=1)
+        event = SimpleNamespace(chat=SimpleNamespace(id=-100123),
+                                old_chat_member=SimpleNamespace(status="left"),
+                                new_chat_member=SimpleNamespace(status="member", user=SimpleNamespace(id=101, is_bot=False)))
+        await membership.member_changed(event, self.bot)
+        self.assertTrue(self.user().accessible)
+        self.bot.send_message.assert_awaited_once()
+
+    async def test_unknown_channel_visitor_gets_no_unsolicited_confirmation(self):
+        event = SimpleNamespace(chat=SimpleNamespace(id=-100123),
+                                old_chat_member=SimpleNamespace(status="left"),
+                                new_chat_member=SimpleNamespace(status="member", user=SimpleNamespace(id=404, is_bot=False)))
+        await membership.member_changed(event, self.bot)
+        self.bot.send_message.assert_not_awaited()
+
+    async def test_removing_absent_xray_user_is_successful(self):
+        self.patcher.stop()
+        response = "rpc error: code = Unknown desc = proxy/vless: User trial not found."
+        with mock.patch("xray._run", mock.AsyncMock(return_value=(0, response, ""))):
+            self.assertTrue(await xray._api_remove("trial"))
+        self.patcher.start()
+
+    async def test_xray_removal_transport_or_unknown_tag_error_is_not_ignored(self):
+        self.patcher.stop()
+        for response in ("rpc error: connection refused", "rpc error: inbound handler not found"):
+            with mock.patch("xray._run", mock.AsyncMock(return_value=(0, response, ""))):
+                self.assertFalse(await xray._api_remove("trial"))
+        with mock.patch("xray._run", mock.AsyncMock(return_value=(1, "proxy/vless: User trial not found.", ""))):
+            self.assertFalse(await xray._api_remove("trial"))
+        self.patcher.start()
+
     async def test_trial_gate_does_not_consume_trial(self):
         self.joined = False
         message = SimpleNamespace(from_user=SimpleNamespace(id=101, full_name="Test"),
