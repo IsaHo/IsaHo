@@ -27,7 +27,7 @@ async def _sub(request: web.Request) -> web.Response:
         headers={
             "Content-Type": "text/plain; charset=utf-8",
             "Subscription-Userinfo": links.sub_userinfo(user),
-            "Profile-Update-Interval": "6",
+            "Profile-Update-Interval": "1" if db.get_setting("routing_mode", "rank") != "off" else "6",
             "Profile-Title": f"base64:{title}",
             "Content-Disposition": f'attachment; filename="{cfg.brand}"',
             "Cache-Control": "no-store",

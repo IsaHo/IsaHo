@@ -222,7 +222,7 @@ CONF
     cat >/usr/local/bin/isaho-agent <<'AGENT'
 #!/usr/bin/env python3
 """Reports this relay's health to the bot (through the SSH tunnels) and runs queued actions."""
-import json, os, re, socket, subprocess, time, urllib.parse, urllib.request, zipfile
+import concurrent.futures, json, os, re, socket, subprocess, tempfile, time, urllib.parse, urllib.request, zipfile
 
 conf = dict(l.split("=", 1) for l in open("/etc/isaho-relay.conf").read().split() if "=" in l)
 
@@ -287,14 +287,18 @@ def probe_outbound(link):
     }]}, "streamSettings": stream}
 
 def probe_vless(link):
-    process, config_path = None, os.path.join(PROBE_DIR, "probe.json")
+    process, config_path = None, None
     started = time.monotonic()
     try:
         binary = ensure_probe_xray()
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+        fd, config_path = tempfile.mkstemp(prefix="probe-", suffix=".json", dir=PROBE_DIR)
         config = {"log": {"loglevel": "warning"},
-                  "inbounds": [{"listen": "127.0.0.1", "port": 31999, "protocol": "socks"}],
+                  "inbounds": [{"listen": "127.0.0.1", "port": port, "protocol": "socks"}],
                   "outbounds": [probe_outbound(link)]}
-        with open(config_path, "w") as stream:
+        with os.fdopen(fd, "w") as stream:
             json.dump(config, stream)
         os.chmod(config_path, 0o600)
         process = subprocess.Popen([binary, "run", "-c", config_path], stdout=subprocess.DEVNULL,
@@ -302,7 +306,7 @@ def probe_vless(link):
         time.sleep(1.5)
         check = subprocess.run(
             ["curl", "-sS", "--connect-timeout", "5", "-m", "12", "-o", "/dev/null",
-             "-w", "%{http_code} %{time_total}", "--socks5-hostname", "127.0.0.1:31999",
+             "-w", "%{http_code} %{time_total}", "--socks5-hostname", f"127.0.0.1:{port}",
              "https://www.gstatic.com/generate_204"], capture_output=True, text=True, timeout=15,
             env={key: value for key, value in os.environ.items() if "proxy" not in key.lower()})
         fields = check.stdout.strip().split()
@@ -321,8 +325,10 @@ def probe_vless(link):
                 process.wait(timeout=3)
             except subprocess.TimeoutExpired:
                 process.kill()
+                process.wait()
         try:
-            os.unlink(config_path)
+            if config_path:
+                os.unlink(config_path)
         except OSError:
             pass
 
@@ -338,15 +344,28 @@ def run_probe(job):
     except Exception as exc:
         result["sub"] = {"ok": False, "latency_ms": round((time.monotonic() - started) * 1000),
                          "detail": type(exc).__name__}
-    result["vpn"] = probe_vless(str(job["link"]))
-    result["cdn"] = probe_vless(str(job["cdn_link"])) if job.get("cdn_link") else {
-        "ok": False, "latency_ms": 0, "detail": "missing CDN probe"
-    }
+    # Download the trusted diagnostic binary once before starting bounded workers.
+    ensure_probe_xray()
     result["nodes"] = {}
+    result["paths"] = {}
+    tasks = [("vpn", "", str(job["link"]))]
+    if job.get("cdn_link"):
+        tasks.append(("cdn", "", str(job["cdn_link"])))
     node_jobs = job.get("nodes") if isinstance(job.get("nodes"), list) else []
-    for item in node_jobs[:16]:
+    for item in node_jobs[:8]:
         if isinstance(item, dict) and item.get("name") and item.get("link"):
-            result["nodes"][str(item["name"])[:32]] = probe_vless(str(item["link"]))
+            tasks.append(("nodes", str(item["name"])[:32], str(item["link"])))
+    paths = job.get("paths") if isinstance(job.get("paths"), dict) else {}
+    for key, link in list(paths.items())[:16]:
+        if isinstance(link, str) and link.startswith("vless://"):
+            tasks.append(("paths", str(key)[:64], link))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [(group, key, pool.submit(probe_vless, link)) for group, key, link in tasks]
+        for group, key, future in futures:
+            if key:
+                result[group][key] = future.result()
+            else:
+                result[group] = future.result()
     return result
 
 mem = dict((l.split(":")[0], int(l.split()[1])) for l in open("/proc/meminfo"))
@@ -430,6 +449,7 @@ Description=IsaHo relay status agent
 [Service]
 Type=oneshot
 ExecStart=/usr/local/bin/isaho-agent
+TimeoutStartSec=300
 UNIT
     cat >/etc/systemd/system/isaho-agent.timer <<UNIT
 [Unit]

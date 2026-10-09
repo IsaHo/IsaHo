@@ -33,6 +33,15 @@ CREATE TABLE IF NOT EXISTS health_incidents (
 );
 CREATE INDEX IF NOT EXISTS idx_health_incidents_status
     ON health_incidents(status, opened_at DESC);
+CREATE TABLE IF NOT EXISTS routing_sources (
+    path_key TEXT PRIMARY KEY, state TEXT NOT NULL, checked_at INTEGER NOT NULL,
+    good INTEGER NOT NULL, bad INTEGER NOT NULL, latency_ms INTEGER NOT NULL,
+    sample_id INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS routing_subscribers (
+    user_id INTEGER PRIMARY KEY, route_keys TEXT NOT NULL, seen INTEGER NOT NULL,
+    notified_at INTEGER NOT NULL DEFAULT 0
+);
 """
 
 
