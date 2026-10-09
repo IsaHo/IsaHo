@@ -72,6 +72,8 @@ def user_card(u) -> str:
         lines.append(f"⛔ علت غیرفعال: {html.escape(reason)}")
     if getattr(u, "channel_blocked", 0):
         lines.append("⏸ دسترسی متوقف است؛ عضو کانال اطلاع‌رسانی شوید و «بررسی عضویت» را بزنید.")
+    if getattr(u, "channel_exempt", 0):
+        lines.append("🔓 معاف از عضویت کانال با اجازهٔ مالک؛ سایر محدودیت‌ها برقرار است.")
     if u.tg_id:
         lines.append(f"👤 تلگرام: <code>{u.tg_id}</code>")
     if u.note:

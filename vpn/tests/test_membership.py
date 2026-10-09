@@ -65,6 +65,150 @@ class MembershipTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([], db.active_users())
         self.sync.assert_awaited_once_with(mock.ANY, False, allow_restart=False)
 
+    async def test_exemption_restores_only_selected_account_and_survives_leave(self):
+        other = db.create_user("other", 1, 3)
+        db.update(other.id, tg_id=101, channel_blocked=1)
+        db.update(self.u.id, channel_blocked=1)
+        self.joined = False
+        before = self.user()
+        await membership.set_exemption(self.bot, self.u.id, True)
+        await membership.reconcile_user(self.bot, 101)
+        after = self.user()
+        self.assertTrue(after.accessible)
+        self.assertTrue(after.channel_exempt)
+        self.assertTrue(db.get(other.id).channel_blocked)
+        self.assertEqual((before.used, before.expire_at, before.uuid, before.sub_token),
+                         (after.used, after.expire_at, after.uuid, after.sub_token))
+        self.assertTrue((await membership.prepare_account(self.bot, before)).accessible)
+
+    async def test_exemption_can_be_granted_with_telegram_unavailable(self):
+        self.bot.get_chat_member.side_effect = TimeoutError()
+        db.update(self.u.id, channel_blocked=1)
+        self.sync.side_effect = RuntimeError("unavailable")
+        await membership.set_exemption(self.bot, self.u.id, True)
+        self.assertTrue(self.user().channel_pending)
+        self.sync.side_effect = None
+        await membership.reconcile(self.bot)
+        self.assertTrue(self.user().accessible)
+        self.assertFalse(self.user().channel_pending)
+        self.sync.assert_awaited_with(mock.ANY, True, allow_restart=False)
+
+    async def test_exemption_preserves_all_nonmembership_restrictions(self):
+        for fields in ({"enabled": 0, "disabled_reason": "manual"},
+                       {"enabled": 0, "disabled_reason": "iplimit:9999999999"},
+                       {"expire_at": int(time.time()) - 1}, {"traffic_limit": 1}):
+            db.update(self.u.id, **fields, channel_blocked=1)
+            await membership.set_exemption(self.bot, self.u.id, True)
+            self.assertFalse(self.user().accessible)
+            self.assertFalse(self.sync.call_args.args[1])
+            db.update(self.u.id, enabled=1, disabled_reason="", expire_at=0,
+                      traffic_limit=db.GB, channel_exempt=0)
+
+    async def test_revoke_exemption_rechecks_membership(self):
+        await membership.set_exemption(self.bot, self.u.id, True)
+        self.joined = False
+        await membership.set_exemption(self.bot, self.u.id, False)
+        self.assertFalse(self.user().channel_exempt)
+        self.assertTrue(self.user().channel_blocked)
+        self.sync.assert_awaited_with(mock.ANY, False, allow_restart=False)
+        self.joined = True
+        await membership.reconcile_user(self.bot, 101)
+        self.assertTrue(self.user().accessible)
+
+    async def test_unknown_membership_cannot_revoke_exemption(self):
+        await membership.set_exemption(self.bot, self.u.id, True)
+        self.bot.get_chat_member.side_effect = TimeoutError()
+        with self.assertRaises(ValueError):
+            await membership.set_exemption(self.bot, self.u.id, False)
+        self.assertTrue(self.user().channel_exempt)
+        self.assertTrue(self.user().accessible)
+
+    async def test_duplicate_explicit_action_is_idempotent(self):
+        await membership.set_exemption(self.bot, self.u.id, True)
+        await membership.set_exemption(self.bot, self.u.id, True)
+        self.sync.assert_awaited_once()
+        self.assertTrue(self.user().channel_exempt)
+
+    async def test_unlinked_exemption_pending_is_retried(self):
+        db.update(self.u.id, tg_id=None)
+        self.sync.side_effect = RuntimeError("unavailable")
+        await membership.set_exemption(self.bot, self.u.id, True)
+        self.sync.side_effect = None
+        await membership.reconcile(self.bot)
+        self.assertFalse(self.user().channel_pending)
+
+    async def test_exemption_does_not_bypass_trial_or_purchase_gate(self):
+        await membership.set_exemption(self.bot, self.u.id, True)
+        self.joined = False
+        message = SimpleNamespace(answer=mock.AsyncMock())
+        self.assertFalse(await membership.ensure(self.bot, 101, message))
+        self.assertTrue(self.user().accessible)
+
+    async def test_only_owner_can_grant_or_revoke(self):
+        for action in ("exempt", "setexempt"):
+            cb = SimpleNamespace(data=f"membership:{action}:{self.u.id}:1",
+                                 from_user=SimpleNamespace(id=101), answer=mock.AsyncMock())
+            with mock.patch("membership.cfg", SimpleNamespace(admin_ids=[202])):
+                await membership.exemption_callback(cb, self.bot)
+            self.assertFalse(self.user().channel_exempt)
+            cb.answer.assert_awaited_once_with(mock.ANY, show_alert=True)
+
+    async def test_confirmation_button_and_reversible_card(self):
+        import handlers
+        cb = SimpleNamespace(data=f"membership:exempt:{self.u.id}",
+                             from_user=SimpleNamespace(id=202), answer=mock.AsyncMock(),
+                             message=SimpleNamespace(edit_text=mock.AsyncMock()))
+        with mock.patch("membership.cfg", SimpleNamespace(admin_ids=[202])):
+            await membership.exemption_callback(cb, self.bot)
+        kb = cb.message.edit_text.call_args.kwargs["reply_markup"]
+        self.assertEqual(f"membership:setexempt:{self.u.id}:1", kb.inline_keyboard[0][0].callback_data)
+        self.assertFalse(self.user().channel_exempt)
+        await membership.set_exemption(self.bot, self.u.id, True)
+        buttons = [b.text for row in handlers.user_kb(self.user()).inline_keyboard for b in row]
+        self.assertIn("🔐 بازگرداندن شرط عضویت", buttons)
+
+    async def test_owner_confirmation_applies_and_refreshes_card(self):
+        cb = SimpleNamespace(data=f"membership:setexempt:{self.u.id}:1",
+                             from_user=SimpleNamespace(id=202), answer=mock.AsyncMock())
+        with mock.patch("membership.cfg", SimpleNamespace(admin_ids=[202])), \
+                mock.patch("handlers.show_user", mock.AsyncMock()) as show:
+            await membership.exemption_callback(cb, self.bot)
+            show.assert_awaited_once_with(cb, mock.ANY)
+        self.assertTrue(self.user().channel_exempt)
+        self.assertTrue(self.user().accessible)
+
+    async def test_waiting_list_shows_only_blocked_accounts(self):
+        db.update(self.u.id, channel_blocked=1)
+        db.create_user("active", 1, 3)
+        cb = SimpleNamespace(data="membership:waiting:999", from_user=SimpleNamespace(id=202),
+                             answer=mock.AsyncMock(), message=SimpleNamespace(edit_text=mock.AsyncMock()))
+        with mock.patch("membership.db.admin_ids", return_value=[202]):
+            await membership.waiting_callback(cb)
+        kb = cb.message.edit_text.call_args.kwargs["reply_markup"].inline_keyboard
+        self.assertEqual(2, len(kb))
+        self.assertEqual(f"u:{self.u.id}", kb[0][0].callback_data)
+        self.assertEqual("membership:menu", kb[-1][0].callback_data)
+
+    async def test_invalid_owner_callback_never_changes_account(self):
+        for data in ("membership:setexempt:bad:1", f"membership:setexempt:{self.u.id}:2",
+                     f"membership:exempt:{self.u.id}:1"):
+            cb = SimpleNamespace(data=data, from_user=SimpleNamespace(id=202), answer=mock.AsyncMock())
+            with mock.patch("membership.cfg", SimpleNamespace(admin_ids=[202])):
+                await membership.exemption_callback(cb, self.bot)
+            self.assertFalse(self.user().channel_exempt)
+            cb.answer.assert_awaited_once_with(mock.ANY, show_alert=True)
+
+    def test_migration_keeps_existing_membership_and_defaults_no_exemptions(self):
+        with db.connect() as c:
+            c.execute("DROP TABLE channel_membership")
+            c.execute("CREATE TABLE channel_membership(user_id INTEGER PRIMARY KEY, blocked INTEGER, pending INTEGER)")
+            c.execute("INSERT INTO channel_membership VALUES (?,1,1)", (self.u.id,))
+        db.init()
+        db.init()
+        self.assertTrue(self.user().channel_blocked)
+        self.assertTrue(self.user().channel_pending)
+        self.assertFalse(self.user().channel_exempt)
+
     async def test_join_restores_valid_account(self):
         db.update(self.u.id, channel_blocked=1)
         await membership.reconcile_user(self.bot, 101)
