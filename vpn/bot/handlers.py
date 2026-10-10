@@ -861,10 +861,15 @@ def nodes_view():
                 state += "\n🛡 بازیابی محدود: " + html.escape(str(recovery.get("reason") or recovery["state"])[:160])
         private = n.get("private", True)
         mode = "🔒 فقط از طریق تانل ایران (پورت عمومی بسته)" if private else "🔓 عمومی (لینک مستقیم و CDN هم دارد)"
+        bridge_port = nodes.reality_proxy_port(n)
+        bridge = (f"🚪 پل Reality عمومی: روشن (پورت {bridge_port})" if bridge_port
+                  else "🚪 پل Reality عمومی: خاموش")
         lines += ["", f"<b>{html.escape(n['name'])}</b> <code>{n['ip']}</code> {html.escape(n.get('domain', ''))}",
-                  mode, state]
+                  mode, bridge, state]
         rows.append([(f"📋 دستور نصب {n['name']}", f"nd:cmd:{n['name']}"), (f"🗑 {n['name']}", f"nd:del:{n['name']}")])
         rows.append([(("🔓 عمومی کردن " if private else "🔒 فقط تانل کردن ") + n["name"], f"nd:priv:{n['name']}")])
+        rows.append([(("🚪 خاموش کردن پل Reality " if bridge_port else "🚪 روشن کردن پل Reality ") + n["name"],
+                      f"nd:bridge:{n['name']}")])
     rows.append([("➕ سرور خارج جدید", "nd:add"), ("🔃 بروزرسانی", "nd:menu")])
     return "\n".join(lines), ikb(rows)
 
@@ -974,7 +979,30 @@ async def nodes_mode_confirm(cb: CallbackQuery):
     await cb.message.edit_text(text, reply_markup=kb)
 
 
-@router.callback_query(F.data.startswith(("nd:add", "nd:cmd:", "nd:del:", "nd:priv:", "nd:mode:")), admin)
+@router.callback_query(F.data.startswith("nd:bridge:"), owner)
+async def nodes_bridge_toggle(cb: CallbackQuery):
+    name = cb.data[len("nd:bridge:"):]
+    node = next((n for n in nodes.all_nodes() if n["name"] == name), None)
+    if not node:
+        await cb.answer("نود پیدا نشد", show_alert=True)
+        return
+    current = nodes.reality_proxy_port(node)
+    target = 0 if current else nodes.DEFAULT_REALITY_PROXY_PORT
+    if not nodes.set_reality_proxy_port(name, target):
+        await cb.answer("تغییر ممکن نشد", show_alert=True)
+        return
+    if target and "node" not in links.enabled_types():
+        links.toggle_type("node")
+    msg = (f"🚪 پل Reality عمومی برای {name} خاموش شد؛ لینک از سابسکریپشن حذف می‌شود. "
+           "برای بستن کامل، فایروال نود را هم ببند." if not target else
+           f"🚪 پل Reality عمومی برای {name} روی پورت {target} روشن شد؛ "
+           "مطمئن شو فایروال/socket نود این پورت را به Reality لوکال فوروارد می‌کند.")
+    await cb.answer(msg, show_alert=True)
+    text, kb = nodes_view()
+    await cb.message.edit_text(text, reply_markup=kb)
+
+
+@router.callback_query(F.data.startswith(("nd:add", "nd:cmd:", "nd:del:", "nd:priv:", "nd:mode:", "nd:bridge:")), admin)
 async def nodes_denied(cb: CallbackQuery):
     await cb.answer("فقط مالک ربات می‌تواند این را انجام دهد", show_alert=True)
 
