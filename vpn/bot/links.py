@@ -96,6 +96,9 @@ def route_entries(u) -> list:
         for n in nodes.all_nodes():
             if nodes.public_ready(n) and cfg.reality_public_key:
                 links.append((f"node:{n['name']}", reality_link(u, n["ip"], cfg.reality_port, f"{n['name']}-Reality")))
+            elif cfg.reality_public_key and nodes.reality_proxy_port(n):
+                # Reality kept on localhost; a public port forwards into it (nft decides who may knock).
+                links.append((f"node:{n['name']}", reality_link(u, n["ip"], nodes.reality_proxy_port(n), f"{n['name']}-Reality")))
             if nodes.has_cdn(n):
                 for i, d in enumerate(nodes.cdn_domains(n)):
                     key = f"cdn:{n['name']}" if i == 0 else f"cdn:{n['name']}:{d}"

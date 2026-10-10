@@ -121,6 +121,29 @@ class PrivateNodeCDNTests(unittest.TestCase):
         self.assertEqual([], nodes.cdn_domains({"domain": ""}))
         self.assertEqual([], nodes.cdn_domains({}))
 
+    def test_private_node_with_reality_proxy_port_publishes_reality_link(self):
+        nodes.save([{**self.node, "reality_proxy_port": 8443}])
+        entries = links.route_entries(self.user)
+        keys = [k for k, _ in entries]
+        self.assertIn("node:DE2", keys)
+        url = urlsplit(dict(entries)["node:DE2"])
+        self.assertEqual("192.0.2.2", url.hostname)
+        self.assertEqual(8443, url.port)
+        query = parse_qs(url.query)
+        self.assertEqual(["reality"], query["security"])
+
+    def test_reality_proxy_port_rejects_invalid_values(self):
+        for value in ("abc", -1, 70000, None, ""):
+            self.assertEqual(0, nodes.reality_proxy_port({"reality_proxy_port": value}))
+        self.assertEqual(8443, nodes.reality_proxy_port({"reality_proxy_port": "8443"}))
+
+    def test_public_node_ignores_reality_proxy_port(self):
+        # Public mode binds Reality on its real port; the proxy fallback must not shadow that.
+        nodes.save([{"name": "UK", "ip": "192.0.2.3", "private": False,
+                     "domain": "uk.example.test", "reality_proxy_port": 8443}])
+        entries = dict(links.route_entries(self.user))
+        self.assertEqual(443, urlsplit(entries["node:UK"]).port)
+
 
 if __name__ == "__main__":
     unittest.main()
