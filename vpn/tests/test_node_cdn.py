@@ -105,6 +105,22 @@ class PrivateNodeCDNTests(unittest.TestCase):
         for value in ("invalid", -1, 65536, None):
             self.assertEqual(2053, links.node_cdn_port({"cdn_port": value}))
 
+    def test_multiple_cdn_domains_publish_one_link_per_zone(self):
+        nodes.save([{**self.node, "domain": "vpn.example.test, m.alt.test, zkim.example"}])
+        entries = links.route_entries(self.user)
+        self.assertEqual(["cdn:DE2", "cdn:DE2:m.alt.test", "cdn:DE2:zkim.example"],
+                         [key for key, _ in entries])
+        hosts = [urlsplit(link).hostname for _, link in entries]
+        self.assertEqual(["vpn.example.test", "m.alt.test", "zkim.example"], hosts)
+        for _, link in entries:
+            self.assertIn("security=tls", link)
+            self.assertIn("type=xhttp", link)
+
+    def test_cdn_domains_strips_whitespace_and_blanks(self):
+        self.assertEqual(["a.test", "b.test"], nodes.cdn_domains({"domain": " a.test ,, b.test ,"}))
+        self.assertEqual([], nodes.cdn_domains({"domain": ""}))
+        self.assertEqual([], nodes.cdn_domains({}))
+
 
 if __name__ == "__main__":
     unittest.main()

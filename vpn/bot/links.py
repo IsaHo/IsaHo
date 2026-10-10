@@ -97,7 +97,10 @@ def route_entries(u) -> list:
             if nodes.public_ready(n) and cfg.reality_public_key:
                 links.append((f"node:{n['name']}", reality_link(u, n["ip"], cfg.reality_port, f"{n['name']}-Reality")))
             if nodes.has_cdn(n):
-                links.append((f"cdn:{n['name']}", cdn_link(u, n["domain"], f"{n['name']}-CDN", node_cdn_port(n))))
+                for i, d in enumerate(nodes.cdn_domains(n)):
+                    key = f"cdn:{n['name']}" if i == 0 else f"cdn:{n['name']}:{d}"
+                    tag = f"{n['name']}-CDN" if i == 0 else f"{n['name']}-CDN-{d.split('.')[0]}"
+                    links.append((key, cdn_link(u, d, tag, node_cdn_port(n))))
     return links
 
 
