@@ -62,6 +62,16 @@ def public_nodes() -> list:
     return [n for n in all_nodes() if not n.get("private", True)]
 
 
+def has_cdn(node: dict) -> bool:
+    """CDN publication is independent of a node's private Reality listener."""
+    enabled = node.get("cdn_enabled", not node.get("private", True))
+    return enabled is True and bool(node.get("domain"))
+
+
+def cdn_nodes() -> list:
+    return [node for node in all_nodes() if has_cdn(node)]
+
+
 def record_stats(node: dict, stats: dict, info: dict) -> None:
     clean = {}
     for name, pair in (stats or {}).items():

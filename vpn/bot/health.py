@@ -261,8 +261,9 @@ def public_probe_links(user):
     for node in nodes.public_nodes():
         name = str(node["name"])
         paths[f"public:{name}"] = links.reality_link(user, node["ip"], cfg.reality_port, f"health-{name}")
-        if node.get("domain"):
-            paths[f"cdn:{name}"] = links.cdn_link(user, node["domain"], f"health-{name}-cdn")
+    for node in nodes.cdn_nodes():
+        name = str(node["name"])
+        paths[f"cdn:{name}"] = links.cdn_link(user, node["domain"], f"health-{name}-cdn", links.node_cdn_port(node))
     return paths
 
 
@@ -314,8 +315,8 @@ def ingest_relay_result(data: dict) -> None:
     allowed = {"main": "Reality مستقیم آلمان"}
     for node in nodes.public_nodes():
         allowed[f"public:{node['name']}"] = f"Reality مستقیم {node['name']}"
-        if node.get("domain"):
-            allowed[f"cdn:{node['name']}"] = f"CDN {node['name']}"
+    for node in nodes.cdn_nodes():
+        allowed[f"cdn:{node['name']}"] = f"CDN {node['name']}"
     if isinstance(paths, dict):
         for key, item in paths.items():
             if key in allowed:
@@ -416,8 +417,8 @@ def _expected_paths() -> dict[str, tuple[str, str]]:
         paths[f"relay:{host}:main"] = (f"IR{index} · Reality مستقیم آلمان", "vpn")
         for node in nodes.public_nodes():
             paths[f"relay:{host}:public:{node['name']}"] = (f"IR{index} · Reality مستقیم {node['name']}", "vpn")
-            if node.get("domain"):
-                paths[f"relay:{host}:cdn:{node['name']}"] = (f"IR{index} · CDN {node['name']}", "cdn")
+        for node in nodes.cdn_nodes():
+            paths[f"relay:{host}:cdn:{node['name']}"] = (f"IR{index} · CDN {node['name']}", "cdn")
         for node in nodes.all_nodes():
             if node.get("private", True):
                 paths[f"relay:{host}:node:{node['name']}"] = (
