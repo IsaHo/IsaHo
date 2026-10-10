@@ -41,7 +41,7 @@ class MembershipTests(unittest.IsolatedAsyncioTestCase):
         self.patcher = mock.patch("membership.xray.sync_user", self.sync)
         self.patcher.start()
         self.u = db.create_user("trial", 1, 3)
-        db.update(self.u.id, tg_id=101, up=123, down=456, note="test")
+        db.update(self.u.id, tg_id=101, up=123, down=456, note="test", channel_trial=1)
         shopdb.customer(101)
 
     def tearDown(self):
@@ -93,7 +93,7 @@ class MembershipTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_exemption_restores_only_selected_account_and_survives_leave(self):
         other = db.create_user("other", 1, 3)
-        db.update(other.id, tg_id=101, channel_blocked=1)
+        db.update(other.id, tg_id=101, channel_blocked=1, channel_trial=1)
         db.update(self.u.id, channel_blocked=1)
         self.joined = False
         before = self.user()
@@ -163,7 +163,7 @@ class MembershipTests(unittest.IsolatedAsyncioTestCase):
         await membership.reconcile(self.bot)
         self.assertFalse(self.user().channel_pending)
 
-    async def test_exemption_does_not_bypass_trial_or_purchase_gate(self):
+    async def test_exemption_does_not_bypass_trial_gate(self):
         await membership.set_exemption(self.bot, self.u.id, True)
         self.joined = False
         message = SimpleNamespace(answer=mock.AsyncMock())
@@ -191,7 +191,7 @@ class MembershipTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.user().channel_exempt)
         await membership.set_exemption(self.bot, self.u.id, True)
         buttons = [b.text for row in handlers.user_kb(self.user()).inline_keyboard for b in row]
-        self.assertIn("🔐 بازگرداندن شرط عضویت", buttons)
+        self.assertIn("🔐 بازگرداندن شرط تست", buttons)
 
     async def test_owner_confirmation_applies_and_refreshes_card(self):
         cb = SimpleNamespace(data=f"membership:setexempt:{self.u.id}:1",
@@ -368,28 +368,30 @@ class MembershipTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(0, shopdb.customer(101).test_used)
         self.assertEqual(1, len(db.all_users()))
 
-    async def test_payment_gate_does_not_debit_wallet_or_create_order(self):
+    async def test_payment_does_not_check_membership(self):
         self.joined = False
         shopdb.add_balance(101, 12345)
         cb = SimpleNamespace(from_user=SimpleNamespace(id=101),
                              message=SimpleNamespace(answer=mock.AsyncMock()), answer=mock.AsyncMock())
         state = mock.AsyncMock()
+        state.get_data.return_value = {}
         await shop.pay(cb, state, self.bot)
-        state.get_data.assert_not_awaited()
+        state.get_data.assert_awaited_once()
+        self.bot.get_chat_member.assert_not_awaited()
         self.assertEqual(12345, shopdb.customer(101).balance)
 
-    async def test_unknown_new_paid_account_is_not_activated(self):
+    async def test_unknown_new_trial_account_is_not_activated(self):
         self.bot.get_chat_member.side_effect = TimeoutError()
         user = await membership.prepare_account(self.bot, self.user(), new=True)
         self.assertTrue(user.channel_blocked)
         self.assertFalse(user.accessible)
 
-    async def test_unknown_existing_paid_account_keeps_access(self):
+    async def test_unknown_existing_trial_account_keeps_access(self):
         self.bot.get_chat_member.side_effect = TimeoutError()
         user = await membership.prepare_account(self.bot, self.user())
         self.assertTrue(user.accessible)
 
-    async def test_paid_order_is_delivered_but_not_activated_after_leave(self):
+    async def test_paid_order_is_activated_after_leave_without_membership_api(self):
         self.joined = False
         shopdb.add_plan("Sample", 2, 30, 100)
         self.bot.send_photo = mock.AsyncMock()
@@ -397,12 +399,89 @@ class MembershipTests(unittest.IsolatedAsyncioTestCase):
                                 kind="new", account_name="paid", discount_code="", final_price=100)
         with mock.patch("shop.h.apply_user", mock.AsyncMock()) as apply:
             await shop.fulfill(self.bot, order)
-            apply.assert_not_awaited()
+            apply.assert_awaited_once()
         account = db.get_by_name("paid")
-        self.assertTrue(account.channel_blocked)
-        self.assertFalse(account.accessible)
+        self.assertFalse(account.channel_blocked)
+        self.assertFalse(account.channel_trial)
+        self.assertTrue(account.accessible)
+        self.bot.get_chat_member.assert_not_awaited()
         self.assertEqual(2 * db.GB, account.traffic_limit)
         self.bot.send_photo.assert_awaited_once()
+
+    async def test_paid_preparation_clears_legacy_block_during_api_failure(self):
+        db.update(self.u.id, channel_trial=0, channel_blocked=1)
+        self.bot.get_chat_member.side_effect = TimeoutError()
+        user = await membership.prepare_account(self.bot, self.user(), new=True)
+        self.assertTrue(user.accessible)
+        self.assertFalse(user.channel_blocked)
+        self.bot.get_chat_member.assert_not_awaited()
+
+    async def test_mixed_paid_and_trial_leave_blocks_only_trial(self):
+        paid = db.create_user("paid", 2, 30)
+        db.update(paid.id, tg_id=101, channel_blocked=1)
+        self.joined = False
+        await membership.reconcile_user(self.bot, 101)
+        self.assertTrue(self.user().channel_blocked)
+        self.assertFalse(db.get(paid.id).channel_blocked)
+        self.assertTrue(db.get(paid.id).accessible)
+
+    async def test_paid_only_reconciliation_never_calls_telegram(self):
+        db.update(self.u.id, channel_trial=0, channel_blocked=1)
+        self.bot.get_chat_member.side_effect = TimeoutError()
+        await membership.reconcile(self.bot)
+        self.bot.get_chat_member.assert_not_awaited()
+        self.assertFalse(self.user().channel_pending)
+        self.assertTrue(self.user().accessible)
+
+    async def test_paid_unblocking_preserves_billing_and_manual_restrictions(self):
+        for fields in ({"enabled": 0, "disabled_reason": "manual"},
+                       {"enabled": 0, "disabled_reason": "iplimit:9999999999"},
+                       {"expire_at": int(time.time()) - 1}, {"traffic_limit": 1}):
+            db.update(self.u.id, channel_trial=0, channel_blocked=1, **fields)
+            await membership.reconcile_user(self.bot, 101)
+            self.assertFalse(self.user().channel_blocked)
+            self.assertFalse(self.user().accessible)
+            self.assertFalse(self.sync.call_args.args[1])
+            db.update(self.u.id, enabled=1, disabled_reason="", expire_at=0, traffic_limit=db.GB)
+        self.bot.get_chat_member.assert_not_awaited()
+
+    def test_trial_identity_survives_editing_note(self):
+        db.update(self.u.id, note="updated by admin")
+        db.init()
+        self.assertTrue(self.user().channel_trial)
+
+    async def test_paid_renewal_converts_trial_permanently(self):
+        self.joined = False
+        db.update(self.u.id, channel_blocked=1)
+        shopdb.add_plan("Renew", 2, 30, 100)
+        self.bot.send_photo = mock.AsyncMock()
+        order = SimpleNamespace(id=1, tg_id=101, plan_id=shopdb.plans()[0].id,
+                                kind="renew", user_id=self.u.id, discount_code="", final_price=100)
+        with mock.patch("shop.h.maybe_reactivate", mock.AsyncMock(side_effect=lambda u: u)):
+            await shop.fulfill(self.bot, order)
+        self.assertFalse(self.user().channel_trial)
+        self.assertTrue(self.user().accessible)
+        self.bot.get_chat_member.assert_not_awaited()
+        await membership.reconcile_user(self.bot, 101)
+        self.assertTrue(self.user().accessible)
+
+    def test_legacy_trial_migration_respects_approved_purchase_and_is_idempotent(self):
+        paid = db.create_user("converted", 2, 30)
+        db.update(paid.id, note="test", tg_id=101, channel_blocked=1,
+                  enabled=0, disabled_reason="manual")
+        with db.connect() as c:
+            c.execute("ALTER TABLE channel_membership DROP COLUMN trial")
+            c.execute("INSERT INTO orders (tg_id,plan_id,kind,user_id,price,final_price,status,created_at) "
+                      "VALUES (101,1,'renew',?,100,100,'approved',1)", (paid.id,))
+        db.init()
+        db.init()
+        self.assertTrue(self.user().channel_trial)
+        converted = db.get(paid.id)
+        self.assertFalse(converted.channel_trial)
+        self.assertFalse(converted.channel_blocked)
+        self.assertTrue(converted.channel_pending)
+        self.assertFalse(converted.accessible)
+        self.assertEqual("manual", converted.disabled_reason)
 
     async def test_return_to_channel_does_not_consume_another_trial(self):
         shopdb.update_customer(101, test_used=1)

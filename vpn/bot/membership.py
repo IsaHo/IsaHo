@@ -53,10 +53,10 @@ def keyboard() -> InlineKeyboardMarkup:
 JOIN_TEXT = (
     "📣 <b>باخبر بمان؛ متصل بمان</b>\n\n"
     "وضعیت اتصال از ایران و اطلاعیه‌های سرویس در کانال EisaVPN منتشر می‌شود.\n"
-    "برای دریافت تست، خرید و استفاده از اشتراک، عضو کانال شوید.\n\n"
+    "برای دریافت و استفاده از اکانت تست، عضو کانال شوید. خرید و اشتراک پولی شرط عضویت ندارد.\n\n"
     "۱. دکمهٔ عضویت را بزنید.\n۲. برگردید و «عضو شدم؛ بررسی کن» را بزنید.\n\n"
-    "⏸ خروج از کانال دسترسی را موقتاً متوقف می‌کند؛ با عضویت دوباره، "
-    "اشتراک معتبر باز می‌شود. حجم ریست نمی‌شود و تاریخ انقضا طبق روال ادامه دارد."
+    "⏸ خروج از کانال فقط اکانت تست را موقتاً متوقف می‌کند؛ با عضویت دوباره، "
+    "تست معتبر باز می‌شود. حجم ریست نمی‌شود و تاریخ انقضا طبق روال ادامه دارد."
 )
 
 
@@ -77,19 +77,18 @@ async def status(bot: Bot, tg_id: int):
         return None
 
 
-async def reconcile_user(bot: Bot, tg_id: int, *, notify: bool = True):
+async def reconcile_user(bot: Bot, tg_id: int, *, notify: bool = True, gate: bool = False):
     async with _lock:
-        joined = await status(bot, tg_id) if tg_id else True
+        accounts = [u for u in db.all_users() if controller(u) == tg_id]
+        joined = await status(bot, tg_id) if tg_id and (gate or any(u.channel_trial for u in accounts)) else True
         changed = False
-        for user in db.all_users():
-            if controller(user) != tg_id:
+        for user in accounts:
+            if joined is None and user.channel_trial and not user.channel_exempt:
                 continue
-            if joined is None and not user.channel_exempt:
-                continue
-            blocked = int(not joined and not user.channel_exempt)
+            blocked = int(user.channel_trial and not joined and not user.channel_exempt)
             if user.channel_blocked != blocked:
                 db.update(user.id, channel_blocked=blocked, channel_pending=1)
-                changed = True
+                changed = changed or bool(user.channel_trial)
             current = db.get(user.id)
             if current.channel_pending:
                 try:
@@ -112,7 +111,7 @@ async def reconcile_user(bot: Bot, tg_id: int, *, notify: bool = True):
 async def ensure(bot: Bot, tg_id: int, message) -> bool:
     try:
         # Includes queueing behind reconciliation and pending Xray hot updates.
-        joined = await asyncio.wait_for(reconcile_user(bot, tg_id), timeout=GATE_TIMEOUT)
+        joined = await asyncio.wait_for(reconcile_user(bot, tg_id, gate=True), timeout=GATE_TIMEOUT)
     except TimeoutError:
         joined = None
         log.warning("membership gate deadline reached (no access granted)")
@@ -126,10 +125,10 @@ async def ensure(bot: Bot, tg_id: int, message) -> bool:
 
 
 async def prepare_account(bot: Bot, user, *, new: bool = False):
-    """Paid orders are fulfilled, but never activated before membership is verified."""
+    """Only trial accounts require channel membership."""
     user = db.get(user.id)
     who = controller(user)
-    joined = True if user.channel_exempt else await status(bot, who) if who else True
+    joined = True if not user.channel_trial or user.channel_exempt else await status(bot, who) if who else True
     if required() and (joined is False or (new and joined is None)):
         db.update(user.id, channel_blocked=1, channel_pending=1)
     elif joined is True and user.channel_blocked:
@@ -156,7 +155,7 @@ async def member_changed(event: ChatMemberUpdated, bot: Bot):
                     "به جمع همراهان کانال خوش آمدید 🌿\n"
                     + ("دسترسی اشتراک در حال همگام‌سازی است؛ لطفاً کمی صبر کنید.\n" if pending else
                        "تعلیق عضویت برداشته شد؛ اشتراک دارای اعتبار و حجم قابل استفاده است.\n")
-                    + "🎁 برای دریافت تست یا خرید، به منوی اصلی ربات برگردید."
+                    + "🎁 برای دریافت تست به منوی اصلی برگردید؛ خرید و اشتراک پولی شرط عضویت ندارد."
                 )
                 try:
                     await bot.send_message(tg_id, text)
@@ -175,12 +174,12 @@ def settings_view():
     blocked = sum(bool(u.channel_blocked) for u in db.all_users())
     exempt = sum(bool(u.channel_exempt) for u in db.all_users())
     state = "فعال" if required() else "خاموش"
-    rows = [[InlineKeyboardButton(text="⏸ خاموش‌کردن شرط عضویت" if required() else
-                                 "🔐 فعال‌کردن شرط عضویت", callback_data="membership:toggle")],
+    rows = [[InlineKeyboardButton(text="⏸ خاموش‌کردن شرط تست" if required() else
+                                 "🔐 فعال‌کردن شرط تست", callback_data="membership:toggle")],
             [InlineKeyboardButton(text=f"⏸ منتظر عضویت · {blocked}", callback_data="membership:waiting:0")],
             [InlineKeyboardButton(text="↩️ داده و اعلان‌ها", callback_data="nav:set:data")]]
     return ((f"📣 <b>عضویت کانال اطلاع‌رسانی</b>\n\nوضعیت: {state}\nاکانت‌های متوقف: {blocked}\nمعاف از عضویت: {exempt}\n\n"
-            "تست و خرید نیازمند عضویت است. خروج، دسترسی را موقتاً متوقف می‌کند.\n"
+            "فقط تست نیازمند عضویت است. خرید و اشتراک پولی بدون شرط کانال فعال است.\n"
             "با خاموش‌کردن این قابلیت فقط تعلیق عضویت برداشته می‌شود؛ سایر محدودیت‌ها باقی می‌ماند."),
             InlineKeyboardMarkup(inline_keyboard=rows))
 
@@ -222,7 +221,7 @@ async def set_exemption(bot: Bot, user_id: int, exempt: bool):
         if not user:
             raise ValueError("اکانت وجود ندارد")
         who = controller(user)
-        joined = True if exempt or not who else await status(bot, who)
+        joined = True if not user.channel_trial or exempt or not who else await status(bot, who)
         if joined is None:
             raise ValueError("بررسی عضویت ممکن نیست؛ معافیت تغییر نکرد. دوباره تلاش کنید.")
         blocked = int(not joined)
@@ -251,6 +250,9 @@ async def exemption_callback(cb: CallbackQuery, bot: Bot):
         user = db.get(int(parts[2]))
         if not user:
             raise ValueError
+        if not user.channel_trial:
+            await cb.answer("اشتراک پولی شرط عضویت کانال ندارد", show_alert=True)
+            return
         if parts[1] == "setexempt":
             if parts[3] not in ("0", "1"):
                 raise ValueError

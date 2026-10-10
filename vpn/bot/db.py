@@ -70,10 +70,12 @@ class User:
     channel_blocked: int = 0  # independent of manual/expiry/device restrictions
     channel_pending: int = 0  # retry a failed hot-update after restart
     channel_exempt: int = 0  # owner-approved per-account membership exception
+    channel_trial: int = 0  # durable trial identity, independent of editable notes
 
     @property
     def accessible(self) -> bool:
-        return bool(self.enabled and not self.channel_blocked and not self.expired and not self.over_limit)
+        return bool(self.enabled and not (self.channel_trial and self.channel_blocked)
+                    and not self.expired and not self.over_limit)
 
     @property
     def used(self) -> int:
@@ -106,6 +108,14 @@ def init() -> None:
         membership_cols = {r["name"] for r in c.execute("PRAGMA table_info(channel_membership)")}
         if "exempt" not in membership_cols:
             c.execute("ALTER TABLE channel_membership ADD COLUMN exempt INTEGER NOT NULL DEFAULT 0")
+        if "trial" not in membership_cols:
+            c.execute("ALTER TABLE channel_membership ADD COLUMN trial INTEGER NOT NULL DEFAULT 0")
+            c.execute("INSERT OR IGNORE INTO channel_membership(user_id) SELECT id FROM users WHERE note='test'")
+            c.execute("UPDATE channel_membership SET trial=1 WHERE user_id IN (SELECT id FROM users WHERE note='test')")
+            if c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='orders'").fetchone():
+                c.execute("UPDATE channel_membership SET trial=0 WHERE user_id IN "
+                          "(SELECT user_id FROM orders WHERE status='approved' AND user_id IS NOT NULL)")
+        c.execute("UPDATE channel_membership SET blocked=0,pending=1 WHERE trial=0 AND blocked<>0")
 
 
 def _row(r) -> Optional[User]:
@@ -114,11 +124,11 @@ def _row(r) -> Optional[User]:
     data = dict(r)
     # Separate table keeps the users schema compatible with a code rollback.
     with connect() as c:
-        membership = c.execute("SELECT blocked,pending,exempt FROM channel_membership WHERE user_id=?",
+        membership = c.execute("SELECT blocked,pending,exempt,trial FROM channel_membership WHERE user_id=?",
                                (data["id"],)).fetchone()
     if membership:
         data.update(channel_blocked=membership["blocked"], channel_pending=membership["pending"],
-                    channel_exempt=membership["exempt"])
+                    channel_exempt=membership["exempt"], channel_trial=membership["trial"])
     return User(**data)
 
 
@@ -189,7 +199,7 @@ def update(user_id: int, **fields) -> None:
     if not fields:
         return
     channel = {k.removeprefix("channel_"): fields.pop(k)
-               for k in ("channel_blocked", "channel_pending", "channel_exempt")
+               for k in ("channel_blocked", "channel_pending", "channel_exempt", "channel_trial")
                if k in fields}
     with connect() as c:
         if fields:

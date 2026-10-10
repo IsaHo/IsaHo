@@ -19,6 +19,7 @@ import fmt
 import handlers as h
 import links
 import membership
+import xray
 import shopdb
 import partnerdb
 import partners
@@ -163,8 +164,8 @@ async def send_account(msg: Message, u) -> None:
     buttons = [("🔄 تمدید همین اکانت", f"rn:{u.id}")]
     if shopdb.addons() and card_info():
         buttons.append(("➕ حجم اضافه", f"ad:{u.id}"))
-    await msg.answer(fmt.user_card(u) + usage + "\n\n" + h.links_text(u).rsplit("\n🤖", 1)[0],
-                     reply_markup=h.ikb([buttons]))
+    await msg.answer(fmt.user_card(u) + usage, reply_markup=h.ikb([buttons]))
+    await h.send_links(msg.answer, u, customer=True)
 
 
 @router.callback_query(F.data.startswith("acc:"))
@@ -185,8 +186,6 @@ def plans_kb(target: str):
 @router.message(F.text == h.BTN_BUY)
 async def buy(msg: Message, state: FSMContext, bot: Bot):
     await state.clear()
-    if not await membership.ensure(bot, msg.from_user.id, msg):
-        return
     if not shop_open():
         await msg.answer("فروش فعلاً بسته است. از «💬 پشتیبانی» پیام بدهید.")
         return
@@ -353,9 +352,6 @@ async def pay_cancel(cb: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data == "pay")
 async def pay(cb: CallbackQuery, state: FSMContext, bot: Bot):
-    if not await membership.ensure(bot, cb.from_user.id, cb.message):
-        await cb.answer("ابتدا عضویت در کانال را تأیید کنید", show_alert=True)
-        return
     data = await state.get_data()
     if data.get('workspace'):
         await cb.answer("از دکمهٔ پرداخت پیش‌نمایش گروهی استفاده کنید", show_alert=True)
@@ -457,10 +453,12 @@ async def fulfill(bot: Bot, o) -> None:
         import partnerwork
         await partnerwork.fulfill_bulk(bot, o)
         return
-    await membership.reconcile_user(bot, o.tg_id)
     p = shopdb.plan(o.plan_id)
     buyer = shopdb.customer(o.tg_id)
     now = int(time.time())
+    if o.kind != "new":
+        # A purchased renewal/addon permanently converts an existing trial.
+        db.update(o.user_id, channel_trial=0, channel_blocked=0, channel_pending=1)
     if o.kind == "new":
         u = db.create_user(unique_name(o.account_name or f"c{o.id}"), p.gb, p.days)
         if buyer.reseller_percent:
@@ -493,9 +491,15 @@ async def fulfill(bot: Bot, o) -> None:
         head = "✅ تمدید شما انجام شد!"
     if o.discount_code:
         shopdb.use_discount(o.discount_code)
-    # Recheck at fulfillment: a paid order can finish after the customer leaves.
+    # Paid accounts never depend on Telegram membership availability.
     u = await membership.prepare_account(bot, db.get(u.id))
-    await membership.reconcile_user(bot, membership.controller(u))
+    if u.channel_pending:
+        try:
+            await xray.sync_user(u, u.accessible, allow_restart=False)
+        except (RuntimeError, OSError, ValueError):
+            log.warning("paid account hot-update pending for account %s", u.id)
+        else:
+            db.update(u.id, channel_pending=0)
     u = db.get(u.id)
     # Commission / generic referral reward is snapshotted and credited exactly once.
     credit = partnerdb.settle(o.id)
@@ -514,7 +518,10 @@ async def fulfill(bot: Bot, o) -> None:
     try:
         await bot.send_message(o.tg_id, f"{head}\n\n{fmt.user_card(u)}")
         await bot.send_photo(o.tg_id, BufferedInputFile(h.qr_png(links.sub_url(u)), "qr.png"),
-                             caption=h.links_text(u).rsplit("\n🤖", 1)[0])
+                             caption="📥 QR سابسکریپشن · لینک‌ها در پیام بعدی")
+        async def send(text, **kwargs):
+            await bot.send_message(o.tg_id, text, **kwargs)
+        await h.send_links(send, u, customer=True)
         await bot.send_message(o.tg_id, h.HELP_TEXT, reply_markup=h.USER_KB)
         if u.channel_blocked:
             await bot.send_message(o.tg_id, membership.JOIN_TEXT, reply_markup=membership.keyboard())
@@ -538,13 +545,15 @@ async def test_account(msg: Message, bot: Bot):
         return
     mb, hours = (int(x) for x in raw.split(":"))
     u = db.create_user(unique_name(f"test{msg.from_user.id}"), mb / 1024, 0)
-    db.update(u.id, tg_id=msg.from_user.id, expire_at=int(time.time()) + hours * 3600, note="test")
+    db.update(u.id, tg_id=msg.from_user.id, expire_at=int(time.time()) + hours * 3600,
+              note="test", channel_trial=1)
     shopdb.update_customer(msg.from_user.id, test_used=1)
     u = db.get(u.id)
     await h.apply_user(u)
     await msg.answer(f"🎁 اکانت تست شما ({mb} مگابایت، {hours} ساعت):\n\n{fmt.user_card(u)}")
     await msg.answer_photo(BufferedInputFile(h.qr_png(links.sub_url(u)), "qr.png"),
-                           caption=h.links_text(u).rsplit("\n🤖", 1)[0])
+                           caption="📥 QR سابسکریپشن · لینک‌ها در پیام بعدی")
+    await h.send_links(msg.answer, u, customer=True)
     await msg.answer(h.HELP_TEXT, reply_markup=h.USER_KB)
     await notify_admins(bot, f"🎁 اکانت تست ساخته شد برای {html.escape(msg.from_user.full_name or '')} "
                              f"(<code>{msg.from_user.id}</code>)")
