@@ -144,6 +144,14 @@ class PrivateNodeCDNTests(unittest.TestCase):
         entries = dict(links.route_entries(self.user))
         self.assertEqual(443, urlsplit(entries["node:UK"]).port)
 
+    def test_set_reality_proxy_port_enables_and_clears(self):
+        self.assertTrue(nodes.set_reality_proxy_port("DE2", 8443))
+        self.assertEqual(8443, nodes.reality_proxy_port(nodes.all_nodes()[0]))
+        self.assertTrue(nodes.set_reality_proxy_port("DE2", 0))
+        self.assertNotIn("reality_proxy_port", nodes.all_nodes()[0])
+        self.assertFalse(nodes.set_reality_proxy_port("missing", 8443))
+        self.assertFalse(nodes.set_reality_proxy_port("DE2", 70000))
+
 
 if __name__ == "__main__":
     unittest.main()

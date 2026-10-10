@@ -86,6 +86,29 @@ def reality_proxy_port(node: dict) -> int:
     return port if 1 <= port <= 65535 else 0
 
 
+DEFAULT_REALITY_PROXY_PORT = 8443
+
+
+def set_reality_proxy_port(name: str, port: int) -> bool:
+    """Enable/disable the Reality bridge publication for a node. 0 disables."""
+    try:
+        port = int(port)
+    except (TypeError, ValueError):
+        return False
+    if port < 0 or port > 65535:
+        return False
+    stored = all_nodes()
+    for n in stored:
+        if n["name"] == name:
+            if port:
+                n["reality_proxy_port"] = port
+            else:
+                n.pop("reality_proxy_port", None)
+            save(stored)
+            return True
+    return False
+
+
 def has_cdn(node: dict) -> bool:
     """CDN publication is independent of a node's private Reality listener."""
     enabled = node.get("cdn_enabled", not node.get("private", True))
