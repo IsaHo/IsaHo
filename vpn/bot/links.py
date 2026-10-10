@@ -94,7 +94,7 @@ def route_entries(u) -> list:
     if "node" in types:
         import nodes
         for n in nodes.all_nodes():
-            if not n.get("private", True) and cfg.reality_public_key:
+            if nodes.public_ready(n) and cfg.reality_public_key:
                 links.append((f"node:{n['name']}", reality_link(u, n["ip"], cfg.reality_port, f"{n['name']}-Reality")))
             if nodes.has_cdn(n):
                 links.append((f"cdn:{n['name']}", cdn_link(u, n["domain"], f"{n['name']}-CDN", node_cdn_port(n))))

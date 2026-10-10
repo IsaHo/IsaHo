@@ -135,11 +135,12 @@ echo "==> Sync agent"
 cat >/usr/local/bin/isaho-node <<'AGENT'
 #!/usr/bin/env python3
 """Pull the Xray config from the bot, apply it if it changed, and push traffic counters."""
-import base64, hashlib, http.client, json, os, socket, ssl, subprocess, sys, time, urllib.parse
+import base64, hashlib, http.client, ipaddress, json, os, re, socket, ssl, subprocess, sys, time, urllib.parse
 
 conf = dict(l.split("=", 1) for l in open("/etc/isaho-node/node.conf").read().split() if "=" in l)
 url = urllib.parse.urlsplit(conf["MAIN"])
 XRAY, CFG, PENDING = "/usr/local/bin/xray", "/usr/local/etc/xray/config.json", "/etc/isaho-node/pending.json"
+RECOVERY_STAMP = "/etc/isaho-node/recovery-at"
 
 
 def request(method, path, body=None):
@@ -160,7 +161,10 @@ def request(method, path, body=None):
 
 
 def run(*args):
-    return subprocess.run(args, capture_output=True, text=True)
+    try:
+        return subprocess.run(args, capture_output=True, text=True, timeout=25)
+    except (OSError, subprocess.TimeoutExpired):
+        return subprocess.CompletedProcess(args, 124, "", "command unavailable or timed out")
 
 
 def stats():
@@ -183,21 +187,128 @@ def merge(a, b):
     return a
 
 
+def port_preflight(config):
+    """Fail closed on foreign owners; only this service's current PID may be replaced."""
+    pid = run("systemctl", "show", "xray", "--property=MainPID", "--value").stdout.strip()
+    for inbound in config.get("inbounds", []):
+        address = inbound.get("listen", "0.0.0.0")
+        try:
+            target = ipaddress.ip_address(address)
+            port = int(inbound["port"])
+            if not 1 <= port <= 65535:
+                return "invalid inbound port"
+        except (ValueError, TypeError, KeyError):
+            return "unsupported inbound bind address or port"
+        result = run("ss", "-Htlnp", f"sport = :{port}")
+        if result.returncode:
+            return f"cannot inspect port {port} ownership"
+        for line in result.stdout.splitlines():
+            fields = line.split()
+            if len(fields) < 4:
+                return f"cannot parse port {port} ownership"
+            bound = fields[3].rsplit(":", 1)[0].strip("[]").split("%", 1)[0]
+            if bound != "*":
+                try:
+                    local = ipaddress.ip_address(bound)
+                except ValueError:
+                    return f"cannot parse port {port} bind address"
+                # Exact disjoint addresses can coexist; wildcard binds are conservative.
+                if not local.is_unspecified and not target.is_unspecified and local != target:
+                    continue
+            owners = set(re.findall(r"pid=(\d+)", line))
+            if not owners or pid == "0" or owners != {pid}:
+                return f"port {port} has a foreign or unknown owner"
+    return ""
+
+
+def apply_config(config, text, old):
+    if text == old:
+        return {"state": "in_sync", "reason": ""}
+    tmp = CFG[:-len(".json")] + ".new.json"
+    try:
+        with open(tmp, "w") as output:
+            output.write(text)
+        os.chmod(tmp, 0o600)
+        if run(XRAY, "run", "-test", "-c", tmp).returncode:
+            reason = "new config failed validation"
+        else:
+            reason = port_preflight(config)
+        if reason:
+            print(reason + "; keeping the old config", file=sys.stderr)
+            return {"state": "rejected", "reason": reason}
+        global pending
+        pending = merge(pending, stats())
+        os.replace(tmp, CFG)
+        result = run("systemctl", "restart", "xray")
+        return {"state": "applied" if result.returncode == 0 else "restart_failed",
+                "reason": "" if result.returncode == 0 else "Xray restart failed",
+                "restart_code": result.returncode}
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+
+def recover_failed():
+    """Recover failed only, never inactive/activating; at most one attempt per 300s."""
+    if run("systemctl", "is-active", "xray").stdout.strip() != "failed":
+        return {"state": "not_needed"}
+    stamp = RECOVERY_STAMP
+    now = time.time()
+    try:
+        previous = 0
+        if os.path.exists(stamp):
+            with open(stamp) as source:
+                previous = float(source.read())
+    except (OSError, ValueError):
+        return {"state": "blocked", "reason": "cannot read recovery stamp"}
+    if now - previous < 300:
+        return {"state": "backoff"}
+    if run(XRAY, "run", "-test", "-c", CFG).returncode:
+        return {"state": "blocked", "reason": "current config failed validation"}
+    try:
+        with open(CFG) as source:
+            reason = port_preflight(json.load(source))
+        if reason:
+            return {"state": "blocked", "reason": reason}
+        fd = os.open(stamp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as output:
+            output.write(str(now))
+    except (OSError, ValueError):
+        return {"state": "blocked", "reason": "cannot prepare recovery"}
+    # Do not compete with another operator or systemd's automatic restart.
+    if run("systemctl", "is-active", "xray").stdout.strip() != "failed":
+        return {"state": "state_changed"}
+    start = run("systemctl", "start", "xray")
+    result = {"state": "started" if start.returncode == 0 else "failed",
+              "start_code": start.returncode}
+    if start.returncode and run("systemctl", "is-active", "xray").stdout.strip() == "failed":
+        reset = run("systemctl", "reset-failed", "xray")
+        result["reset_code"] = reset.returncode
+        if reset.returncode == 0:
+            retry = run("systemctl", "start", "xray")
+            result.update(state="started" if retry.returncode == 0 else "failed",
+                          retry_code=retry.returncode)
+    if result["state"] == "failed":
+        print("bounded Xray recovery failed", file=sys.stderr)
+    return result
+
+
 pending = json.load(open(PENDING)) if os.path.exists(PENDING) else {}
 pending = merge(pending, stats())
 
+# Local recovery must not depend on the main bot being reachable.
+recovery = recover_failed()
+if recovery.get("state") == "blocked":
+    print("Xray recovery blocked: " + recovery["reason"], file=sys.stderr)
 new = request("GET", "/node/config")
 text = json.dumps(new, indent=2, sort_keys=True)
 old = open(CFG).read() if os.path.exists(CFG) else ""
-if text != old:
-    tmp = CFG[:-len(".json")] + ".new.json"  # xray picks the format from the extension
-    open(tmp, "w").write(text)
-    if run(XRAY, "run", "-test", "-c", tmp).returncode == 0:
-        pending = merge(pending, stats())  # counters are lost on restart
-        os.replace(tmp, CFG)
-        run("systemctl", "restart", "xray")
-    else:
-        print("new config failed validation; keeping the old one", file=sys.stderr)
+config_apply = apply_config(new, text, old)
+if config_apply["state"] == "restart_failed":
+    recovery = recover_failed()
+applied = json.load(open(CFG)) if os.path.exists(CFG) else {}
+reality_public = any(i.get("tag") == "reality" and i.get("listen") not in
+                     ("127.0.0.1", "::1") for i in applied.get("inbounds", []))
 
 # five-minute standby copy of the bot so a promotion loses at most a few minutes of state
 STANDBY = "/etc/isaho-node/standby"
@@ -218,6 +329,7 @@ if not os.path.exists(stamp) or time.time() - os.path.getmtime(stamp) > 300:
 
 info = {"hostname": socket.gethostname(), "load": os.getloadavg()[0],
         "xray": run("systemctl", "is-active", "xray").stdout.strip(),
+        "config_apply": config_apply, "recovery": recovery, "reality_public": reality_public,
         "standby_at": int(open(stamp).read()) if os.path.exists(stamp) else 0}
 try:
     request("POST", "/node/stats", {"stats": pending, "info": info})

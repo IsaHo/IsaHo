@@ -845,11 +845,20 @@ def nodes_view():
             state = "⚪️ هنوز وصل نشده"
         else:
             ago = int(time.time() - r["seen"])
-            state = (f"{'🟢' if nodes.online(n) else '🔴'} آخرین همگام‌سازی {ago} ثانیه پیش | "
-                     f"Xray: {r.get('xray', '?')} | load {float(r.get('load', 0)):.2f} | "
+            status = ("🟢 سالم" if nodes.healthy(n) else
+                      "⚪️ گزارش قدیمی" if not nodes.online(n) else
+                      "🟠 منتظر اعمال تغییر" if n.get("mode_pending") else "🔴 نیازمند بررسی")
+            state = (f"{status} · همگام‌سازی {ago} ثانیه پیش | "
+                     f"Xray: {html.escape(str(r.get('xray', '?')))} | load {float(r.get('load', 0)):.2f} | "
                      + (f"💾 نسخه‌ی یدک ربات: {int((time.time() - r['standby_at']) / 60)} دقیقه پیش | "
                         if r.get("standby_at") else "💾 نسخه‌ی یدک ربات: هنوز نه | ")
                      + f"ترافیک از روشن شدن ربات: {fmt.size(int(r.get('bytes', 0)))}")
+            apply = r.get("config_apply") or {}
+            if apply.get("state") in {"rejected", "restart_failed"}:
+                state += "\n⛔️ کانفیگ اعمال نشد: " + html.escape(str(apply.get("reason", "خطای اعمال کانفیگ"))[:160])
+            recovery = r.get("recovery") or {}
+            if recovery.get("state") in {"blocked", "failed", "backoff"}:
+                state += "\n🛡 بازیابی محدود: " + html.escape(str(recovery.get("reason") or recovery["state"])[:160])
         private = n.get("private", True)
         mode = "🔒 فقط از طریق تانل ایران (پورت عمومی بسته)" if private else "🔓 عمومی (لینک مستقیم و CDN هم دارد)"
         lines += ["", f"<b>{html.escape(n['name'])}</b> <code>{n['ip']}</code> {html.escape(n.get('domain', ''))}",
@@ -924,15 +933,48 @@ async def nodes_del(cb: CallbackQuery):
 
 @router.callback_query(F.data.startswith("nd:priv:"), owner)
 async def nodes_private(cb: CallbackQuery):
-    nodes.toggle_private(cb.data[8:])
-    if nodes.public_nodes() and "node" not in links.enabled_types():
+    node = next((n for n in nodes.all_nodes() if n["name"] == cb.data[8:]), None)
+    if not node:
+        await cb.answer("نود پیدا نشد", show_alert=True)
+        return
+    private = node.get("private", True)
+    if private and node.get("cdn_enabled") is True:
+        await cb.answer("این نود CDN مستقل دارد؛ عمومی‌کردن Reality می‌تواند با پورت CDN تداخل کند. ابتدا مسیر مبدأ باید بررسی شود.", show_alert=True)
+        return
+    await cb.answer()
+    change = (f"Reality از localhost به 0.0.0.0:{cfg.reality_port} منتقل می‌شود؛ پورت عمومی و ریسک دسترسی تغییر می‌کند."
+              if private else "Reality به localhost منتقل می‌شود؛ لینک مستقیم این نود دیگر منتشر نمی‌شود.")
+    await cb.message.answer(
+        f"🛡 <b>تأیید تغییر مسیر · {html.escape(node['name'])}</b>\n\n{change}\n\n"
+        "تغییر در گزارش بعدی ایجنت درخواست می‌شود؛ اگر پورت اشغال باشد کانفیگ رد می‌شود. "
+        "لینک مستقیم جدید فقط پس از تأیید اعمال از نود منتشر می‌شود.",
+        reply_markup=ikb([[('✅ تأیید تغییر', f"nd:mode:{node['name']}:{int(private)}")],
+                         [('↩️ بدون تغییر', 'nd:menu')]]))
+
+
+@router.callback_query(F.data.startswith("nd:mode:"), owner)
+async def nodes_mode_confirm(cb: CallbackQuery):
+    try:
+        name, expected = cb.data[8:].rsplit(":", 1)
+        expected = {"0": False, "1": True}[expected]
+    except (ValueError, KeyError):
+        await cb.answer("درخواست نامعتبر", show_alert=True)
+        return
+    node = next((n for n in nodes.all_nodes() if n["name"] == name), None)
+    if not node or (expected and node.get("cdn_enabled") is True):
+        await cb.answer("تغییر برای این نود مجاز نیست؛ صفحه را تازه کنید", show_alert=True)
+        return
+    if not nodes.toggle_private(name, expected_private=expected):
+        await cb.answer("وضعیت تغییر کرده؛ دوباره بررسی کنید", show_alert=True)
+        return
+    if expected and "node" not in links.enabled_types():
         links.toggle_type("node")
-    await cb.answer("✅ ظرف یک دقیقه روی سرور اعمال می‌شود", show_alert=True)
+    await cb.answer("درخواست ثبت شد؛ منتظر تأیید ایجنت هستیم", show_alert=True)
     text, kb = nodes_view()
     await cb.message.edit_text(text, reply_markup=kb)
 
 
-@router.callback_query(F.data.startswith(("nd:add", "nd:cmd:", "nd:del:", "nd:priv:")), admin)
+@router.callback_query(F.data.startswith(("nd:add", "nd:cmd:", "nd:del:", "nd:priv:", "nd:mode:")), admin)
 async def nodes_denied(cb: CallbackQuery):
     await cb.answer("فقط مالک ربات می‌تواند این را انجام دهد", show_alert=True)
 
