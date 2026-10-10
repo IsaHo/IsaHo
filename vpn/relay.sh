@@ -60,7 +60,38 @@ fi
 # Users' Reality connections ride inside several persistent SSH connections (port 22) to the
 # foreign server, load-balanced by HAProxy with health checks, for networks where TLS to
 # foreign IPs is throttled but SSH passes. The subscription is served here too, over HTTP :2096.
-if [[ ${1:-} == ssh ]]; then
+if [[ ${1:-} == ssh || ${1:-} == wireguard || ${1:-} == backhaul ]]; then
+    TRANSPORT=$1
+    if [[ $TRANSPORT != ssh ]]; then
+        [[ $EUID -eq 0 ]] || { echo "run as root"; exit 1; }
+        [[ -r /etc/isaho-relay.conf ]] || { echo "missing /etc/isaho-relay.conf; provision WireGuard peers first"; exit 1; }
+        [[ $TRANSPORT != wireguard ]] || command -v wg >/dev/null || { echo "install wireguard-tools and provision peers first"; exit 1; }
+        command -v haproxy >/dev/null || { apt-get update -qq && apt-get install -y -qq haproxy >/dev/null; }
+        install -d -m 755 /usr/local/lib/isaho
+        task_helper=$(mktemp)
+        trap 'rm -f "$task_helper" /etc/haproxy/haproxy.cfg.new' EXIT
+        task_source_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]:-./relay.sh}")" && pwd)
+        if [[ -f $task_source_dir/relay-wireguard.py ]]; then
+            cp "$task_source_dir/relay-wireguard.py" "$task_helper"
+        else
+            curl -fsSL --connect-timeout 10 --max-time 60 "https://raw.githubusercontent.com/IsaHo/IsaHo/${ISAHO_REF:-main}/vpn/relay-wireguard.py" -o "$task_helper"
+        fi
+        # Validate routes and private endpoints before replacing the working HAProxy config.
+        python3 "$task_helper" render --check > /etc/haproxy/haproxy.cfg.new
+        haproxy -c -f /etc/haproxy/haproxy.cfg.new >/dev/null
+        task_backup="/etc/haproxy/haproxy.cfg.before-wireguard-$(date +%s)"
+        cp -p /etc/haproxy/haproxy.cfg "$task_backup"
+        mv /etc/haproxy/haproxy.cfg.new /etc/haproxy/haproxy.cfg
+        if systemctl is-active --quiet haproxy; then
+            systemctl reload haproxy || { cp -p "$task_backup" /etc/haproxy/haproxy.cfg; exit 1; }
+        else
+            systemctl enable -q --now haproxy || { cp -p "$task_backup" /etc/haproxy/haproxy.cfg; exit 1; }
+        fi
+        install -m 755 "$task_helper" /usr/local/lib/isaho/relay-wireguard.py
+        python3 "$task_helper" set-version "${ISAHO_REF:-manual}"
+        rm -f "$task_helper"
+        trap - EXIT
+    else
     # several foreign servers: "main-ip,node-ip,...". The first one hosts the bot (subscription,
     # agent reports); all of them carry user traffic.
     FOREIGN_LIST=${2:?usage: bash relay.sh ssh <foreign-ip[,node-ip...]> [tunnels] [ssh-port]}
@@ -202,10 +233,12 @@ UNIT
     done
     systemctl enable -q haproxy
     systemctl restart haproxy
+    fi
 
     echo "==> Installing the status agent (reports to the bot through the tunnels)"
     # identity = the address users dial (the interface IP); egress = what the foreign server sees.
     # They differ on providers that NAT outgoing traffic through another IP.
+    if [[ $TRANSPORT == ssh ]]; then
     IFACE_IP=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<NF;i++) if($i=="src") print $(i+1)}')
     EGRESS_IP=$(curl -4 -fsS --max-time 6 https://api.ipify.org 2>/dev/null || true)
     [[ $EGRESS_IP =~ ^[0-9.]+$ ]] || EGRESS_IP=$IFACE_IP
@@ -213,21 +246,49 @@ UNIT
     [[ $IFACE_IP =~ ^(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.) || -z $IFACE_IP ]] && PUBLIC_IP=$EGRESS_IP
     cat >/etc/isaho-relay.conf <<CONF
 FOREIGN_IP=$FOREIGN_LIST
+TRANSPORT=ssh
 TUNNELS=$TUNNELS
 SSH_PORT=$SSH_PORT
 PUBLIC_IP=$PUBLIC_IP
 EGRESS_IP=$EGRESS_IP
 VERSION=${ISAHO_REF:-manual}
 CONF
+    fi
     cat >/usr/local/bin/isaho-agent <<'AGENT'
 #!/usr/bin/env python3
 """Reports this relay's health to the bot (through the SSH tunnels) and runs queued actions."""
-import concurrent.futures, json, os, re, socket, subprocess, tempfile, time, urllib.parse, urllib.request, zipfile
+import concurrent.futures, json, os, re, shlex, socket, subprocess, tempfile, time, urllib.parse, urllib.request, zipfile
 
 conf = dict(l.split("=", 1) for l in open("/etc/isaho-relay.conf").read().split() if "=" in l)
 
 def sh(cmd):
     return subprocess.run(cmd, shell=True, capture_output=True, text=True).stdout.strip()
+
+def transport_status(config):
+    if config.get("TRANSPORT", "ssh") not in {"wireguard", "backhaul"}:
+        return {}
+    try:
+        result = subprocess.run(["python3", "/usr/local/lib/isaho/relay-wireguard.py", "status"],
+                                capture_output=True, text=True, timeout=20, check=True)
+        return json.loads(result.stdout)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return {"transport": config.get("TRANSPORT"), "transport_healthy": False,
+                "tunnels_up": 0, "tunnels_total": 1, "node_tunnels_up": 0, "node_tunnels_total": 0}
+
+def update_command(config, ref):
+    if not re.fullmatch(r"[0-9a-f]{7,40}|main", ref):
+        raise ValueError("invalid update reference")
+    mode = config.get("TRANSPORT", "ssh")
+    if mode in {"wireguard", "backhaul"}:
+        args = mode
+    elif mode == "ssh":
+        args = "ssh " + " ".join(shlex.quote(config[k]) for k in ("FOREIGN_IP", "TUNNELS", "SSH_PORT"))
+    else:
+        raise ValueError("unsupported relay transport")
+    # pipefail prevents a failed download from being reported as a successful update.
+    return (f"set -o pipefail; curl -fsSL https://raw.githubusercontent.com/IsaHo/IsaHo/{ref}/vpn/relay.sh | "
+            f"ISAHO_REF={ref} bash -s {args} > /var/log/isaho-update.log 2>&1; "
+            f"result=$?; echo \"$(date '+%F %T') update to {ref[:10]} exit=$result\" >> /var/log/isaho-update.log; exit $result")
 
 def net_bytes():
     rx = tx = 0
@@ -387,7 +448,9 @@ report = {
     "last": sh("tail -n 1 /var/log/isaho-update.log 2>/dev/null"),
     "agent": 4,
     "proxy": "send-proxy-v2" in open("/etc/haproxy/haproxy.cfg").read(),
+    "transport": conf.get("TRANSPORT", "ssh"),
 }
+report.update(transport_status(conf))
 try:
     if os.path.exists(PROBE_RESULT):
         report["probe_result"] = json.load(open(PROBE_RESULT))
@@ -418,7 +481,7 @@ if isinstance(job, dict) and job.get("id") and job.get("link") and job.get("sub_
 
 # the foreign server tells us whether it expects the PROXY header (real client IPs)
 want = reply.get("proxy")
-if isinstance(want, bool) and want != report["proxy"]:
+if conf.get("TRANSPORT", "ssh") == "ssh" and isinstance(want, bool) and want != report["proxy"]:
     path = "/etc/haproxy/haproxy.cfg"
     lines = open(path).read().splitlines()
     out = []
@@ -434,11 +497,13 @@ if isinstance(want, bool) and want != report["proxy"]:
 
 action, ref = reply.get("action"), reply.get("ref", "")
 if action == "restart":
-    sh("systemctl restart 'isaho-tunnel@*' haproxy")
+    if conf.get("TRANSPORT", "ssh") in {"wireguard", "backhaul"}:
+        # A routine button must not flap live peer interfaces or default routing.
+        sh("systemctl reload haproxy")
+    else:
+        sh("systemctl restart 'isaho-tunnel@*' haproxy")
 elif action == "update" and re.fullmatch(r"[0-9a-f]{7,40}|main", ref):
-    script = (f"curl -fsSL https://raw.githubusercontent.com/IsaHo/IsaHo/{ref}/vpn/relay.sh | "
-              f"ISAHO_REF={ref} bash -s ssh {conf['FOREIGN_IP']} {conf['TUNNELS']} {conf['SSH_PORT']} "
-              f"> /var/log/isaho-update.log 2>&1; echo \"$(date '+%F %T') update to {ref[:10]} exit=$?\" >> /var/log/isaho-update.log")
+    script = update_command(conf, ref)
     subprocess.run(["systemd-run", "--unit", f"isaho-update-{int(time.time())}", "bash", "-c", script])
 AGENT
     chmod +x /usr/local/bin/isaho-agent
@@ -466,6 +531,10 @@ UNIT
     systemctl daemon-reload
     systemctl enable -q --now isaho-agent.timer
 
+    if [[ $TRANSPORT != ssh ]]; then
+        echo "$TRANSPORT relay and status agent ready. Existing tunnel units remain available for deliberate draining."
+        exit 0
+    fi
     PUB=$(cat "$KEY.pub")
     echo "
 ✅ $TUNNELS SSH tunnels + HAProxy installed. Users: :$LISTEN_PORT   Subscription: http://<this-ip>:$SUB_PORT

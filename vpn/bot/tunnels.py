@@ -22,7 +22,12 @@ def status() -> list:
     out = []
     for i, (host, port) in enumerate(links.relays(), 1):
         ips = {_resolve(host)}
-        egress = (relays.reports.get(host) or {}).get("egress")
+        report = relays.reports.get(host) or {}
+        if report.get("transport") in {"wireguard", "backhaul"}:
+            count = int(report.get("tunnels_up", 0)) if relays.online(host) and report.get("transport_healthy") else 0
+            out.append((f"IR{i}", host, port, count))
+            continue
+        egress = report.get("egress")
         if egress:
             ips.add(egress)  # providers that NAT outgoing traffic connect from another IP
         out.append((f"IR{i}", host, port, sum(1 for c in conns if c.raddr.ip in ips)))
@@ -33,4 +38,8 @@ def summary() -> str:
     rows = status()
     if not rows:
         return "سرور واسط تعریف نشده"
-    return "\n".join(f"{'🟢' if n else '🔴'} {label} <code>{host}</code> — {n} تانل SSH" for label, host, _, n in rows)
+    import relays
+    names = {"wireguard": "WireGuard", "backhaul": "Backhaul · TLS", "ssh": "SSH"}
+    return "\n".join(f"{'🟢' if n else '🔴'} {label} <code>{host}</code> — {n} مسیر "
+                     + names.get((relays.reports.get(host) or {}).get("transport", "ssh"), "تانل")
+                     for label, host, _, n in rows)

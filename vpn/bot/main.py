@@ -92,9 +92,11 @@ async def check_tunnels(bot: Bot) -> None:
             continue
         _tunnel_down[host] = _tunnel_down.get(host, 0) + 1
         if _tunnel_down[host] == DOWN_AFTER:
+            managed = (relays.reports.get(host) or {}).get("transport") in {"wireguard", "backhaul"}
+            diagnostic = "isaho-agent" if managed else "systemctl status 'isaho-tunnel@*'"
             await notify_admins(bot, f"🔴 تانل {label} (<code>{host}</code>) قطع شد!\n"
                                      "کاربرانی که از این سرور واسط وصل‌اند الان قطع هستند.\n"
-                                     "روی سرور ایران بررسی کنید: <code>systemctl status 'isaho-tunnel@*'</code>")
+                                     f"روی سرور ایران بررسی کنید: <code>{diagnostic}</code>")
             others = [lb for lb, _, _, k in tunnels.status() if k and lb != label]
             await notify_status(bot, f"⚠️ سرور {label} موقتاً در دسترس نیست و در حال رفع مشکل است."
                                      + (f"\nلطفاً فعلاً از کانفیگ {' یا '.join(others)} استفاده کنید." if others else ""))
