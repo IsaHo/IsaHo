@@ -5,11 +5,15 @@ import logging
 import time
 
 import db
+import fmt
 import handlers as h
 import health
 import healthdb
+import identity
 import nodes
+import pathdb
 import relays
+import xray
 from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramAPIError
 from aiogram.types import CallbackQuery, Message
@@ -92,9 +96,11 @@ def overview() -> tuple[str, object]:
     else:
         lines.append("✅ رخداد بازی وجود ندارد")
 
+    overdue = len(pathdb.due())
     buttons = [
         [("🩺 تست دوباره از ایران", "rs:probe"), ("🔄 تازه‌سازی", "rs:menu")],
         [("⚙️ تغییر حالت عملیات", "rs:modes"), ("📜 تاریخچه رخدادها", "rs:history")],
+        [(f"🔄 چرخش آدرس{f' ({overdue})' if overdue else ''}", "rs:rot")],
         [("🚀 آمادگی انتقال کنترل‌پلین", "rs:standby")],
         [("🧭 مسیریابی خودترمیم‌شونده", "rt:menu")],
         [("↩️ شبکه و سلامت", "nav:ops"), ("🏠 خانه", "nav:home")],
@@ -258,6 +264,227 @@ async def resilience_repair(cb: CallbackQuery):
         )
     text, keyboard = overview()
     await cb.message.edit_text(text, reply_markup=keyboard)
+
+
+PATH_LABELS = {"reality": "⚡ Reality مستقیم", "reality-relay": "🇮🇷 Reality از تانل رله",
+               "cdn": "☁️ CDN"}
+
+
+def _path_label(key: str) -> str:
+    return PATH_LABELS.get(key, key)
+
+
+def _path_address(key: str) -> str:
+    """The address this path currently hands to customers, or "" when it is not a single one.
+
+    Used only to offer parking it; an ambiguous path parks nothing rather than guessing."""
+    import links
+    if key == "reality":
+        return cfg.server_ip or ""
+    if key == "cdn":
+        return links.cdn_address() or ""
+    if key == "reality-relay":
+        hosts = [host for host, _ in links.relays()]
+        return hosts[0] if len(hosts) == 1 else ""
+    return ""
+
+
+def rotation_panel() -> tuple:
+    rows_data = pathdb.rows()
+    limit, max_age = pathdb.rotate_bytes(), pathdb.rotate_age()
+    lines = [
+        "🔄 <b>چرخش آدرس</b>",
+        "",
+        f"آستانه: <b>{fmt.size(limit)}</b> یا <b>{max_age // db.DAY} روز</b> از آخرین چرخش هر مسیر.",
+        "",
+    ]
+    if not rows_data:
+        lines.append("هنوز مصرفی ثبت نشده است. شمارش از اولین بازهٔ آماری شروع می‌شود.")
+    buttons = []
+    for row in rows_data:
+        key = row["path_key"]
+        icon = "🔴" if row["due"] else "🟢"
+        reasons = []
+        if row["by_bytes"]:
+            reasons.append("حجم")
+        if row["by_age"]:
+            reasons.append("زمان")
+        mark = f" · رسیده ({' و '.join(reasons)})" if reasons else ""
+        lines.append(
+            f"{icon} {html.escape(_path_label(key))} · {fmt.size(row['bytes'])}"
+            f" · {row['age'] // db.DAY} روز{mark}"
+        )
+        lines.append(f"└ مجموع عمر: {fmt.size(row['total_bytes'])}")
+        buttons.append([(f"✅ آدرس {_path_label(key)} را عوض کردم", f"rs:rot:ask:{key}")])
+    parked = pathdb.parked()
+    ready = sum(1 for item in parked if item["reusable"])
+    lines += [
+        "",
+        "حجمی که یک مسیر از ایران می‌گیرد، سرعت بلاک‌شدن IPش را تعیین می‌کند؛ پس چرخاندن "
+        "پیش از سوختن ارزان‌تر از بازیابی بعد از آن است.",
+        "هیچ آدرسی خودکار عوض نمی‌شود — فقط شمارش و هشدار.",
+    ]
+    buttons += [
+        [("🔑 کوهورت‌های shortId", "rs:sid")],
+        [(f"🅿️ آدرس‌های پارک‌شده ({len(parked)}"
+          + (f"، {ready} آزاد" if ready else "") + ")", "rs:burn")],
+        [("↩️ مرکز تاب‌آوری", "rs:menu")],
+    ]
+    return "\n".join(lines), h.ikb(buttons)
+
+
+@router.callback_query(F.data == "rs:rot", h.admin)
+async def rotation_menu(cb: CallbackQuery):
+    await cb.answer()
+    text, keyboard = rotation_panel()
+    await cb.message.edit_text(text, reply_markup=keyboard)
+
+
+@router.callback_query(F.data.startswith("rs:rot:ask:"), h.admin)
+async def rotation_ask(cb: CallbackQuery):
+    key = cb.data.split(":", 3)[3]
+    if key not in {row["path_key"] for row in pathdb.rows()}:
+        await cb.answer("این مسیر دیگر ثبت نشده است", show_alert=True)
+        return
+    await cb.answer()
+    address = _path_address(key)
+    note = (f"\n\nآدرس فعلی <code>{html.escape(address)}</code> پارک می‌شود و بعد از "
+            f"{pathdb.cooldown_seconds() // db.DAY} روز به‌عنوان قابل‌استفاده علامت می‌خورد."
+            if address else
+            "\n\nاین مسیر یک آدرس مشخص ندارد، پس چیزی پارک نمی‌شود؛ فقط شمارش صفر می‌شود.")
+    await cb.message.edit_text(
+        f"🔄 <b>{html.escape(_path_label(key))}</b>\n\n"
+        "این دکمه آدرس را عوض <i>نمی‌کند</i>؛ فقط ثبت می‌کند که شما عوضش کرده‌اید تا شمارش "
+        "حجم از صفر شروع شود." + note
+        + "\n\nاگر آدرس را واقعاً عوض نکرده‌اید، تأیید نکنید.",
+        reply_markup=h.ikb([[("✅ تأیید", f"rs:rot:go:{key}")], [("↩️ برگشت", "rs:rot")]]))
+
+
+@router.callback_query(F.data.startswith("rs:rot:go:"), h.admin)
+async def rotation_done(cb: CallbackQuery):
+    key = cb.data.split(":", 3)[3]
+    if key not in {row["path_key"] for row in pathdb.rows()}:
+        await cb.answer("این مسیر دیگر ثبت نشده است", show_alert=True)
+        return
+    address = _path_address(key)
+    if address:
+        pathdb.burn(address, kind=key, note=f"چرخش {_path_label(key)}")
+    pathdb.rotate(key)
+    await cb.answer("شمارش این مسیر صفر شد", show_alert=True)
+    text, keyboard = rotation_panel()
+    await cb.message.edit_text(text, reply_markup=keyboard)
+
+
+def cohort_panel() -> tuple:
+    values = identity.short_ids()
+    counts = identity.members()
+    lines = ["🔑 <b>کوهورت‌های shortId</b>", ""]
+    if not values:
+        lines.append("هیچ shortId معتبری تنظیم نشده است.")
+    buttons = []
+    for index, value in enumerate(values):
+        lines.append(f"{index + 1}. <code>{html.escape(value[:4])}…</code> · "
+                     f"{counts.get(index, 0)} اکانت")
+        buttons.append([(f"♻️ چرخش کوهورت {index + 1}", f"rs:sid:ask:{index}")])
+    lines += [
+        "",
+        "سرور همهٔ این مقادیر را می‌پذیرد، پس لینک‌های موجود تا وقتی مقدارشان در فهرست است کار می‌کنند.",
+        "چرخش یک کوهورت فقط لینک همان اکانت‌ها را عوض می‌کند و با تازه‌سازی سابسکریپشن می‌رسد.",
+        "⚠️ اعمال مقدار جدید روی سرور نیازمند بازنویسی کانفیگ و ری‌استارت Xray است؛ "
+        "اتصال‌های فعلی لحظه‌ای قطع می‌شوند.",
+    ]
+    buttons.append([("↩️ چرخش آدرس", "rs:rot")])
+    return "\n".join(lines), h.ikb(buttons)
+
+
+@router.callback_query(F.data == "rs:sid", h.admin)
+async def cohort_menu(cb: CallbackQuery):
+    await cb.answer()
+    text, keyboard = cohort_panel()
+    await cb.message.edit_text(text, reply_markup=keyboard)
+
+
+@router.callback_query(F.data.startswith("rs:sid:ask:"), h.owner)
+async def cohort_ask(cb: CallbackQuery):
+    index = cb.data.rsplit(":", 1)[1]
+    if not index.isdigit() or int(index) >= len(identity.short_ids()):
+        await cb.answer("این کوهورت وجود ندارد", show_alert=True)
+        return
+    await cb.answer()
+    members = identity.members().get(int(index), 0)
+    await cb.message.edit_text(
+        f"♻️ <b>چرخش کوهورت {int(index) + 1}</b>\n\n"
+        f"{members} اکانت shortId جدید می‌گیرند و باید سابسکریپشن را تازه کنند.\n"
+        "کانفیگ Xray بازنویسی و سرویس ری‌استارت می‌شود، پس اتصال‌های فعلی همهٔ کاربران "
+        "لحظه‌ای قطع می‌شوند.\n\nمقدار قبلی دیگر پذیرفته نمی‌شود.",
+        reply_markup=h.ikb([[("✅ تأیید و ری‌استارت", f"rs:sid:go:{index}")],
+                            [("↩️ برگشت", "rs:sid")]]))
+
+
+@router.callback_query(F.data.startswith("rs:sid:go:"), h.owner)
+async def cohort_rotate(cb: CallbackQuery):
+    index = cb.data.rsplit(":", 1)[1]
+    if not index.isdigit() or int(index) >= len(identity.short_ids()):
+        await cb.answer("این کوهورت وجود ندارد", show_alert=True)
+        return
+    previous = identity.short_ids()[int(index)]
+    try:
+        identity.rotate(int(index))
+        await xray.apply_all()
+    except Exception:
+        log.exception("shortId rotation failed")
+        # put the served value back so links already in customers' hands keep working
+        try:
+            values = identity.short_ids()
+            values[int(index)] = previous
+            identity.set_short_ids(values)
+            await xray.apply_all()
+        except Exception:
+            log.exception("shortId rollback failed")
+        await cb.answer("چرخش انجام نشد؛ مقدار قبلی برگشت", show_alert=True)
+    else:
+        await cb.answer("کوهورت چرخید و کانفیگ اعمال شد", show_alert=True)
+    text, keyboard = cohort_panel()
+    await cb.message.edit_text(text, reply_markup=keyboard)
+
+
+@router.callback_query(F.data.startswith("rs:sid:"), h.admin)
+async def cohort_denied(cb: CallbackQuery):
+    await cb.answer("چرخش کوهورت فقط برای مالک اصلی", show_alert=True)
+
+
+@router.callback_query(F.data == "rs:burn", h.admin)
+async def burned_menu(cb: CallbackQuery):
+    await cb.answer()
+    parked = pathdb.parked()
+    lines = ["🅿️ <b>آدرس‌های پارک‌شده</b>", ""]
+    if not parked:
+        lines.append("آدرسی پارک نشده است.")
+    buttons = []
+    for item in parked:
+        if item["reusable"]:
+            state = "🟢 آزاد برای استفادهٔ دوباره"
+        else:
+            state = f"⏳ {item['remaining'] // 3600 + 1} ساعت مانده"
+        kind = f" · {html.escape(_path_label(item['kind']))}" if item["kind"] else ""
+        lines.append(f"<code>{html.escape(item['address'])}</code>{kind}\n└ {state}")
+        buttons.append([(f"🗑 حذف {item['address']}", f"rs:burn:del:{item['address']}")])
+    lines += [
+        "",
+        f"دورهٔ خنک‌شدن: {pathdb.cooldown_seconds() // db.DAY} روز. "
+        "گزارش‌های میدانی می‌گویند IP بلاک‌شده بعد از حدود یک هفته بی‌استفادگی برمی‌گردد؛ "
+        "این یک تخمین است، نه تضمین.",
+        "«آزاد» یعنی دورهٔ خنک‌شدن گذشته، نه اینکه آدرس آزمایش و تأیید شده است.",
+    ]
+    buttons.append([("↩️ چرخش آدرس", "rs:rot")])
+    await cb.message.edit_text("\n".join(lines), reply_markup=h.ikb(buttons))
+
+
+@router.callback_query(F.data.startswith("rs:burn:del:"), h.admin)
+async def burned_release(cb: CallbackQuery):
+    pathdb.release(cb.data.split(":", 3)[3])
+    await cb.answer("از فهرست حذف شد", show_alert=True)
+    await burned_menu(cb)
 
 
 @router.callback_query(F.data == "rs:standby", h.admin)

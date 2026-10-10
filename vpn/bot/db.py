@@ -242,6 +242,9 @@ def delete(user_id: int) -> None:
     with connect() as c:
         c.execute("DELETE FROM users WHERE id=?", (user_id,))
         c.execute("DELETE FROM channel_membership WHERE user_id=?", (user_id,))
+        # keep no identity for an account that no longer exists; the table may predate a rollback
+        if c.execute("SELECT 1 FROM sqlite_master WHERE name='user_identity'").fetchone():
+            c.execute("DELETE FROM user_identity WHERE user_id=?", (user_id,))
 
 
 def extra_admins() -> list:

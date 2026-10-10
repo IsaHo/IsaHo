@@ -8,6 +8,7 @@ import time
 import urllib.request
 
 import db
+import identity
 import links
 from config import cfg
 
@@ -63,7 +64,8 @@ def main() -> None:
         cfg.server_ip, cfg.reality_port, u.uuid, flow="xtls-rprx-vision", stream={
             "network": "tcp", "security": "reality",
             "realitySettings": {"serverName": cfg.reality_sni, "fingerprint": "chrome",
-                                "publicKey": cfg.reality_public_key, "shortId": cfg.reality_short_id}}))
+                                "publicKey": cfg.reality_public_key,
+                                "shortId": identity.short_id(u)}}))
 
     import tunnels
     for label, host, _, n in tunnels.status():

@@ -12,9 +12,12 @@ if [[ ${1:-} == test ]]; then
     [[ $LINK == vless://* ]] || { echo "✖ the second argument must be a vless:// link (copy it from the bot)"; exit 1; }
     OVERRIDE=${3:-}
     D=/tmp/isaho-test; mkdir -p "$D"
+    # Pinned to the same release the foreign server runs, so a probe reproduces what a
+    # customer's client does rather than whatever "latest" happens to be (see vpn/ANTIFILTER.md §2).
+    XRAY_VERSION=${XRAY_VERSION:-v26.7.28}
     if [[ ! -x $D/xray ]]; then
         command -v unzip >/dev/null || apt-get install -y -qq unzip >/dev/null
-        curl -fsSL -o "$D/x.zip" https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip
+        curl -fsSL -o "$D/x.zip" "https://github.com/XTLS/Xray-core/releases/download/$XRAY_VERSION/Xray-linux-64.zip"
         unzip -oq "$D/x.zip" -d "$D"
     fi
     python3 - "$LINK" "$OVERRIDE" >"$D/c.json" <<'PY'
@@ -217,6 +220,7 @@ TUNNELS=$TUNNELS
 SSH_PORT=$SSH_PORT
 PUBLIC_IP=$PUBLIC_IP
 EGRESS_IP=$EGRESS_IP
+XRAY_VERSION=${XRAY_VERSION:-v26.7.28}
 VERSION=${ISAHO_REF:-manual}
 CONF
     cat >/usr/local/bin/isaho-agent <<'AGENT'
@@ -241,6 +245,9 @@ def net_bytes():
 PROBE_DIR = "/var/lib/isaho-agent"
 PROBE_RESULT = os.path.join(PROBE_DIR, "probe-result.json")
 PROBE_XRAY = os.path.join(PROBE_DIR, "xray")
+# Same release the foreign server is pinned to; "latest" would silently change what a probe
+# measures relative to what customers run. Overridable from /etc/isaho-relay.conf.
+PROBE_XRAY_VERSION = conf.get("XRAY_VERSION", "v26.7.28")
 
 def ensure_probe_xray():
     if os.path.exists(PROBE_XRAY):
@@ -248,8 +255,9 @@ def ensure_probe_xray():
     os.makedirs(PROBE_DIR, mode=0o700, exist_ok=True)
     archive = os.path.join(PROBE_DIR, "xray.zip")
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    with opener.open("https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip",
-                     timeout=60) as response, open(archive, "wb") as out:
+    url = ("https://github.com/XTLS/Xray-core/releases/download/"
+           f"{PROBE_XRAY_VERSION}/Xray-linux-64.zip")
+    with opener.open(url, timeout=60) as response, open(archive, "wb") as out:
         out.write(response.read())
     with zipfile.ZipFile(archive) as package:
         with package.open("xray") as source, open(PROBE_XRAY, "wb") as out:

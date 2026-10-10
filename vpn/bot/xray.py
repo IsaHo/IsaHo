@@ -7,6 +7,7 @@ import tempfile
 import time
 
 import db
+import identity
 from config import cfg
 
 log = logging.getLogger(__name__)
@@ -68,7 +69,9 @@ def _inbounds(users, split=None, cert=None, key=None) -> list:
                     "xver": 0,
                     "serverNames": [cfg.reality_sni],
                     "privateKey": cfg.reality_private_key,
-                    "shortIds": [cfg.reality_short_id],
+                    # Every cohort's shortId is served, so links stay valid until their
+                    # entry is rotated out. See identity.py.
+                    "shortIds": identity.short_ids() or [cfg.reality_short_id],
                 },
                 "sockopt": {"tcpFastOpen": True},
             },
@@ -203,6 +206,31 @@ async def collect_stats() -> dict:
     return result
 
 
+async def collect_inbound_stats() -> dict:
+    """Read and reset per-inbound counters. Returns {tag: bytes} for the customer paths.
+
+    Inbound tags are the only place the data plane distinguishes "dialed our IP directly"
+    from "came through an Iranian relay" from "came through the CDN", which is what the
+    endpoint-rotation thresholds need (see pathdb.py)."""
+    code, out, err = await _run(cfg.xray_bin, "api", "statsquery",
+                                f"--server={cfg.api_addr}", "-pattern", "inbound>>>", "-reset")
+    if code != 0:
+        log.debug("inbound statsquery failed: %s", err)
+        return {}
+    try:
+        stats = json.loads(out or "{}").get("stat", []) or []
+    except json.JSONDecodeError:
+        return {}
+    tags = set(all_tags())
+    result = {}
+    for s in stats:
+        parts = s.get("name", "").split(">>>")  # inbound>>>TAG>>>traffic>>>uplink
+        if len(parts) != 4 or parts[1] not in tags:
+            continue
+        result[parts[1]] = result.get(parts[1], 0) + int(s.get("value", 0) or 0)
+    return result
+
+
 async def flush_stats() -> None:
     global last_rate, _last_flush
     stats = await collect_stats()
@@ -213,6 +241,14 @@ async def flush_stats() -> None:
     _last_flush = now
     if stats:
         db.add_traffic(stats)
+    # Accounting must never take down the data plane: a failure here is logged, not raised.
+    try:
+        paths = await collect_inbound_stats()
+        if paths:
+            import pathdb
+            pathdb.add_usage(paths)
+    except Exception:
+        log.exception("per-path accounting failed")
 
 
 async def restart() -> bool:
