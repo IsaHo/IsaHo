@@ -135,7 +135,7 @@ class HealthProbeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("relay:94.184.47.122:cdn", paths)
 
     def test_managed_node_probe_uses_actual_local_transport(self):
-        user = SimpleNamespace(uuid='test-id', sub_token='test-sub')
+        user = SimpleNamespace(uuid='test-id', sub_token='test-sub', name='probe')
         node = {'name': 'DE2', 'ip': '91.107.160.49', 'private': True}
         data = {'ip': '87.107.150.158', 'transport': 'backhaul', 'node_probe_ports': {'DE2': 13001}}
         with mock.patch('health.links.relays', return_value=[('87.107.150.158', 443)]), mock.patch('health.db.active_users', return_value=[user]), mock.patch('health.nodes.all_nodes', return_value=[node]), mock.patch('health.public_probe_links', return_value={}):
