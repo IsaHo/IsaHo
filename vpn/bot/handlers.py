@@ -1035,11 +1035,13 @@ def relays_view():
             lines.append(f"⚪️ <code>{ip}</code> — هنوز گزارشی نفرستاده (relay.sh را دوباره اجرا کنید)")
             continue
         ago = int(time.time() - r["seen"])
-        icon = "🟢" if relays.online(ip) and r.get("tunnels_up") == r.get("tunnels_total") else (
+        healthy = r.get("transport_healthy", bool(r.get("tunnels_total")) and r.get("tunnels_up") == r.get("tunnels_total"))
+        transport = {"wireguard": "WireGuard", "backhaul": "Backhaul · TLS", "ssh": "SSH"}.get(r.get("transport", "ssh"), "تانل")
+        icon = "🟢" if relays.online(ip) and healthy else (
             "🟡" if relays.online(ip) and r.get("tunnels_up") else "🔴")
         lines += [
             f"{icon} <b>{html.escape(str(r.get('hostname', ip)))}</b> <code>{ip}</code>",
-            f"   تانل‌ها: {r.get('tunnels_up', '?')}/{r.get('tunnels_total', '?')}"
+            f"   {transport}: {r.get('tunnels_up', '?')}/{r.get('tunnels_total', '?')}"
             + (f" + خارج دوم {r.get('node_tunnels_up', 0)}/{r['node_tunnels_total']}" if r.get("node_tunnels_total") else "")
             + " | "
             f"load {r.get('load', 0):.2f} | RAM {r.get('mem', 0)}%",
