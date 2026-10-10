@@ -16,7 +16,12 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq && apt-get install -y -qq curl unzip openssl python3 ca-certificates nftables >/dev/null
 
 echo "==> Xray"
-bash -c "$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install -u root >/dev/null
+# Must match the main server's pin: a node serves the same customers with the same REALITY keys,
+# and from v26.9.8 the REALITY server rejects clients that do not offer X25519MLKEM768 first,
+# which silently breaks every sing-box-based client. See vpn/ANTIFILTER.md §2.
+XRAY_VERSION=${XRAY_VERSION:-v26.7.28}
+bash -c "$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" \
+    @ install -u root --version "$XRAY_VERSION" >/dev/null
 mkdir -p /etc/systemd/system/xray.service.d
 printf '[Service]\nLimitNOFILE=1048576\n' >/etc/systemd/system/xray.service.d/isaho.conf
 

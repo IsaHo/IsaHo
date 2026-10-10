@@ -48,6 +48,10 @@ def settings(config):
     data = [endpoint(value, mode == "backhaul") for value in config.get(prefix + "_DATA_ENDPOINTS", "").split(",")]
     if len(data) > 8 or len(set(data)) != len(data):
         raise ValueError("provide one to eight distinct data destinations")
+    backups = {endpoint(value, mode == "backhaul") for value in
+               config.get(prefix + "_BACKUP_ENDPOINTS", "").split(",") if value}
+    if not backups.issubset(set(data)) or len(backups) == len(data):
+        raise ValueError("backup destinations must leave at least one primary data path")
     control = endpoint(config.get(prefix + "_CONTROL_ENDPOINT", ""), mode == "backhaul")
     public = ipaddress.IPv4Address(config.get("PUBLIC_IP", ""))
     if public.is_unspecified or public.is_loopback:
@@ -57,6 +61,9 @@ def settings(config):
 
 def render(config):
     _, data, control = settings(config)
+    prefix = "WG" if config["TRANSPORT"] == "wireguard" else "BH"
+    backups = {endpoint(value, config["TRANSPORT"] == "backhaul") for value in
+               config.get(prefix + "_BACKUP_ENDPOINTS", "").split(",") if value}
     rows = ["global", "    log /dev/log local0 warning", "    maxconn 50000", "",
             "defaults", "    mode tcp", "    log global", "    timeout connect 5s",
             "    timeout client 2h", "    timeout server 2h", "    option tcpka", "",
@@ -65,6 +72,7 @@ def render(config):
     # Node Reality sockets do not accept PROXY headers. Existing connections are allowed to
     # drain on transient health failures instead of terminating every user's session.
     rows += [f"    server wg_data_{index} {host}:{port} check inter 5s fall 3 rise 2"
+             + (" backup" if (host, port) in backups else "")
              for index, (host, port) in enumerate(data, 1)]
     rows += ["", "frontend sub", "    bind :2096", "    default_backend sub", "",
              "backend sub", "    option httpchk GET /", "    http-check expect status 404",

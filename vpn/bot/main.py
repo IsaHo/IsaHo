@@ -16,6 +16,8 @@ import fmt
 import handlers
 import health
 import healthdb
+import identity
+import pathdb
 import shop
 import shopdb
 import support
@@ -169,6 +171,34 @@ async def check_devices(bot: Bot) -> None:
                                      f"(حد: {limit}).\n<code>{nets}</code>")
 
 
+PATH_LABELS = {"reality": "⚡ Reality مستقیم", "reality-relay": "🇮🇷 Reality از تانل رله",
+               "cdn": "☁️ CDN"}
+
+
+async def check_path_rotation(bot: Bot) -> None:
+    """Warn before an endpoint attracts enough Iranian volume to get its IP blocked.
+
+    Only warns. Replacing an address is a manual, irreversible step, and a wrong automatic
+    rotation would disconnect everyone on a path that was merely busy."""
+    for row in pathdb.due():
+        key = row["path_key"]
+        if not pathdb.should_warn(key):
+            continue
+        label = PATH_LABELS.get(key, key)
+        why = []
+        if row["by_bytes"]:
+            why.append(f"{fmt.size(row['bytes'])} از آخرین چرخش")
+        if row["by_age"]:
+            why.append(f"{row['age'] // db.DAY} روز بدون چرخش")
+        await notify_admins(
+            bot,
+            f"🔄 <b>{label}</b> به آستانهٔ چرخش آدرس رسید.\n"
+            + " · ".join(why)
+            + "\n\nگزارش‌های میدانی می‌گویند IP مقصد به تناسب حجمی که از ایران می‌گیرد بلاک "
+              "می‌شود، پس چرخاندن پیش از سوختن ارزان‌تر از بازیابی بعد از آن است.\n"
+            + "🛡 شبکه و سلامت ← مرکز تاب‌آوری ← 🔄 چرخش آدرس")
+
+
 async def notify_status(bot: Bot, text: str) -> None:
     """Customer-facing status updates to the public status channel, if set."""
     chat = db.get_setting("status_chat")
@@ -200,6 +230,7 @@ async def monitor(bot: Bot) -> None:
             await reports.weekly_report(bot, notify_admins)
             await reports.capacity(bot, notify_admins)
             await check_devices(bot)
+            await check_path_rotation(bot)
             await partnerwork.recover(bot)
             last = int(db.get_setting("last_backup", "0"))
             if time.time() - last > db.DAY:
@@ -225,6 +256,9 @@ async def main() -> None:
     shopdb.init()
     supportdb.init()
     healthdb.init()
+    identity.init()
+    identity.ensure_runtime_pool(server_active=await xray.is_active())
+    pathdb.init()
     shop.apply_defaults()
     await xray.ensure_started()
 
