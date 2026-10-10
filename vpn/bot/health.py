@@ -567,6 +567,7 @@ async def _notify(bot: Bot, text: str) -> None:
 
 
 async def evaluate_alerts(bot: Bot) -> None:
+    await evaluate_node_reports(bot)
     expected = _expected_paths()
     for row in healthdb.latest():
         if row.path_key not in expected:
@@ -594,6 +595,32 @@ async def evaluate_alerts(bot: Bot) -> None:
                 bot,
                 f"🟢 <b>بازیابی مسیر</b>\n{html.escape(row.label)} دوباره سالم است ({row.latency_ms}ms).",
             )
+
+
+async def evaluate_node_reports(bot: Bot) -> None:
+    """Observe fresh runtime failures; never restart a relay for a node incident."""
+    for node in nodes.all_nodes():
+        if not nodes.online(node):
+            continue
+        report = nodes.reports[node["name"]]
+        apply = report.get("config_apply") or {}
+        failed = (report.get("xray") != "active" or node.get("config_rejected")
+                  or apply.get("state") in {"rejected", "restart_failed"})
+        path = f"node:{node['name']}:runtime"
+        state_key = f"health-alert:{path}"
+        previous = db.get_setting(state_key)
+        if failed and previous != "down":
+            detail = str(apply.get("reason") or f"Xray: {report.get('xray', 'unknown')}")[:160]
+            row = healthdb.add(path, f"Node {node['name']}", "node", "node", False, detail=detail)
+            healthdb.open_incident(row)
+            db.set_setting(state_key, "down")
+            await _notify(bot, f"🔴 <b>هشدار نود · {html.escape(node['name'])}</b>\n"
+                          f"{html.escape(detail)}\nگزارش تازه است، ولی نود سالم نیست. مسیرهای ایران ری‌استارت نشدند.")
+        elif not failed and previous == "down":
+            healthdb.add(path, f"Node {node['name']}", "node", "node", True, detail="Xray active; config accepted")
+            healthdb.close_incident(path)
+            db.set_setting(state_key, "")
+            await _notify(bot, f"🟢 <b>بازیابی نود · {html.escape(node['name'])}</b>\nXray فعال است و خطای اعمال کانفیگ گزارش نمی‌شود.")
 
 
 async def monitor(bot: Bot) -> None:

@@ -50,16 +50,26 @@ def config_for(node: dict) -> dict:
     return conf
 
 
-def toggle_private(name: str) -> None:
+def toggle_private(name: str, expected_private: bool | None = None) -> bool:
     nodes = all_nodes()
     for n in nodes:
         if n["name"] == name:
+            if expected_private is not None and n.get("private", True) != expected_private:
+                return False
             n["private"] = not n.get("private", True)
-    save(nodes)
+            n["mode_pending"] = True
+            save(nodes)
+            return True
+    return False
 
 
 def public_nodes() -> list:
-    return [n for n in all_nodes() if not n.get("private", True)]
+    return [n for n in all_nodes() if public_ready(n)]
+
+
+def public_ready(node: dict) -> bool:
+    """Do not advertise a newly requested/rejected public mode before node acknowledgement."""
+    return not (node.get("private", True) or node.get("mode_pending") or node.get("config_rejected"))
 
 
 def has_cdn(node: dict) -> bool:
@@ -86,11 +96,41 @@ def record_stats(node: dict, stats: dict, info: dict) -> None:
     prev = reports.get(node["name"], {})
     reports[node["name"]] = {**info, "seen": time.time(),
                              "bytes": prev.get("bytes", 0) + sum(u + d for u, d in clean.values())}
+    apply = info.get("config_apply")
+    if isinstance(apply, dict):
+        state = apply.get("state")
+        stored = all_nodes()
+        for current in stored:
+            if current["name"] != node["name"]:
+                continue
+            if state not in {"rejected", "restart_failed", "applied", "in_sync"}:
+                break
+            rejected = state in {"rejected", "restart_failed"}
+            changed = current.get("config_rejected", False) != rejected
+            if changed:
+                current["config_rejected"] = rejected
+            if (current.get("mode_pending") and state in {"applied", "in_sync"}
+                    and info.get("xray") == "active"
+                    and isinstance(info.get("reality_public"), bool)
+                    and info["reality_public"] == (not current.get("private", True))):
+                current["mode_pending"] = False
+                changed = True
+            if changed:
+                save(stored)
+            break
 
 
 def online(node: dict) -> bool:
     r = reports.get(node["name"])
     return bool(r) and time.time() - r["seen"] < 180
+
+
+def healthy(node: dict) -> bool:
+    report = reports.get(node["name"], {})
+    apply = report.get("config_apply") or {}
+    return (online(node) and report.get("xray") == "active"
+            and apply.get("state") not in {"rejected", "restart_failed"}
+            and not node.get("mode_pending") and not node.get("config_rejected"))
 
 
 def standby_bundle() -> dict:
