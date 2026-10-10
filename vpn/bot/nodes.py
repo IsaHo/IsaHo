@@ -72,10 +72,15 @@ def public_ready(node: dict) -> bool:
     return not (node.get("private", True) or node.get("mode_pending") or node.get("config_rejected"))
 
 
+def cdn_domains(node: dict) -> list:
+    """Published CDN hostnames for this node. Comma lets us front one origin behind several zones."""
+    return [d.strip() for d in (node.get("domain") or "").split(",") if d.strip()]
+
+
 def has_cdn(node: dict) -> bool:
     """CDN publication is independent of a node's private Reality listener."""
     enabled = node.get("cdn_enabled", not node.get("private", True))
-    return enabled is True and bool(node.get("domain"))
+    return enabled is True and bool(cdn_domains(node))
 
 
 def cdn_nodes() -> list:
