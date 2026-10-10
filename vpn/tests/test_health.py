@@ -134,6 +134,14 @@ class HealthProbeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("relay:94.184.47.122:cdn", paths)
 
+    def test_managed_node_probe_uses_actual_local_transport(self):
+        user = SimpleNamespace(uuid='test-id', sub_token='test-sub', name='probe')
+        node = {'name': 'DE2', 'ip': '91.107.160.49', 'private': True}
+        data = {'ip': '87.107.150.158', 'transport': 'backhaul', 'node_probe_ports': {'DE2': 13001}}
+        with mock.patch('health.links.relays', return_value=[('87.107.150.158', 443)]), mock.patch('health.db.active_users', return_value=[user]), mock.patch('health.nodes.all_nodes', return_value=[node]), mock.patch('health.public_probe_links', return_value={}):
+            job = health.relay_job(data)
+        self.assertIn('@127.0.0.1:13001?', job['nodes'][0]['link'])
+
     async def test_stale_failure_does_not_trigger_incident(self):
         healthdb.add(
             "relay:94.184.47.122:vpn",

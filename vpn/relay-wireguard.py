@@ -125,7 +125,13 @@ def status(config, now=None):
     finally:
         if connection:
             connection.close()
-    return {"transport": config["TRANSPORT"], "tunnels_total": total, "tunnels_up": up,
+    probe_ports = {}
+    for entry in config.get('NODE_PROBE_PORTS', '').split(','):
+        name, separator, port = entry.partition(':')
+        if separator and re.fullmatch(r'[A-Za-z0-9_.-]{1,32}', name) and port.isdecimal() and 1024 <= int(port) <= 65535:
+            probe_ports[name] = int(port)
+    return {"transport": config["TRANSPORT"], "node_probe_ports": probe_ports,
+            "tunnels_total": total, "tunnels_up": up,
             "node_tunnels_total": 0, "node_tunnels_up": 0,
             "transport_healthy": up == total and data_up == len(data) and control_up,
             "data_paths_up": data_up, "data_paths_total": len(data), "control_up": control_up}
