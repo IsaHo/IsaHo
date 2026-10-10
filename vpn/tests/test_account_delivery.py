@@ -57,4 +57,3 @@ class AccountDeliveryTests(unittest.IsolatedAsyncioTestCase):
               mock.patch("shop.shopdb.plans", return_value=[])):
             await shop.buy(msg, state, mock.AsyncMock())
         msg.answer.assert_awaited_once()
-
