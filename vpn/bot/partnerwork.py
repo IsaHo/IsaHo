@@ -73,14 +73,13 @@ def package(partner_id, order_id):
         z.writestr('customers.csv', '\ufeff' + index.getvalue())
         z.writestr('README.txt', 'بستهٔ محرمانهٔ تحویل: هر QR و فایل متنی فقط برای مشتری همان اکانت است.\n'
                    'لینک‌ها مانند رمز دسترسی هستند. کل بسته را عمومی یا برای یک مشتری ارسال نکنید.\n'
-                   'مدت اشتراک از اولین استفاده شروع می‌شود. عضویت کنترل‌کنندهٔ حساب در کانال لازم است.')
+                   'مدت اشتراک از اولین استفاده شروع می‌شود. اشتراک پولی شرط عضویت کانال ندارد.')
     return content.getvalue()
 
 
 async def fulfill_bulk(bot, order):
     async with _fulfill_lock:
         store.attempt(order.tg_id, order.id)
-        await membership.reconcile_user(bot, order.tg_id)
         rows = store.provision(order.tg_id, order.id)
         for row in rows:
             if row['applied']:
@@ -259,8 +258,6 @@ async def callback(cb: CallbackQuery, state: FSMContext, bot):
     elif action == 'pay':
         if await state.get_state() != Edit.preview.state:
             await cb.message.answer('فرم منقضی شده؛ بسته‌های من را بررسی کنید.')
-            return
-        if not await membership.ensure(bot, tg, cb.message):
             return
         data = await state.get_data()
         try:

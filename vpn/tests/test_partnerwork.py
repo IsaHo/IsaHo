@@ -398,12 +398,13 @@ class WorkspaceTests(unittest.IsolatedAsyncioTestCase):
         cb.answer.assert_awaited_once_with(mock.ANY, show_alert=True)
         self.assertEqual([], shopdb.open_orders(0))
 
-    async def test_left_channel_after_payment_blocks_bulk_accounts(self):
+    async def test_left_channel_after_payment_does_not_block_bulk_accounts(self):
         o = self.approve()
         with mock.patch('partnerwork.membership.reconcile_user', new_callable=mock.AsyncMock), \
                 mock.patch('partnerwork.membership.required', return_value=True), \
-                mock.patch('partnerwork.membership.status', new_callable=mock.AsyncMock, return_value=False), \
+                mock.patch('partnerwork.membership.status', new_callable=mock.AsyncMock, return_value=False) as status, \
                 mock.patch('partnerwork.xray.sync_user', new_callable=mock.AsyncMock), \
                 mock.patch('partnerwork.package', return_value=b'zip'):
             await partnerwork.fulfill_bulk(mock.AsyncMock(), o)
-        self.assertTrue(all(u.channel_blocked and not u.accessible for u in db.all_users()))
+        self.assertTrue(all(not u.channel_blocked and u.accessible for u in db.all_users()))
+        status.assert_not_awaited()

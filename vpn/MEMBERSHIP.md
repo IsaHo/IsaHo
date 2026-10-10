@@ -1,10 +1,17 @@
 # Announcement-channel membership
 
-The channel is configured independently from billing. Trial issuance and payment
-require confirmed membership. Approved paid orders remain fulfilled if the buyer
-leaves, but access is suspended until they rejoin. For reseller accounts the linked
-end user is checked, otherwise the purchasing reseller is checked. Owner admins
-are exempt; accounts without a Telegram owner cannot be checked.
+The channel is configured independently from billing. Only trial issuance and
+trial access require confirmed membership. Purchases, renewals, addons and bulk
+orders do not query Telegram membership or suspend paid access after a departure.
+Trial identity is durable in `channel_membership.trial`, not the editable note.
+The one-time migration identifies legacy trials by `note='test'`, excluding
+accounts with approved linked orders, and queues removal of paid channel blocks.
+Purchasing a renewal/addon converts a trial permanently. Owner admins are exempt;
+accounts without a Telegram owner cannot be checked.
+
+QR delivery uses a short photo caption. Full configurations are sent separately
+as bounded HTML messages, preserving all routes without exceeding Telegram's
+1024-character photo caption or 4096-character text limits.
 
 ## Activation
 
@@ -17,7 +24,7 @@ No credentials or real invite links belong in the repository.
 The bot subscribes to `chat_member` updates and also reconciles every 60 seconds.
 Requests waiting for channel join approval are not considered membership. API
 errors or missing bot admin rights preserve existing customers' state; new trial
-and payment requests wait for successful verification. Hot updates never restart
+requests wait for successful verification. Hot updates never restart
 Xray for membership changes. Failed updates stay pending and retry. Private nodes
 consume the same effective account set on their normal config-sync schedule.
 

@@ -146,8 +146,8 @@ def user_kb(u) -> InlineKeyboardMarkup:
         [("♻️ ریست مصرف", f"rst:{u.id}"), ("🔑 تغییر UUID", f"uuid:{u.id}")],
         [toggle, ("📝 یادداشت", f"note:{u.id}")],
         [("📱 محدودیت دستگاه", f"ipl:{u.id}")],
-        [("🔐 بازگرداندن شرط عضویت" if u.channel_exempt else "🔓 دسترسی بدون عضویت",
-          f"membership:exempt:{u.id}")],
+        *([[("🔐 بازگرداندن شرط تست" if u.channel_exempt else "🔓 تست بدون عضویت",
+             f"membership:exempt:{u.id}")]] if u.channel_trial else []),
         [("🗑 حذف", f"del:{u.id}"), ("🔄 بروزرسانی", f"u:{u.id}")],
         [("🔙 لیست کاربران", "list:0")],
     ])
@@ -204,8 +204,39 @@ def qr_png(data: str) -> bytes:
     return buf.getvalue()
 
 
+def link_messages(u, *, customer: bool = False) -> list[str]:
+    """Keep complete HTML blocks and stay below Telegram's message limit."""
+    text = links_text(u)
+    if customer:
+        text = text.rsplit("\n🤖", 1)[0]
+    messages, current = [], ""
+    for block in text.split("\n\n"):
+        if len(block.encode("utf-16-le")) // 2 > 3500:
+            # Extremely long custom names/URLs: preserve content with fresh markup.
+            plain = html.unescape(re.sub(r"</?(?:b|code)>", "", block))
+            blocks = [f"<code>{html.escape(plain[i:i + 500])}</code>"
+                      for i in range(0, len(plain), 500)]
+        else:
+            blocks = [block]
+        for part in blocks:
+            candidate = current + "\n\n" + part if current else part
+            if current and len(candidate.encode("utf-16-le")) // 2 > 3500:
+                messages.append(current)
+                current = part
+            else:
+                current = candidate
+    if current:
+        messages.append(current)
+    return messages
+
+
+async def send_links(sender, u, *, customer: bool = False):
+    for text in link_messages(u, customer=customer):
+        await sender(text, disable_web_page_preview=True)
+
+
 async def apply_user(u) -> None:
-    if u.channel_blocked:
+    if u.channel_trial and u.channel_blocked:
         db.update(u.id, channel_pending=1)
         try:
             await xray.sync_user(u, False, allow_restart=False)
@@ -354,7 +385,8 @@ async def _finish_add(target, state: FSMContext, days: int, first_use: bool = Fa
     await m.answer("✅ کاربر ساخته شد.", reply_markup=ADMIN_KB)
     await m.answer(fmt.user_card(u), reply_markup=user_kb(u))
     await m.answer_photo(BufferedInputFile(qr_png(links.sub_url(u)), "qr.png"),
-                         caption=links_text(u))
+                         caption="📥 QR سابسکریپشن · لینک‌ها در پیام بعدی")
+    await send_links(m.answer, u)
 
 
 @router.callback_query(AddUser.days, F.data.startswith("d:"), admin)
@@ -431,7 +463,7 @@ async def user_detail(cb: CallbackQuery):
 async def user_links(cb: CallbackQuery):
     await cb.answer()
     u = user_from_cb(cb)
-    await cb.message.answer(links_text(u), disable_web_page_preview=True)
+    await send_links(cb.message.answer, u)
 
 
 @router.callback_query(F.data.startswith("qr:"), admin)
