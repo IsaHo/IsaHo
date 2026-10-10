@@ -77,6 +77,15 @@ def cdn_domains(node: dict) -> list:
     return [d.strip() for d in (node.get("domain") or "").split(",") if d.strip()]
 
 
+def reality_proxy_port(node: dict) -> int:
+    """Public port that forwards into this node's loopback Reality. 0 means not published."""
+    try:
+        port = int(node.get("reality_proxy_port") or 0)
+    except (TypeError, ValueError):
+        return 0
+    return port if 1 <= port <= 65535 else 0
+
+
 def has_cdn(node: dict) -> bool:
     """CDN publication is independent of a node's private Reality listener."""
     enabled = node.get("cdn_enabled", not node.get("private", True))
