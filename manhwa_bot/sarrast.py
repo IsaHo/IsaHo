@@ -54,6 +54,7 @@ from telegram.ext import (
 )
 
 import privacy
+import telegraph
 from scraper import SITE, Scraper, Series
 
 logging.basicConfig(
@@ -826,7 +827,8 @@ async def do_continue(context, chat_id, ud, url=None):
 
 
 def chapter_link_markup(idx, total, url, slug=""):
-    rows = [[InlineKeyboardButton("🌐 باز کردن در مرورگر", url=url)]]
+    rows = [[InlineKeyboardButton("📖 خواندن داخل تلگرام", callback_data=_cb(f"s.rd:{slug}:{idx}", "s.rd:")),
+             InlineKeyboardButton("🌐 مرورگر", url=url)]]
     if idx + 1 >= total:   # آخرین قسمت
         rows.append([InlineKeyboardButton("✅ تمومش کردم", callback_data=_cb(f"s.sh:d:{slug}", "s.sh:d:")),
                      InlineKeyboardButton("🎯 داستان بعدی", callback_data=_cb(f"s.nx:{slug}", "s.nx:"))])
@@ -851,6 +853,37 @@ async def send_chapter_link(context, chat_id, ud, idx):
         chat_id, f"🔗 {ch.label} از {len(chapters)} — «{ud['title']}»\n{ch.url}",
         reply_markup=chapter_link_markup(idx, len(chapters), ch.url, slug_of(ud["series_url"])),
         disable_web_page_preview=True)
+
+
+async def send_telegraph(context, chat_id, ud, idx):
+    """صفحهٔ تلگراف برای قسمت می‌سازد (یا از کش می‌خواند) و لینک را با Instant View می‌فرستد."""
+    chapters = ud["chapters"]
+    ch = chapters[idx]
+    cached = telegraph.get_cached(DATA_DIR, ch.url)
+    if cached:
+        await context.bot.send_message(chat_id, f"📖 {ch.label} — «{ud['title']}»\n{cached}")
+        return
+    status = await context.bot.send_message(chat_id, "⏳ در حال آماده‌سازی…")
+    try:
+        imgs = await asyncio.to_thread(scraper.get_images, ch.url)
+        if not imgs:
+            raise RuntimeError("no images")
+        url = await asyncio.to_thread(
+            telegraph.publish, DATA_DIR, ch.url, ud["title"], ch.label, imgs, ch.url)
+    except Exception as e:
+        log.warning("telegraph publish failed: %s", e)
+        try:
+            await status.edit_text(
+                f"❌ نشد صفحهٔ تلگراف ساخته شود.\nلینک مستقیم: {ch.url}",
+                disable_web_page_preview=True)
+        except Exception:
+            pass
+        return
+    try:
+        await status.delete()
+    except Exception:
+        pass
+    await context.bot.send_message(chat_id, f"📖 {ch.label} — «{ud['title']}»\n{url}")
 
 
 async def send_all_links(context, chat_id, ud):
@@ -1335,6 +1368,17 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             idx = int(idx)
             if 0 <= idx < len(ud["chapters"]):
                 await send_chapter_link(context, chat_id, ud, idx)
+        return
+    if data.startswith("s.rd:"):   # Telegraph: خواندن قسمت داخل خودِ تلگرام
+        slug, _, idx = data[5:].rpartition(":")
+        await q.answer()
+        if await ensure_series(context, chat_id, ud, slug):
+            try:
+                idx = int(idx)
+            except ValueError:
+                return
+            if 0 <= idx < len(ud["chapters"]):
+                await send_telegraph(context, chat_id, ud, idx)
         return
     if data.startswith("s.fav:"):
         slug = data[6:] or slug_of(ud.get("series_url") or "")

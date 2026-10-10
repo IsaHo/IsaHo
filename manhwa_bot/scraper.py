@@ -19,7 +19,7 @@ import re
 import sys
 import time
 from dataclasses import dataclass, field
-from urllib.parse import urlparse, urljoin, parse_qs, unquote
+from urllib.parse import urlparse, urljoin, parse_qs, parse_qsl, unquote, urlencode, urlunparse
 
 import requests
 from bs4 import BeautifulSoup
@@ -36,6 +36,20 @@ DEFAULT_HEADERS = {
 SITE = "https://sarrast.com"
 IMG_ATTRS = ["data-src", "data-lazy-src", "data-original", "src"]
 MAX_PAGE_NO = 2000  # شماره‌ی صفحه‌ی بزرگ‌تر از این = آشغال (بنر ادامه دارد)
+# کاور یکدست: سایت صفحهٔ هوم با w/h متفاوت (100..420) تامبنیل می‌دهد؛ /img پراکسی هر اندازه قبول می‌کند.
+COVER_W, COVER_H = 600, 800
+
+
+def _normalize_cover(url: str) -> str:
+    """اگر URL از پراکسی /img سرراست باشد، w/h را به COVER_W/COVER_H بازنویس کن."""
+    if not url:
+        return url
+    p = urlparse(url)
+    if "sarrast.com" not in p.netloc or p.path != "/img":
+        return url
+    q = [(k, v) for k, v in parse_qsl(p.query, keep_blank_values=True) if k not in ("w", "h")]
+    q.extend([("w", str(COVER_W)), ("h", str(COVER_H))])
+    return urlunparse(p._replace(query=urlencode(q)))
 
 # الگوهای استخراج شماره‌ی قسمت از اسلاگ (به ترتیب اولویت)
 _NUM_PATTERNS = [
@@ -235,7 +249,7 @@ class Scraper:
         if root is not None:
             title = self._title(root, fallback)
             img = self._meta(root, "og:image", "twitter:image")
-            cover = urljoin(s_url, img) if img else ""
+            cover = _normalize_cover(urljoin(s_url, img)) if img else ""
             summary = self._meta(root, "og:description", "description", "twitter:description")
             summary = re.sub(r"\s*[|\-–—]\s*سرراست\s*$", "", summary).strip()
         return Series(title=title, url=s_url, chapters=chapters, cover=cover, summary=summary)
@@ -298,7 +312,8 @@ class Scraper:
             else:
                 empty_streak = 0
         return [{"slug": s, "title": _best_title(ts) or s, "url": f"{SITE}/series/{s}",
-                 "cover": cover.get(s, ""), "latest": latest.get(s), "fresh": s in fresh, "rank": i}
+                 "cover": _normalize_cover(cover.get(s, "")), "latest": latest.get(s),
+                 "fresh": s in fresh, "rank": i}
                 for i, (s, ts) in enumerate(cand.items())]
 
     # ---------- images ----------
