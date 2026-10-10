@@ -342,6 +342,13 @@ def relay_job(data: dict) -> dict | None:
     _relay_jobs[ip] = now
     _force_relays.discard(ip)
     user = users[0]
+    probe_ports = data.get('node_probe_ports') if data.get('transport') in {'wireguard', 'backhaul'} else {}
+    probe_ports = probe_ports if isinstance(probe_ports, dict) else {}
+    def node_target(node):
+        port = probe_ports.get(str(node['name']))
+        if type(port) is int and 1024 <= port <= 65535:
+            return '127.0.0.1', port
+        return str(node['ip']), 8443
     return {
         "id": f"{int(now)}-{_relay_label(ip)}",
         "link": links.reality_link(user, "127.0.0.1", 443, "health-check"),
@@ -352,7 +359,7 @@ def relay_job(data: dict) -> dict | None:
             {
                 "name": str(node["name"]),
                 "link": links.reality_link(
-                    user, str(node["ip"]), 8443, f"health-{node['name']}"
+                    user, *node_target(node), f"health-{node['name']}"
                 ),
             }
             for node in nodes.all_nodes()
