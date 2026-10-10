@@ -37,7 +37,16 @@ def reality_link(u, address: str = "", port: int = 0, tag: str = "Reality") -> s
     return f"vless://{u.uuid}@{address}:{port}?{q}#{quote(f'{cfg.brand}-{u.name}-{tag}')}"
 
 
-def cdn_link(u, domain: str = "", tag: str = "CDN") -> str:
+def node_cdn_port(node: dict) -> int:
+    """Nodes may expose HTTPS on a different edge port from the main server."""
+    try:
+        port = int(node.get("cdn_port") or cdn_public_port())
+    except (TypeError, ValueError):
+        return cdn_public_port()
+    return port if 1 <= port <= 65535 else cdn_public_port()
+
+
+def cdn_link(u, domain: str = "", tag: str = "CDN", port: int = 0) -> str:
     domain = domain or cfg.domain
     q = urlencode({
         "encryption": "none", "security": "tls", "sni": domain, "fp": "chrome",
@@ -45,7 +54,7 @@ def cdn_link(u, domain: str = "", tag: str = "CDN") -> str:
         "mode": "packet-up",
     })
     address = cdn_address() if domain == cfg.domain else domain
-    return f"vless://{u.uuid}@{address}:{cdn_public_port()}?{q}#{quote(f'{cfg.brand}-{u.name}-{tag}')}"
+    return f"vless://{u.uuid}@{address}:{port or cdn_public_port()}?{q}#{quote(f'{cfg.brand}-{u.name}-{tag}')}"
 
 
 LINK_TYPES = {"relay": "🇮🇷 تانل (سرور واسط)", "reality": "⚡ Reality مستقیم", "cdn": "☁️ CDN",
@@ -75,12 +84,13 @@ def route_entries(u) -> list:
         links.append(("main", reality_link(u)))
     if "cdn" in types and cfg.domain:
         links.append(("cdn", cdn_link(u)))
-    if "node" in types and cfg.reality_public_key:
+    if "node" in types:
         import nodes
-        for n in nodes.public_nodes():
-            links.append((f"node:{n['name']}", reality_link(u, n["ip"], cfg.reality_port, f"{n['name']}-Reality")))
-            if n.get("domain"):
-                links.append((f"cdn:{n['name']}", cdn_link(u, n["domain"], f"{n['name']}-CDN")))
+        for n in nodes.all_nodes():
+            if not n.get("private", True) and cfg.reality_public_key:
+                links.append((f"node:{n['name']}", reality_link(u, n["ip"], cfg.reality_port, f"{n['name']}-Reality")))
+            if nodes.has_cdn(n):
+                links.append((f"cdn:{n['name']}", cdn_link(u, n["domain"], f"{n['name']}-CDN", node_cdn_port(n))))
     return links
 
 
