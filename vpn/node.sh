@@ -256,7 +256,7 @@ echo "
 ✅ The bot now runs here ($MY_IP).
 Next: on each Iranian relay run relay.sh ssh with THIS server first, e.g.
   relay.sh ssh $MY_IP 4
-and run its AUTHORIZED line here. Point vpn.zkim.app at $MY_IP in Cloudflare if you use it."
+and run its AUTHORIZED line here. Point cdn.example.com at $MY_IP in Cloudflare if you use it."
 TAKEOVER
 chmod +x /usr/local/bin/isaho-takeover
 cat >/etc/systemd/system/isaho-node.service <<UNIT

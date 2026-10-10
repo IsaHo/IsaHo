@@ -60,7 +60,7 @@ class HealthProbeTests(unittest.IsolatedAsyncioTestCase):
 
     def test_relay_result_is_ingested_without_credentials(self):
         report = {
-            "ip": "94.184.47.122",
+            "ip": "198.51.100.21",
             "probe_result": {
                 "job_id": "123-IR1",
                 "checked_at": int(time.time()),
@@ -69,7 +69,7 @@ class HealthProbeTests(unittest.IsolatedAsyncioTestCase):
                 "cdn": {"ok": True, "latency_ms": 180, "detail": "HTTP 204"},
             },
         }
-        with mock.patch("health.links.relays", return_value=[("94.184.47.122", 443)]):
+        with mock.patch("health.links.relays", return_value=[("198.51.100.21", 443)]):
             health.ingest_relay_result(report)
 
         rows = healthdb.latest()
@@ -80,7 +80,7 @@ class HealthProbeTests(unittest.IsolatedAsyncioTestCase):
     def test_build_specs_includes_main_cdn_and_subscription(self):
         fake_cfg = replace(
             health.cfg,
-            server_ip="82.115.18.62",
+            server_ip="203.0.113.10",
             domain="vpn.example.com",
             reality_public_key="public",
         )
@@ -101,7 +101,7 @@ class HealthProbeTests(unittest.IsolatedAsyncioTestCase):
 
     def test_relay_result_includes_each_private_node(self):
         report = {
-            "ip": "94.184.47.122",
+            "ip": "198.51.100.21",
             "probe_result": {
                 "checked_at": int(time.time()),
                 "nodes": {
@@ -111,40 +111,40 @@ class HealthProbeTests(unittest.IsolatedAsyncioTestCase):
             },
         }
         with (
-            mock.patch("health.links.relays", return_value=[("94.184.47.122", 443)]),
+            mock.patch("health.links.relays", return_value=[("198.51.100.21", 443)]),
             mock.patch(
                 "health.nodes.all_nodes",
-                return_value=[{"name": "FR", "ip": "202.133.88.44", "private": True}],
+                return_value=[{"name": "FR", "ip": "203.0.113.12", "private": True}],
             ),
         ):
             health.ingest_relay_result(report)
 
         rows = healthdb.latest()
         self.assertEqual(
-            ["relay:94.184.47.122:node:FR"], [row.path_key for row in rows]
+            ["relay:198.51.100.21:node:FR"], [row.path_key for row in rows]
         )
 
     def test_expected_relay_paths_include_cdn(self):
         with (
             mock.patch("health.db.active_users", return_value=[]),
-            mock.patch("health.links.relays", return_value=[("94.184.47.122", 443)]),
+            mock.patch("health.links.relays", return_value=[("198.51.100.21", 443)]),
             mock.patch("health.nodes.all_nodes", return_value=[]),
         ):
             paths = health._expected_paths()
 
-        self.assertIn("relay:94.184.47.122:cdn", paths)
+        self.assertIn("relay:198.51.100.21:cdn", paths)
 
     def test_managed_node_probe_uses_actual_local_transport(self):
         user = SimpleNamespace(id=1, uuid='test-id', sub_token='test-sub', name='probe')
-        node = {'name': 'DE2', 'ip': '91.107.160.49', 'private': True}
-        data = {'ip': '87.107.150.158', 'transport': 'backhaul', 'node_probe_ports': {'DE2': 13001}}
-        with mock.patch('health.links.relays', return_value=[('87.107.150.158', 443)]), mock.patch('health.db.active_users', return_value=[user]), mock.patch('health.nodes.all_nodes', return_value=[node]), mock.patch('health.public_probe_links', return_value={}):
+        node = {'name': 'DE2', 'ip': '203.0.113.11', 'private': True}
+        data = {'ip': '198.51.100.23', 'transport': 'backhaul', 'node_probe_ports': {'DE2': 13001}}
+        with mock.patch('health.links.relays', return_value=[('198.51.100.23', 443)]), mock.patch('health.db.active_users', return_value=[user]), mock.patch('health.nodes.all_nodes', return_value=[node]), mock.patch('health.public_probe_links', return_value={}):
             job = health.relay_job(data)
         self.assertIn('@127.0.0.1:13001?', job['nodes'][0]['link'])
 
     async def test_stale_failure_does_not_trigger_incident(self):
         healthdb.add(
-            "relay:94.184.47.122:vpn",
+            "relay:198.51.100.21:vpn",
             "IR1",
             "relay",
             "iran",
@@ -155,7 +155,7 @@ class HealthProbeTests(unittest.IsolatedAsyncioTestCase):
         )
         with mock.patch(
             "health._expected_paths",
-            return_value={"relay:94.184.47.122:vpn": ("IR1", "relay")},
+            return_value={"relay:198.51.100.21:vpn": ("IR1", "relay")},
         ):
             await health.evaluate_alerts(mock.AsyncMock())
 
@@ -163,7 +163,7 @@ class HealthProbeTests(unittest.IsolatedAsyncioTestCase):
 
     def test_incident_lifecycle_is_idempotent(self):
         check = healthdb.add(
-            "relay:94.184.47.122:vpn",
+            "relay:198.51.100.21:vpn",
             "IR1",
             "relay",
             "iran",

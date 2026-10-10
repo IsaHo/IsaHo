@@ -878,7 +878,7 @@ async def nodes_add_ask(cb: CallbackQuery, state: FSMContext):
     await cb.answer()
     await state.set_state(Edit.node_add)
     await cb.message.answer("➕ سرور خارج جدید: <code>نام | IP</code>\n"
-                            "مثال: <code>FR | 202.133.88.44</code>\n"
+                            "مثال: <code>FR | 203.0.113.12</code>\n"
                             "به‌طور پیش‌فرض فقط از طریق تانل سرورهای ایران استفاده می‌شود و هیچ پورت VPN "
                             "عمومی ندارد (کمترین ریسک فیلتر).", reply_markup=CANCEL_KB)
 
@@ -888,7 +888,7 @@ async def nodes_add(msg: Message, state: FSMContext):
     parts = [p.strip() for p in (msg.text or "").split("|")]
     if len(parts) < 2 or not re.fullmatch(r"[A-Za-z0-9]{1,12}", parts[0]) or \
             not re.fullmatch(r"\d{1,3}(\.\d{1,3}){3}", parts[1]):
-        await msg.answer("❌ قالب: <code>FR | 202.133.88.44 | fr.zkim.app</code>")
+        await msg.answer("❌ قالب: <code>FR | 203.0.113.12 | fr.example.com</code>")
         return
     domain = parts[2] if len(parts) > 2 and re.fullmatch(r"[A-Za-z0-9.-]{3,253}", parts[2]) else ""
     node = nodes.add(parts[0].upper(), parts[1], domain)

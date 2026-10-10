@@ -18,7 +18,7 @@ spec.loader.exec_module(transport)
 
 class ManagedTransportTests(unittest.TestCase):
     def config(self, mode='backhaul'):
-        return {'TRANSPORT': mode, 'PUBLIC_IP': '87.107.150.158',
+        return {'TRANSPORT': mode, 'PUBLIC_IP': '198.51.100.23',
                 'BH_SERVICES': 'isaho-backhaul-de2,isaho-backhaul-control',
                 'BH_DATA_ENDPOINTS': '127.0.0.1:13001', 'BH_CONTROL_ENDPOINT': '127.0.0.1:13002',
                 'WG_INTERFACE': 'wg-isaho', 'WG_DATA_ENDPOINTS': '10.77.10.1:10443',
@@ -36,12 +36,12 @@ class ManagedTransportTests(unittest.TestCase):
             fn(self.config(), 'main; touch /tmp/injected')
 
     def test_backhaul_cannot_forward_to_public_or_private_network(self):
-        for address in ('91.107.160.49:443', '10.77.10.1:443'):
+        for address in ('203.0.113.11:443', '10.77.10.1:443'):
             config = self.config();config['BH_DATA_ENDPOINTS'] = address
             with self.assertRaises(ValueError):transport.settings(config)
 
     def test_wireguard_cannot_forward_to_loopback_or_public_network(self):
-        for address in ('127.0.0.1:443', '91.107.160.49:443'):
+        for address in ('127.0.0.1:443', '203.0.113.11:443'):
             config = self.config('wireguard');config['WG_DATA_ENDPOINTS'] = address
             with self.assertRaises(ValueError):transport.settings(config)
 
@@ -67,7 +67,7 @@ class ManagedTransportTests(unittest.TestCase):
         self.assertNotIn('shutdown-sessions', transport.render(config))
 
     def test_backup_list_cannot_remove_every_primary_or_reference_unknown_path(self):
-        for value in ('127.0.0.1:13001', '127.0.0.1:9999', '91.107.160.49:443'):
+        for value in ('127.0.0.1:13001', '127.0.0.1:9999', '203.0.113.11:443'):
             config = self.config(); config['BH_BACKUP_ENDPOINTS'] = value
             with self.assertRaises(ValueError):transport.render(config)
 

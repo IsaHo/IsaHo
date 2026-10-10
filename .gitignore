@@ -1,0 +1,7 @@
+
+# Operational diagnostic output: contains live server addresses and key paths.
+# This repository is public — never commit infrastructure identifiers.
+/DIAGNOSIS.md
+/diagnose-isaho.sh
+/.codex-tmp/
+/graphify-out/

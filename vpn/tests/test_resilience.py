@@ -29,7 +29,7 @@ class ResilienceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_auto_recovery_only_queues_failed_relay_path(self):
         check = healthdb.add(
-            "relay:94.184.47.122:vpn",
+            "relay:198.51.100.21:vpn",
             "IR1 real path",
             "relay",
             "iran",
@@ -47,12 +47,12 @@ class ResilienceTests(unittest.IsolatedAsyncioTestCase):
         ):
             await resilience.auto_recover(bot, check, incident)
 
-        queue.assert_called_once_with("94.184.47.122", "restart")
+        queue.assert_called_once_with("198.51.100.21", "restart")
         self.assertIn("ریستارت", healthdb.incidents(active_only=True)[0].action)
 
     async def test_auto_recovery_does_not_restart_for_single_node(self):
         check = healthdb.add(
-            "relay:94.184.47.122:node:FR",
+            "relay:198.51.100.21:node:FR",
             "IR1 to FR",
             "node",
             "iran",
