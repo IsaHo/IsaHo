@@ -3,6 +3,7 @@ import base64
 from urllib.parse import quote, urlencode
 
 import db
+import identity
 from config import cfg
 
 
@@ -28,11 +29,17 @@ def relays() -> list:
 
 
 def reality_link(u, address: str = "", port: int = 0, tag: str = "Reality") -> str:
-    q = urlencode({
+    params = {
         "encryption": "none", "flow": "xtls-rprx-vision", "security": "reality",
         "sni": cfg.reality_sni, "fp": "chrome", "pbk": cfg.reality_public_key,
-        "sid": cfg.reality_short_id, "type": "tcp", "headerType": "none",
-    })
+        "sid": identity.short_id(u), "type": "tcp", "headerType": "none",
+    }
+    # Upstream asks for a different crawler path per client; one value for a whole
+    # userbase is a shared marker. Empty when the operator switched it off.
+    spider = identity.spider(u)
+    if spider:
+        params["spx"] = spider
+    q = urlencode(params)
     address, port = address or cfg.server_ip, port or cfg.reality_port
     return f"vless://{u.uuid}@{address}:{port}?{q}#{quote(f'{cfg.brand}-{u.name}-{tag}')}"
 

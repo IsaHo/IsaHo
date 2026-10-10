@@ -57,6 +57,20 @@ class ManagedTransportTests(unittest.TestCase):
             self.assertIn('http-check expect status 404', output)
             self.assertNotIn('shutdown-sessions', output)
 
+    def test_preferred_path_keeps_other_paths_as_failover(self):
+        config = self.config()
+        config['BH_DATA_ENDPOINTS'] += ',127.0.0.1:13005'
+        config['BH_BACKUP_ENDPOINTS'] = '127.0.0.1:13005'
+        rows = [line for line in transport.render(config).splitlines() if 'server wg_data_' in line]
+        self.assertNotIn('backup', rows[0])
+        self.assertTrue(rows[1].endswith(' backup'))
+        self.assertNotIn('shutdown-sessions', transport.render(config))
+
+    def test_backup_list_cannot_remove_every_primary_or_reference_unknown_path(self):
+        for value in ('127.0.0.1:13001', '127.0.0.1:9999', '91.107.160.49:443'):
+            config = self.config(); config['BH_BACKUP_ENDPOINTS'] = value
+            with self.assertRaises(ValueError):transport.render(config)
+
     def test_private_routes_checked_before_cutover(self):
         result = subprocess.CompletedProcess([], 0, json.dumps([{'dev': 'eth0'}]), '')
         with mock.patch.object(transport.subprocess, 'run', return_value=result), mock.patch.object(transport.socket, 'create_connection') as connect:

@@ -17,6 +17,7 @@ from dataclasses import dataclass
 import db
 import handlers as h
 import healthdb
+import identity
 import links
 import nodes
 from aiogram import Bot, F, Router
@@ -45,7 +46,7 @@ class Spec:
     url: str = ""
 
 
-def _reality(address: str, port: int, uuid: str) -> dict:
+def _reality(address: str, port: int, uuid: str, short: str = "") -> dict:
     return {
         "protocol": "vless",
         "settings": {
@@ -66,7 +67,8 @@ def _reality(address: str, port: int, uuid: str) -> dict:
                 "serverName": cfg.reality_sni,
                 "fingerprint": "chrome",
                 "publicKey": cfg.reality_public_key,
-                "shortId": cfg.reality_short_id,
+                # the probe account's own cohort, so a probe tests what that customer dials
+                "shortId": short or cfg.reality_short_id,
             },
         },
     }
@@ -111,7 +113,7 @@ def build_specs(user) -> list[Spec]:
                 "vpn",
                 "xray",
                 f"{cfg.server_ip}:{cfg.reality_port}",
-                _reality(cfg.server_ip, cfg.reality_port, user.uuid),
+                _reality(cfg.server_ip, cfg.reality_port, user.uuid, identity.short_id(user)),
             )
         )
     if cfg.domain:

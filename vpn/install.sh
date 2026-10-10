@@ -96,7 +96,14 @@ fi
 curl -4 -fsS -m 10 -o /dev/null https://api.telegram.org || yellow "⚠ This server cannot reach api.telegram.org; the bot will not work."
 
 green "==> Installing Xray-core"
-bash -c "$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install -u root >/dev/null
+# Pinned on purpose. From v26.9.8 the REALITY server rejects a Client Hello that does not offer
+# X25519MLKEM768 before X25519 and forwards it to the camouflage target instead, so every
+# sing-box-based client (Hiddify, NekoBox, Karing) fails with "reality verification failed"
+# while the server logs nothing. v26.7.28 is the last release that accepts every client.
+# See vpn/ANTIFILTER.md §2. Raise it once metacubex/utls ships an ML-KEM-first fingerprint.
+XRAY_VERSION=${XRAY_VERSION:-v26.7.28}
+bash -c "$(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" \
+    @ install -u root --version "$XRAY_VERSION" >/dev/null
 XRAY_BIN=/usr/local/bin/xray
 "$XRAY_BIN" version | sed -n 1p
 
@@ -139,6 +146,7 @@ CERT_FILE=$CONF_DIR/cert.pem
 KEY_FILE=$CONF_DIR/key.pem
 DATA_DIR=$DATA_DIR
 XRAY_BIN=$XRAY_BIN
+XRAY_VERSION=$XRAY_VERSION
 XRAY_CONFIG=/usr/local/etc/xray/config.json
 XRAY_API=127.0.0.1:10085
 ENV

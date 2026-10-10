@@ -31,7 +31,7 @@ class PrivateNodeCDNTests(unittest.TestCase):
         self.node = {"name": "DE2", "ip": "192.0.2.2", "private": True,
                      "domain": "vpn.example.test", "cdn_enabled": True, "cdn_port": 443}
         nodes.save([self.node])
-        self.user = SimpleNamespace(uuid="00000000-0000-0000-0000-000000000001", name="probe")
+        self.user = SimpleNamespace(id=1, uuid="00000000-0000-0000-0000-000000000001", name="probe")
         self.cfg_patch = mock.patch.object(links, "cfg", replace(links.cfg, reality_public_key="public"))
         self.cfg_patch.start()
 
