@@ -1,6 +1,8 @@
 import importlib.util
 from pathlib import Path
 import unittest
+import tempfile
+from unittest import mock
 
 spec = importlib.util.spec_from_file_location('relay_speed', Path(__file__).resolve().parents[1] / 'relay-speed.py')
 speed = importlib.util.module_from_spec(spec)
@@ -8,6 +10,37 @@ spec.loader.exec_module(speed)
 
 
 class SpeedTests(unittest.TestCase):
+    def test_bootstrap_waits_without_writing_or_reloading(self):
+        with mock.patch.object(speed, 'Path') as path, mock.patch.object(speed.subprocess, 'run') as run:
+            path.return_value.read_text.return_value = 'TRANSPORT=backhaul\n'
+            self.assertFalse(speed.bootstrap({'bootstrap': True}, False))
+            path.return_value.write_text.assert_not_called()
+            run.assert_not_called()
+
+    def test_bootstrap_validates_then_only_gracefully_reloads_haproxy(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            relay = root / 'relay.conf'; relay.write_text('TRANSPORT=backhaul\n')
+            haproxy = root / 'haproxy.cfg'; haproxy.write_text('old config\n')
+            def mapped(value):
+                return {'/etc/isaho-relay.conf': relay, '/etc/haproxy/haproxy.cfg': haproxy}.get(str(value), Path(value))
+            with mock.patch.object(speed, 'Path', side_effect=mapped), mock.patch.object(speed.subprocess, 'check_output', return_value='new config\n'), mock.patch.object(speed.subprocess, 'run') as run:
+                self.assertTrue(speed.bootstrap({'bootstrap': True, 'state_dir': directory}, True))
+                self.assertIn('SPEED_AUTO=1', relay.read_text())
+                self.assertEqual('new config\n', haproxy.read_text())
+                self.assertEqual(['systemctl', 'reload', 'haproxy'], run.call_args_list[-1].args[0])
+
+    def test_failed_bootstrap_preserves_working_config(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);relay=root/'relay.conf';relay.write_text('TRANSPORT=backhaul\n')
+            haproxy=root/'haproxy.cfg';haproxy.write_text('old config\n')
+            def mapped(value):
+                return {'/etc/isaho-relay.conf': relay, '/etc/haproxy/haproxy.cfg': haproxy}.get(str(value), Path(value))
+            with mock.patch.object(speed, 'Path', side_effect=mapped), mock.patch.object(speed.subprocess, 'check_output', return_value='invalid\n'), mock.patch.object(speed.subprocess, 'run', side_effect=RuntimeError('validation failed')):
+                with self.assertRaises(RuntimeError):speed.bootstrap({'bootstrap': True, 'state_dir': directory}, True)
+            self.assertEqual('TRANSPORT=backhaul\n', relay.read_text())
+            self.assertEqual('old config\n', haproxy.read_text())
+
     def test_one_success_never_promotes_an_unproven_path(self):
         paths = [{'name': 'wg_data_1'}]
         state = {'samples': {'wg_data_1': [{'time': 100, 'ok': True, 'mbps': 100}]}}
