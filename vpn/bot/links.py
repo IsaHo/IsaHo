@@ -100,8 +100,7 @@ def route_entries(u) -> list:
                 # Reality kept on localhost; a public port forwards into it (nft decides who may knock).
                 links.append((f"node:{n['name']}", reality_link(u, n["ip"], nodes.reality_proxy_port(n), f"{n['name']}-Reality")))
             if nodes.has_cdn(n):
-                for i, d in enumerate(nodes.cdn_domains(n)):
-                    key = f"cdn:{n['name']}" if i == 0 else f"cdn:{n['name']}:{d}"
+                for i, (key, d) in enumerate(nodes.cdn_routes(n)):
                     tag = f"{n['name']}-CDN" if i == 0 else f"{n['name']}-CDN-{d.split('.')[0]}"
                     links.append((key, cdn_link(u, d, tag, node_cdn_port(n))))
     return links
