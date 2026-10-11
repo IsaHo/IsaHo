@@ -66,6 +66,18 @@ class ManagedTransportTests(unittest.TestCase):
         self.assertTrue(rows[1].endswith(' backup'))
         self.assertNotIn('shutdown-sessions', transport.render(config))
 
+    def test_adaptive_only_opt_in_runtime_and_weighted_rotation(self):
+        config = self.config()
+        config['BH_DATA_ENDPOINTS'] += ',127.0.0.1:13005'
+        config['BH_BACKUP_ENDPOINTS'] = '127.0.0.1:13005'
+        config['SPEED_AUTO'] = '1'
+        output = transport.render(config)
+        self.assertIn('stats socket /run/isaho-speed.sock mode 600 level admin', output)
+        self.assertIn('balance roundrobin', output)
+        self.assertIn('weight 200', output)
+        self.assertNotIn(' backup', output)
+        self.assertNotIn('shutdown-sessions', output)
+
     def test_backup_list_cannot_remove_every_primary_or_reference_unknown_path(self):
         for value in ('127.0.0.1:13001', '127.0.0.1:9999', '91.107.160.49:443'):
             config = self.config(); config['BH_BACKUP_ENDPOINTS'] = value

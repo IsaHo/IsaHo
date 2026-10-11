@@ -5,6 +5,7 @@ import logging
 import os
 import tempfile
 import time
+import uuid
 
 import db
 import identity
@@ -38,17 +39,24 @@ last_rate = 0.0  # users' bytes/s over the last stats interval
 _last_flush = 0.0
 
 
-def _clients(users, flow: str = "") -> list:
+def _clients(users, flow: str = "", include_probe: bool = False) -> list:
     out = []
     for u in users:
         c = {"id": u.uuid, "email": u.name, "level": 0}
         if flow:
             c["flow"] = flow
         out.append(c)
+    probe = db.get_setting('relay_speed_uuid') if include_probe else ''
+    if probe:
+        probe = str(uuid.UUID(probe))
+        client = {'id': probe, 'email': '__isaho_speed_probe__', 'level': 0}
+        if flow:
+            client['flow'] = flow
+        out.append(client)
     return out
 
 
-def _inbounds(users, split=None, cert=None, key=None) -> list:
+def _inbounds(users, split=None, cert=None, key=None, include_probe=False) -> list:
     """split/cert/key default to this server; nodes (see nodes.py) pass their own."""
     split = split_relay_inbound() if split is None else split
     cert, key = cert or cfg.cert_file, key or cfg.key_file
@@ -59,7 +67,7 @@ def _inbounds(users, split=None, cert=None, key=None) -> list:
             "listen": "0.0.0.0",
             "port": cfg.reality_port,
             "protocol": "vless",
-            "settings": {"clients": _clients(users, "xtls-rprx-vision"), "decryption": "none"},
+            "settings": {"clients": _clients(users, "xtls-rprx-vision", include_probe), "decryption": "none"},
             "streamSettings": {
                 "network": "tcp",
                 "security": "reality",
@@ -82,7 +90,7 @@ def _inbounds(users, split=None, cert=None, key=None) -> list:
             "listen": "0.0.0.0",
             "port": cfg.cdn_port,
             "protocol": "vless",
-            "settings": {"clients": _clients(users), "decryption": "none"},
+            "settings": {"clients": _clients(users, include_probe=include_probe), "decryption": "none"},
             "streamSettings": {
                 "network": "xhttp",
                 "security": "tls",
@@ -110,8 +118,8 @@ def build_config(users, node: bool = False) -> dict:
     """node=True builds the config for a secondary foreign server (no relay split, its own cert)."""
     api_host, api_port = cfg.api_addr.rsplit(":", 1)
     split = False if node else split_relay_inbound()
-    inbounds = (_inbounds(users, split=False, cert="/etc/isaho-node/cert.pem", key="/etc/isaho-node/key.pem")
-                if node else _inbounds(users))
+    inbounds = (_inbounds(users, split=False, cert="/etc/isaho-node/cert.pem", key="/etc/isaho-node/key.pem", include_probe=True)
+                if node else _inbounds(users, include_probe=True))
     return {
         # the access log is only useful (and only kept) when relays pass real client IPs
         "log": {"loglevel": "warning", "access": ACCESS_LOG if split else "none"},

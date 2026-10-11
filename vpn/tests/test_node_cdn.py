@@ -19,6 +19,37 @@ import routing
 
 
 class PrivateNodeCDNTests(unittest.TestCase):
+    def test_monitor_credential_is_not_readded_during_customer_hot_add(self):
+        import xray
+        db.set_setting('relay_speed_uuid', '00000000-0000-0000-0000-000000000099')
+        for inbound in xray._inbounds([self.user]):
+            self.assertEqual(['probe'], [u['email'] for u in inbound['settings']['clients']])
+        for inbound in xray.build_config([self.user], node=True)['inbounds']:
+            if inbound['protocol'] == 'vless':
+                self.assertEqual(['probe', '__isaho_speed_probe__'],
+                                 [u['email'] for u in inbound['settings']['clients']])
+
+    def test_monitor_does_not_bill_customer_usage(self):
+        db.add_traffic({'__isaho_speed_probe__': (100, 200)})
+        self.assertEqual(0, db.usage_since('2000-01-01'))
+
+    def test_paused_relay_is_not_an_active_failure_and_labels_remain_stable(self):
+        db.set_setting('relays', '192.0.2.1:443,192.0.2.3:443,192.0.2.4:443')
+        db.set_setting('routing-paused:relay:192.0.2.3', '1')
+        expected = health._expected_paths()
+        self.assertFalse(any(key.startswith('relay:192.0.2.3:') for key in expected))
+        self.assertTrue(expected['relay:192.0.2.4:vpn'][0].startswith('IR3'))
+
+    def test_optional_diagnostics_not_in_customer_health(self):
+        db.set_setting('link_types', 'relay')
+        paths = health.customer_paths()
+        self.assertIn('relay:192.0.2.1:vpn', paths)
+        self.assertNotIn('relay:192.0.2.1:main', paths)
+        self.assertNotIn('relay:192.0.2.1:cdn:DE2', paths)
+        self.assertIn('relay:192.0.2.1:cdn:DE2', health._expected_paths())
+        db.set_setting('link_types', 'node')
+        self.assertIn('relay:192.0.2.1:cdn:DE2', health.customer_paths())
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.old_cfg = db.cfg

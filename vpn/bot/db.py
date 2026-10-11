@@ -216,6 +216,8 @@ def add_traffic(stats: dict) -> None:
     today = time.strftime("%Y-%m-%d")
     with connect() as c:
         for name, (up, down) in stats.items():
+            if name == '__isaho_speed_probe__':
+                continue  # Technical monitoring is not a customer's billed usage.
             c.execute("UPDATE users SET up=up+?, down=down+? WHERE name=?", (up, down, name))
             c.execute("INSERT INTO usage_daily (day, name, bytes) VALUES (?, ?, ?) "
                       "ON CONFLICT(day, name) DO UPDATE SET bytes=bytes+excluded.bytes", (today, name, up + down))

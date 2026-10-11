@@ -64,15 +64,18 @@ def render(config):
     prefix = "WG" if config["TRANSPORT"] == "wireguard" else "BH"
     backups = {endpoint(value, config["TRANSPORT"] == "backhaul") for value in
                config.get(prefix + "_BACKUP_ENDPOINTS", "").split(",") if value}
-    rows = ["global", "    log /dev/log local0 warning", "    maxconn 50000", "",
+    adaptive = config.get('SPEED_AUTO') == '1'
+    rows = ["global", "    log /dev/log local0 warning", "    maxconn 50000",
+            *(["    stats socket /run/isaho-speed.sock mode 600 level admin"] if adaptive else []), "",
             "defaults", "    mode tcp", "    log global", "    timeout connect 5s",
             "    timeout client 2h", "    timeout server 2h", "    option tcpka", "",
             "frontend vpn", "    bind :443", "    default_backend tunnels", "",
-            "backend tunnels", "    balance leastconn", "    option ssl-hello-chk"]
+            "backend tunnels", "    balance " + ('roundrobin' if adaptive else 'leastconn'), "    option ssl-hello-chk"]
     # Node Reality sockets do not accept PROXY headers. Existing connections are allowed to
     # drain on transient health failures instead of terminating every user's session.
     rows += [f"    server wg_data_{index} {host}:{port} check inter 5s fall 3 rise 2"
-             + (" backup" if (host, port) in backups else "")
+             + (f" weight {200 if index == 1 else 1}" if adaptive else
+                (" backup" if (host, port) in backups else ""))
              for index, (host, port) in enumerate(data, 1)]
     rows += ["", "frontend sub", "    bind :2096", "    default_backend sub", "",
              "backend sub", "    option httpchk GET /", "    http-check expect status 404",
