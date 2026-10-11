@@ -17,6 +17,24 @@ spec.loader.exec_module(transport)
 
 
 class ManagedTransportTests(unittest.TestCase):
+    def test_adaptive_backup_stays_backup(self):
+        config = self.config();config['SPEED_AUTO'] = '1'
+        config['BH_DATA_ENDPOINTS'] += ',127.0.0.1:12011'
+        config['SPEED_BACKUP_ENDPOINTS'] = '127.0.0.1:12011'
+        rows = [l for l in transport.render(config).splitlines() if 'server wg_data_' in l]
+        self.assertNotIn('backup', rows[0]);self.assertTrue(rows[1].endswith(' backup'))
+
+    def test_partial_failure_is_available_but_not_fully_healthy(self):
+        config = self.config();config['SPEED_AUTO'] = '1'
+        with mock.patch.object(transport.subprocess, 'run', return_value=subprocess.CompletedProcess([], 1)), mock.patch.object(transport.socket, 'create_connection'), mock.patch.object(transport.http.client, 'HTTPConnection', side_effect=OSError), mock.patch.object(transport, 'haproxy_data_up', return_value=1):
+            result = transport.status(config)
+        self.assertTrue(result['transport_available']);self.assertFalse(result['transport_healthy'])
+
+    def test_missing_runtime_check_is_unknown_not_whole_outage(self):
+        config = self.config();config['SPEED_AUTO'] = '1'
+        with mock.patch.object(transport.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0)), mock.patch.object(transport.socket, 'create_connection'), mock.patch.object(transport.http.client, 'HTTPConnection'), mock.patch.object(transport, 'haproxy_data_up', return_value=None):
+            self.assertIsNone(transport.status(config)['transport_available'])
+
     def config(self, mode='backhaul'):
         return {'TRANSPORT': mode, 'PUBLIC_IP': '87.107.150.158',
                 'BH_SERVICES': 'isaho-backhaul-de2,isaho-backhaul-control',

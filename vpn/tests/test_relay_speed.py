@@ -10,6 +10,10 @@ spec.loader.exec_module(speed)
 
 
 class SpeedTests(unittest.TestCase):
+    def test_all_backup_paths_are_rejected(self):
+        with self.assertRaises(ValueError):
+            speed.validate({'paths': [{'name': 'wg_data_1', 'port': 13021, 'backup': True}]})
+
     def test_bootstrap_waits_without_writing_or_reloading(self):
         with mock.patch.object(speed, 'Path') as path, mock.patch.object(speed.subprocess, 'run') as run:
             path.return_value.read_text.return_value = 'TRANSPORT=backhaul\n'
