@@ -126,6 +126,53 @@ def save(file, state):
     os.replace(tmp, file)
 
 
+def bootstrap(config, ready):
+    """Observe until every candidate is proved; then one validated graceful reload."""
+    if not config.get('bootstrap'):
+        return True
+    file = Path('/etc/isaho-relay.conf')
+    old = file.read_text()
+    if 'SPEED_AUTO=1' in old.splitlines():
+        return True
+    if not ready:
+        return False
+    helper = '/usr/local/lib/isaho/relay-wireguard.py'
+    haproxy = Path('/etc/haproxy/haproxy.cfg')
+    previous = haproxy.read_text()
+    stamp = str(int(time.time()))
+    directory = Path(config['state_dir'])
+    for name, text in [('relay.before-auto-', old), ('haproxy.before-auto-', previous)]:
+        backup = directory / (name + stamp)
+        backup.write_text(text)
+        backup.chmod(0o600)
+    new = '\n'.join(line for line in old.splitlines() if not line.startswith('SPEED_AUTO=')) + '\nSPEED_AUTO=1\n'
+    tmp = haproxy.with_suffix('.speed-new')
+    try:
+        file.write_text(new)
+        file.chmod(0o600)
+        rendered = subprocess.check_output(['python3', helper, 'render', '--check'], text=True, timeout=20)
+        tmp.write_text(rendered)
+        subprocess.run(['haproxy', '-c', '-f', str(tmp)], check=True, timeout=10,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if haproxy.read_text() != previous:
+            raise RuntimeError('concurrent HAProxy edit')
+        os.replace(tmp, haproxy)
+        subprocess.run(['systemctl', 'reload', 'haproxy'], check=True, timeout=20,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        if file.read_text() == new:
+            file.write_text(old)
+            file.chmod(0o600)
+        # Never overwrite another actor's config when validation detected a race.
+        if 'rendered' in locals() and haproxy.read_text() == rendered:
+            haproxy.write_text(previous)
+        raise
+    finally:
+        if tmp.exists():
+            tmp.unlink()
+    return True
+
+
 def run(config, apply=False, warmup=False):
     paths = validate(config)
     directory = Path(config['state_dir'])
@@ -137,6 +184,7 @@ def run(config, apply=False, warmup=False):
             return {'skipped': 'already running'}
         file = directory / 'state.json'
         state = json.loads(file.read_text()) if file.exists() else {'samples': {}, 'preferred': paths[0]['name']}
+        state.setdefault('applied_preferred', paths[0]['name'])
         # Allow the existing route to keep serving; never benchmark heavily on a busy relay.
         if os.getloadavg()[0] > 1.8 * (os.cpu_count() or 1):
             return {'skipped': 'CPU load', 'preferred': state.get('preferred')}
@@ -156,22 +204,25 @@ def run(config, apply=False, warmup=False):
         state['cursor'] = (int(state.get('cursor', 0)) + 1) % len(paths)
         now = int(time.time())
         measured = scores(state, paths, now)
-        preferred, changed = choose(state, measured, available, now)
-        if changed:
-            state['switched_at'] = now
+        preferred, changed = choose({**state, 'preferred': state['applied_preferred']}, measured, available, now)
         state['preferred'] = preferred
         weights = plan(preferred, measured, [p['name'] for p in paths])
-        if apply and measured:
+        activated = bool(apply and measured and bootstrap(config, set(measured) == {p['name'] for p in paths}))
+        if activated:
             # Raise preferred paths before reducing others. No session shutdown commands.
             for name in sorted(weights, key=weights.get, reverse=True):
                 result = runtime(config['socket'], f'set server tunnels/{name} weight {weights[name]}')
                 if result.strip():
                     raise RuntimeError('HAProxy rejected weight update')
+            state['applied_preferred'] = preferred
+            if changed:
+                state['switched_at'] = now
         state['updated_at'] = now
         state['weights'] = weights
         save(file, state)
         return {'preferred': preferred, 'mbps': measured, 'weights': weights,
-                'applied': bool(apply and measured), 'sampled': [p['name'] for p in candidates]}
+                'applied': activated, 'sampled': [p['name'] for p in candidates],
+                'bootstrap_pending': bool(apply and not activated)}
 
 
 if __name__ == '__main__':

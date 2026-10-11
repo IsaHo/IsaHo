@@ -107,7 +107,7 @@ After=haproxy.service network-online.target
 [Service]
 Type=oneshot
 ExecStart=/usr/bin/python3 /usr/local/lib/isaho/relay-speed.py --apply
-TimeoutStartSec=35
+TimeoutStartSec=70
 Nice=15
 CPUWeight=10
 IOWeight=10
@@ -115,7 +115,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=true
 ProtectSystem=strict
-ReadWritePaths=/var/lib/isaho-speed
+ReadWritePaths=/var/lib/isaho-speed /etc/isaho-relay.conf /etc/haproxy
 SPEED_UNIT
             cat >/etc/systemd/system/isaho-speed.timer <<'SPEED_TIMER'
 [Unit]
