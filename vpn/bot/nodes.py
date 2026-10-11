@@ -77,6 +77,13 @@ def cdn_domains(node: dict) -> list:
     return [d.strip() for d in (node.get("domain") or "").split(",") if d.strip()]
 
 
+def cdn_routes(node: dict) -> list[tuple[str, str]]:
+    """Stable per-host route keys shared by links, Iranian probes and routing."""
+    name = str(node["name"])
+    return [(f"cdn:{name}" if index == 0 else f"cdn:{name}:{domain}", domain)
+            for index, domain in enumerate(cdn_domains(node))]
+
+
 def reality_proxy_port(node: dict) -> int:
     """Public port that forwards into this node's loopback Reality. 0 means not published."""
     try:

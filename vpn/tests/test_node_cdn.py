@@ -121,6 +121,36 @@ class PrivateNodeCDNTests(unittest.TestCase):
         self.assertEqual([], nodes.cdn_domains({"domain": ""}))
         self.assertEqual([], nodes.cdn_domains({}))
 
+    def test_alias_probes_use_individual_sni_and_match_published_keys(self):
+        nodes.save([{**self.node, "domain": "vpn.example.test, m.alt.test"}])
+        entries = dict(links.route_entries(self.user))
+        probes = {key: link for key, link in health.public_probe_links(self.user).items()
+                  if key.startswith("cdn:")}
+        self.assertEqual(set(entries), set(probes))
+        for key, link in probes.items():
+            query = parse_qs(urlsplit(link).query)
+            self.assertEqual([urlsplit(entries[key]).hostname], query["sni"])
+            self.assertNotIn(",", query["sni"][0])
+            self.assertIn(key, routing.catalog())
+
+    def test_alias_health_and_routing_are_independent(self):
+        nodes.save([{**self.node, "domain": "vpn.example.test,m.alt.test"}])
+        now = int(time.time()) - 120
+        for offset in (0, 30, 60):
+            health.ingest_relay_result({"ip": "192.0.2.1", "probe_result": {
+                "checked_at": now + offset, "paths": {
+                    "cdn:DE2": {"ok": False, "latency_ms": 5000},
+                    "cdn:DE2:m.alt.test": {"ok": True, "latency_ms": 200},
+                    "cdn:DE2:unconfigured.test": {"ok": True, "latency_ms": 1},
+                }}})
+        states = routing.states()
+        self.assertEqual("down", states["cdn:DE2"]["state"])
+        self.assertEqual("healthy", states["cdn:DE2:m.alt.test"]["state"])
+        self.assertEqual([], healthdb.history("relay:192.0.2.1:cdn:DE2:unconfigured.test"))
+        db.set_setting("routing_mode", "hide")
+        self.assertEqual(["cdn:DE2:m.alt.test"],
+                         [key for key, _ in routing.choose(links.route_entries(self.user))])
+
     def test_private_node_with_reality_proxy_port_publishes_reality_link(self):
         nodes.save([{**self.node, "reality_proxy_port": 8443}])
         entries = links.route_entries(self.user)

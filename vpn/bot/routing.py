@@ -35,7 +35,9 @@ def catalog():
         routes[f"node:{name}"] = (f"Reality {name}", [f"relay:{ip}:public:{name}" for ip in sources])
     for node in nodes.cdn_nodes():
         name = node["name"]
-        routes[f"cdn:{name}"] = (f"CDN {name}", [f"relay:{ip}:cdn:{name}" for ip in sources])
+        for index, (key, domain) in enumerate(nodes.cdn_routes(node)):
+            label = f"CDN {name}" + (f" · {domain}" if index else "")
+            routes[key] = (label, [f"relay:{ip}:{key}" for ip in sources])
     return routes
 
 
