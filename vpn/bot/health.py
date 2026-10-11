@@ -422,6 +422,8 @@ def _expected_paths() -> dict[str, tuple[str, str]]:
         else {}
     )
     for index, (host, _) in enumerate(links.relays(), 1):
+        if db.get_setting(f'routing-paused:relay:{host}') == '1':
+            continue  # Deliberately withdrawn relays are not active service failures.
         paths[f"relay:{host}:vpn"] = (f"IR{index} · اتصال واقعی از ایران", "relay")
         paths[f"relay:{host}:sub"] = (f"IR{index} · دریافت سابسکریپشن", "sub")
         paths[f"relay:{host}:cdn"] = (f"IR{index} · مسیر CDN از ایران", "cdn")
@@ -446,13 +448,32 @@ def current_checks() -> list[healthdb.Check]:
     return [row for row in healthdb.latest() if row.path_key in expected]
 
 
+def customer_paths() -> dict[str, tuple[str, str]]:
+    """Actual published ingress/control paths, not optional direct/CDN experiments."""
+    expected = _expected_paths()
+    result = {}
+    enabled = links.enabled_types()
+    for key, value in expected.items():
+        if not key.startswith('relay:'):
+            continue
+        if key.endswith((':vpn', ':sub')) or ':node:' in key:
+            result[key] = value
+        elif (('cdn' in enabled and key.endswith(':cdn')) or
+              ({'cdn', 'node'} & enabled and ':cdn:' in key)):
+            result[key] = value
+        elif 'node' in enabled and ':public:' in key:
+            result[key] = value
+        elif 'reality' in enabled and key.endswith(':main'):
+            result[key] = value
+    return result
+
+
 def overview() -> tuple[str, object]:
     rows = current_checks()
     expected = _expected_paths()
-    customer_expected = {
-        key: meta for key, meta in expected.items() if key.startswith("relay:")
-    }
-    customer_rows = [row for row in rows if row.origin == "iran"]
+    customer_expected = customer_paths()
+    customer_rows = [row for row in rows if row.origin == "iran" and row.path_key in customer_expected]
+    diagnostic_rows = [row for row in rows if row.origin == 'iran' and row.path_key not in customer_expected]
     control_rows = [row for row in rows if row.origin != "iran"]
     present = {row.path_key for row in customer_rows}
     missing = [
@@ -500,6 +521,11 @@ def overview() -> tuple[str, object]:
             )
         for _, label, _ in missing:
             lines.append(f"⚪️ {html.escape(label)} — منتظر اولین تست")
+        if diagnostic_rows:
+            lines += ['', '🔬 <b>مسیرهای تشخیصی؛ خارج از مسیر فعال کاربران</b>']
+            for row in diagnostic_rows:
+                state_icon, state = _status(row)
+                lines.append(f'{state_icon} {html.escape(row.label)} — {state} · {_age(row.checked_at)}')
         if control_rows:
             lines += ["", "🖥 <b>کنترل داخلی سرور فعال</b>"]
             for row in control_rows:

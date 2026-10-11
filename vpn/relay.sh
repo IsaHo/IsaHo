@@ -92,6 +92,44 @@ if [[ ${1:-} == ssh || ${1:-} == wireguard || ${1:-} == backhaul ]]; then
         fi
         install -m 755 "$task_helper" /usr/local/lib/isaho/relay-wireguard.py
         python3 "$task_helper" set-version "${ISAHO_REF:-manual}"
+        if grep -qx 'SPEED_AUTO=1' /etc/isaho-relay.conf && [[ -r /etc/isaho-speed.json ]]; then
+            if [[ -f $task_source_dir/relay-speed.py ]]; then
+                install -m 755 "$task_source_dir/relay-speed.py" /usr/local/lib/isaho/relay-speed.py
+            else
+                curl -fsSL --connect-timeout 10 --max-time 60 "https://raw.githubusercontent.com/IsaHo/IsaHo/${ISAHO_REF:-main}/vpn/relay-speed.py" -o "$task_helper"
+                install -m 755 "$task_helper" /usr/local/lib/isaho/relay-speed.py
+            fi
+            install -d -m 700 /var/lib/isaho-speed
+            cat >/etc/systemd/system/isaho-speed.service <<'SPEED_UNIT'
+[Unit]
+Description=IsaHo rotating bounded speed samples and runtime weights
+After=haproxy.service network-online.target
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /usr/local/lib/isaho/relay-speed.py --apply
+TimeoutStartSec=35
+Nice=15
+CPUWeight=10
+IOWeight=10
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/isaho-speed
+SPEED_UNIT
+            cat >/etc/systemd/system/isaho-speed.timer <<'SPEED_TIMER'
+[Unit]
+Description=IsaHo sample one foreign path every two minutes
+[Timer]
+OnBootSec=90s
+OnUnitActiveSec=2min
+RandomizedDelaySec=20s
+[Install]
+WantedBy=timers.target
+SPEED_TIMER
+            systemctl daemon-reload
+            systemctl enable --now isaho-speed.timer >/dev/null
+        fi
         rm -f "$task_helper"
         trap - EXIT
     else

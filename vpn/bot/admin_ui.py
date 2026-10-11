@@ -23,11 +23,11 @@ router = Router()
 
 
 def _iran_health() -> tuple[int, int]:
-    expected = {key for key in health._expected_paths() if key.startswith("relay:")}
+    expected = set(health.customer_paths())
     fresh = [
         row
         for row in health.current_checks()
-        if row.origin == "iran" and time.time() - row.checked_at <= health.FRESH
+        if row.origin == "iran" and row.path_key in expected and time.time() - row.checked_at <= health.FRESH
     ]
     return sum(bool(row.ok) for row in fresh), len(expected)
 
@@ -46,7 +46,10 @@ def command_center() -> tuple[str, object]:
     tickets = supportdb.counts()
     open_tickets = sum(tickets.get(key, 0) for key in supportdb.OPEN_STATUSES)
     healthy, paths = _iran_health()
-    open_incidents = len(healthdb.incidents(100, active_only=True))
+    incidents = healthdb.incidents(100, active_only=True)
+    active_paths = set(health.customer_paths())
+    open_incidents = sum(row.path_key in active_paths for row in incidents)
+    diagnostic_incidents = len(incidents) - open_incidents
     path_text = f"{healthy}/{paths}" if paths else "در حال جمع‌آوری"
     text = (
         f"🏠 <b>مرکز فرماندهی {html.escape(cfg.brand)}</b>\n"
@@ -54,8 +57,9 @@ def command_center() -> tuple[str, object]:
         f"👥 مشتریان: <b>{len(users)}</b> · فعال {active} · نزدیک پایان {expiring}\n"
         f"🛍 سفارش‌های منتظر: <b>{len(shopdb.pending_orders())}</b>\n"
         f"🎫 تیکت‌های باز: <b>{open_tickets}</b>\n"
-        f"🇮🇷 مسیرهای سالم از ایران: <b>{path_text}</b>\n"
-        f"🚨 رخدادهای باز: <b>{open_incidents}</b>\n\n"
+        f"🇮🇷 مسیرهای فعال سالم از ایران: <b>{path_text}</b>\n"
+        f"🚨 رخداد مسیرهای فعال: <b>{open_incidents}</b>\n"
+        f"🔬 رخدادهای تشخیصی/قدیمی: <b>{diagnostic_incidents}</b>\n\n"
         "یک بخش را انتخاب کنید؛ کارهای حساس قبل از اجرا تأیید می‌خواهند."
     )
     keyboard = h.ikb(
