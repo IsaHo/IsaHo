@@ -42,6 +42,10 @@ def validate(config):
             raise ValueError('unmanaged server')
         if type(path['port']) is not int or not 1024 <= path['port'] <= 65535:
             raise ValueError('invalid loopback port')
+        if type(path.get('backup', False)) is not bool:
+            raise ValueError('invalid backup flag')
+    if all(p.get('backup') for p in paths):
+        raise ValueError('at least one primary is required')
     if config.get('socket') != '/run/isaho-speed.sock':
         raise ValueError('unexpected runtime socket')
     if config['outbound']['protocol'] != 'vless':
@@ -204,9 +208,11 @@ def run(config, apply=False, warmup=False):
         state['cursor'] = (int(state.get('cursor', 0)) + 1) % len(paths)
         now = int(time.time())
         measured = scores(state, paths, now)
-        preferred, changed = choose({**state, 'preferred': state['applied_preferred']}, measured, available, now)
+        primary_scores = {p['name']: measured[p['name']] for p in paths
+                          if not p.get('backup') and p['name'] in measured}
+        preferred, changed = choose({**state, 'preferred': state['applied_preferred']}, primary_scores, available, now)
         state['preferred'] = preferred
-        weights = plan(preferred, measured, [p['name'] for p in paths])
+        weights = plan(preferred, primary_scores, [p['name'] for p in paths])
         activated = bool(apply and measured and bootstrap(config, set(measured) == {p['name'] for p in paths}))
         if activated:
             # Raise preferred paths before reducing others. No session shutdown commands.

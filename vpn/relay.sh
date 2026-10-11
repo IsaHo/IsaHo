@@ -315,6 +315,7 @@ def transport_status(config):
         return json.loads(result.stdout)
     except (OSError, ValueError, subprocess.SubprocessError):
         return {"transport": config.get("TRANSPORT"), "transport_healthy": False,
+                "transport_available": None,
                 "tunnels_up": 0, "tunnels_total": 1, "node_tunnels_up": 0, "node_tunnels_total": 0}
 
 def update_command(config, ref):

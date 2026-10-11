@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Manage HAProxy for provisioned WireGuard or verified-TLS Backhaul paths."""
 import argparse
+import csv
 import http.client
+import io
 import ipaddress
 import json
 import os
@@ -65,6 +67,10 @@ def render(config):
     backups = {endpoint(value, config["TRANSPORT"] == "backhaul") for value in
                config.get(prefix + "_BACKUP_ENDPOINTS", "").split(",") if value}
     adaptive = config.get('SPEED_AUTO') == '1'
+    speed_backups = {endpoint(value, config['TRANSPORT'] == 'backhaul') for value in
+                     config.get('SPEED_BACKUP_ENDPOINTS', '').split(',') if value}
+    if not speed_backups.issubset(set(data)) or len(speed_backups) == len(data):
+        raise ValueError('adaptive backups must leave a known primary')
     rows = ["global", "    log /dev/log local0 warning", "    maxconn 50000",
             *(["    stats socket /run/isaho-speed.sock mode 600 level admin"] if adaptive else []), "",
             "defaults", "    mode tcp", "    log global", "    timeout connect 5s",
@@ -74,7 +80,7 @@ def render(config):
     # Node Reality sockets do not accept PROXY headers. Existing connections are allowed to
     # drain on transient health failures instead of terminating every user's session.
     rows += [f"    server wg_data_{index} {host}:{port} check inter 5s fall 3 rise 2"
-             + (f" weight {200 if index == 1 else 1}" if adaptive else
+             + (f" weight {200 if index == 1 else 1}" + (' backup' if (host, port) in speed_backups else '') if adaptive else
                 (" backup" if (host, port) in backups else ""))
              for index, (host, port) in enumerate(data, 1)]
     rows += ["", "frontend sub", "    bind :2096", "    default_backend sub", "",
@@ -94,6 +100,26 @@ def check_routes(config):
             raise ValueError("private endpoint is not routed through the configured WireGuard interface")
         with socket.create_connection((host, port), timeout=3):
             pass
+
+
+def haproxy_data_up(count):
+    """TLS checks, not merely an accepting loopback listener; None means unavailable."""
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+            sock.settimeout(2);sock.connect('/run/isaho-speed.sock')
+            sock.sendall(b'show stat\n');sock.shutdown(socket.SHUT_WR)
+            chunks = []
+            while True:
+                part = sock.recv(65536)
+                if not part:break
+                chunks.append(part)
+        rows = list(csv.DictReader(io.StringIO(b''.join(chunks).decode().lstrip('# '))))
+        names = {f'wg_data_{i}' for i in range(1, count + 1)}
+        paths = [r for r in rows if r.get('pxname') == 'tunnels' and r.get('svname') in names]
+        if len(paths) != count:return None
+        return sum(r.get('status', '').startswith('UP') for r in paths)
+    except (OSError, ValueError, UnicodeError):
+        return None
 
 
 def status(config, now=None):
@@ -124,6 +150,7 @@ def status(config, now=None):
             return False
 
     data_up = sum(reachable(target) for target in data)
+    checked_up = haproxy_data_up(len(data)) if config.get('SPEED_AUTO') == '1' else None
     connection = None
     try:
         connection = http.client.HTTPConnection(*control, timeout=3)
@@ -145,6 +172,9 @@ def status(config, now=None):
             "tunnels_total": total, "tunnels_up": up,
             "node_tunnels_total": 0, "node_tunnels_up": 0,
             "transport_healthy": up == total and data_up == len(data) and control_up,
+            "transport_available": checked_up > 0 if checked_up is not None else
+                (None if config.get('SPEED_AUTO') == '1' else up > 0 and data_up > 0),
+            "data_paths_checked_up": checked_up,
             "data_paths_up": data_up, "data_paths_total": len(data), "control_up": control_up}
 
 

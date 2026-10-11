@@ -79,10 +79,25 @@ async def check_users(bot: Bot) -> None:
 _tunnel_seen = {}   # host -> True once we have seen it connected (NAT-style relays never are)
 _tunnel_down = {}   # host -> consecutive checks with zero sessions
 DOWN_AFTER = 2
+_tunnel_report_seen = {}
+_tunnel_unconfirmed = set()
 
 
 async def check_tunnels(bot: Bot) -> None:
     for label, host, _, n in tunnels.status():
+        report = relays.reports.get(host) or {}
+        managed = report.get('transport') in {'wireguard', 'backhaul'}
+        if managed:
+            if not relays.online(host) or ('transport_available' in report and report['transport_available'] is None):
+                if host not in _tunnel_unconfirmed:
+                    await notify_admins(bot, f"🟡 پایش {label} کامل یا تازه نیست؛ وضعیت اتصال کاربران قابل تأیید نیست. ایجنت و مسیر مدیریتی را بررسی کنید.")
+                    _tunnel_unconfirmed.add(host)
+                continue
+            _tunnel_unconfirmed.discard(host)
+            stamp = report.get('seen')
+            if _tunnel_report_seen.get(host) == stamp:
+                continue  # Two reads of one report are not two independent failures.
+            _tunnel_report_seen[host] = stamp
         if n:
             if _tunnel_down.get(host, 0) >= DOWN_AFTER:
                 await notify_admins(bot, f"🟢 تانل {label} (<code>{host}</code>) دوباره وصل شد ({n} اتصال).")
@@ -94,10 +109,9 @@ async def check_tunnels(bot: Bot) -> None:
             continue
         _tunnel_down[host] = _tunnel_down.get(host, 0) + 1
         if _tunnel_down[host] == DOWN_AFTER:
-            managed = (relays.reports.get(host) or {}).get("transport") in {"wireguard", "backhaul"}
             diagnostic = "isaho-agent" if managed else "systemctl status 'isaho-tunnel@*'"
             await notify_admins(bot, f"🔴 تانل {label} (<code>{host}</code>) قطع شد!\n"
-                                     "کاربرانی که از این سرور واسط وصل‌اند الان قطع هستند.\n"
+                                     "در دو بررسی مستقل، مسیر قابل‌دسترس تأیید نشد؛ احتمال اختلال اتصال وجود دارد.\n"
                                      f"روی سرور ایران بررسی کنید: <code>{diagnostic}</code>")
             others = [lb for lb, _, _, k in tunnels.status() if k and lb != label]
             await notify_status(bot, f"⚠️ سرور {label} موقتاً در دسترس نیست و در حال رفع مشکل است."

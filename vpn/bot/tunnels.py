@@ -24,7 +24,8 @@ def status() -> list:
         ips = {_resolve(host)}
         report = relays.reports.get(host) or {}
         if report.get("transport") in {"wireguard", "backhaul"}:
-            count = int(report.get("tunnels_up", 0)) if relays.online(host) and report.get("transport_healthy") else 0
+            available = report.get('transport_available', report.get('transport_healthy'))
+            count = max(1, int(report.get("tunnels_up", 0))) if relays.online(host) and available else 0
             out.append((f"IR{i}", host, port, count))
             continue
         egress = report.get("egress")
