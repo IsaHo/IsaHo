@@ -19,6 +19,23 @@ import routing
 
 
 class PrivateNodeCDNTests(unittest.TestCase):
+    def test_fallback_guard_is_opt_in_stable_and_keeps_clients(self):
+        import xray
+        baseline = nodes.config_for(self.node)
+        guarded = nodes.config_for({**self.node, 'fallback_guard': True})
+        self.assertEqual(guarded, nodes.config_for({**self.node, 'fallback_guard': True}))
+        self.assertEqual(baseline, nodes.config_for({**self.node, 'fallback_guard': 'true'}))
+        for before, after in zip(baseline['inbounds'], guarded['inbounds']):
+            self.assertEqual(before.get('settings'), after.get('settings'))
+            reality = after.get('streamSettings', {}).get('realitySettings')
+            if reality is not None:
+                self.assertGreater(reality['limitFallbackDownload']['bytesPerSec'], 0)
+                del reality['limitFallbackDownload']
+                del reality['limitFallbackUpload']
+        self.assertEqual(baseline, guarded)
+        for inbound in xray.build_config(db.active_users())['inbounds']:
+            self.assertNotIn('limitFallbackDownload', inbound.get('streamSettings', {}).get('realitySettings', {}))
+
     def test_monitor_credential_is_not_readded_during_customer_hot_add(self):
         import xray
         db.set_setting('relay_speed_uuid', '00000000-0000-0000-0000-000000000099')

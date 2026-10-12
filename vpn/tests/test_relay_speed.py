@@ -58,7 +58,39 @@ class SpeedTests(unittest.TestCase):
 
     def test_stale_scores_are_not_used(self):
         state = {'samples': {'wg_data_1': [{'time': 100, 'ok': True, 'mbps': 100}] * 2}}
-        self.assertEqual(speed.scores(state, [{'name': 'wg_data_1'}], 5000), {})
+        self.assertEqual(speed.scores(state, [{'name': 'wg_data_1'}], speed.TTL + 200), {})
+
+    def test_budget_blocks_probes_and_preserves_weights(self):
+        import json
+        with tempfile.TemporaryDirectory() as directory:
+            state = {'samples': {}, 'preferred': 'wg_data_1', 'weights': {'wg_data_1': 200},
+                     'probe_budget': {'day': speed.time.strftime('%Y-%m-%d', speed.time.gmtime()),
+                                      'reserved_bytes': speed.DAILY_BYTES}}
+            file = Path(directory) / 'state.json'
+            file.write_text(json.dumps(state))
+            with mock.patch.object(speed, 'probe') as probe, mock.patch.object(speed, 'runtime') as runtime:
+                result = speed.run({'state_dir': directory, 'socket': '/run/isaho-speed.sock',
+                                    'outbound': {'protocol': 'vless'},
+                                    'paths': [{'name': 'wg_data_1', 'port': 13021}]}, True)
+            self.assertEqual('daily probe budget', result['skipped'])
+            probe.assert_not_called()
+            runtime.assert_not_called()
+            self.assertEqual(state, json.loads(file.read_text()))
+
+    def test_failed_probe_reserves_budget_and_cooldown(self):
+        import json
+        with tempfile.TemporaryDirectory() as directory:
+            config = {'state_dir': directory, 'socket': '/run/isaho-speed.sock',
+                      'outbound': {'protocol': 'vless'},
+                      'paths': [{'name': 'wg_data_1', 'port': 13021}]}
+            with mock.patch.object(speed.os, 'getloadavg', return_value=(0, 0, 0)), \
+                 mock.patch.object(speed, 'runtime', return_value='# pxname,svname,status\ntunnels,wg_data_1,UP\n'), \
+                 mock.patch.object(speed, 'probe', side_effect=OSError) as probe:
+                speed.run(config)
+                self.assertEqual('probe cooldown', speed.run(config)['skipped'])
+                self.assertEqual(1, probe.call_count)
+            state = json.loads((Path(directory) / 'state.json').read_text())
+            self.assertEqual(speed.BYTES, state['probe_budget']['reserved_bytes'])
 
     def test_small_difference_does_not_flap(self):
         self.assertEqual(speed.choose({'preferred': 'a', 'switched_at': 0},

@@ -14,9 +14,11 @@ import subprocess
 import tempfile
 import time
 
-BYTES = 2 * 1024 * 1024
+BYTES = 512 * 1024
 URL = f'https://speed.cloudflare.com/__down?bytes={BYTES}'
-TTL = 3600
+TTL = 10800
+DAILY_BYTES = 128 * 1024 * 1024
+MIN_PROBE_GAP = 300
 
 
 def runtime(path, command):
@@ -189,6 +191,15 @@ def run(config, apply=False, warmup=False):
         file = directory / 'state.json'
         state = json.loads(file.read_text()) if file.exists() else {'samples': {}, 'preferred': paths[0]['name']}
         state.setdefault('applied_preferred', paths[0]['name'])
+        now = int(time.time())
+        budget = state.setdefault('probe_budget', {})
+        day = time.strftime('%Y-%m-%d', time.gmtime(now))
+        if budget.get('day') != day:
+            budget = state['probe_budget'] = {'day': day, 'reserved_bytes': 0}
+        if now - budget.get('last_probe', 0) < MIN_PROBE_GAP:
+            return {'skipped': 'probe cooldown', 'preferred': state.get('preferred')}
+        if budget.get('reserved_bytes', 0) + BYTES > DAILY_BYTES:
+            return {'skipped': 'daily probe budget', 'preferred': state.get('preferred')}
         # Allow the existing route to keep serving; never benchmark heavily on a busy relay.
         if os.getloadavg()[0] > 1.8 * (os.cpu_count() or 1):
             return {'skipped': 'CPU load', 'preferred': state.get('preferred')}
@@ -198,6 +209,12 @@ def run(config, apply=False, warmup=False):
         for path in candidates:
             samples = state['samples'].setdefault(path['name'], [])
             if path['name'] in available:
+                if budget.get('reserved_bytes', 0) + BYTES > DAILY_BYTES:
+                    break
+                # Reserve first: crashes and failed probes still spend the budget.
+                budget['reserved_bytes'] = budget.get('reserved_bytes', 0) + BYTES
+                budget['last_probe'] = now
+                save(file, state)
                 try:
                     samples.append(probe(config, path))
                 except (OSError, ValueError, subprocess.SubprocessError):

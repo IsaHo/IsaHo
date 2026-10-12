@@ -135,7 +135,7 @@ echo "==> Sync agent"
 cat >/usr/local/bin/isaho-node <<'AGENT'
 #!/usr/bin/env python3
 """Pull the Xray config from the bot, apply it if it changed, and push traffic counters."""
-import base64, hashlib, http.client, ipaddress, json, os, re, socket, ssl, subprocess, sys, time, urllib.parse
+import base64, gzip, hashlib, http.client, ipaddress, json, os, re, socket, ssl, subprocess, sys, time, urllib.parse
 
 conf = dict(l.split("=", 1) for l in open("/etc/isaho-node/node.conf").read().split() if "=" in l)
 url = urllib.parse.urlsplit(conf["MAIN"])
@@ -151,12 +151,17 @@ def request(method, path, body=None):
     if hashlib.sha256(c.sock.getpeercert(binary_form=True)).hexdigest() != conf["PIN"]:
         raise SystemExit("main server certificate does not match the pinned fingerprint")
     q = f"{path}?key={urllib.parse.quote(conf['KEY'])}"
+    headers = {"Content-Type": "application/json"}
+    if path == "/node/backup":
+        headers["Accept-Encoding"] = "gzip"
     c.request(method, q, body=json.dumps(body).encode() if body is not None else None,
-              headers={"Content-Type": "application/json"})
+              headers=headers)
     r = c.getresponse()
     data = r.read()
     if r.status != 200:
         raise SystemExit(f"{path}: HTTP {r.status}")
+    if r.getheader("Content-Encoding", "").lower() == "gzip":
+        data = gzip.decompress(data)
     return json.loads(data)
 
 

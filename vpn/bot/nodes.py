@@ -44,6 +44,18 @@ def by_key(key: str):
 
 def config_for(node: dict) -> dict:
     conf = xray.build_config(db.active_users(), node=True)
+    # Explicit per-node rollout; never alter the main server or valid VLESS traffic.
+    if node.get("fallback_guard") is True:
+        seed = hashlib.sha256(str(node.get("ip", node["name"])).encode()).digest()
+        for inbound in conf["inbounds"]:
+            reality = inbound.get("streamSettings", {}).get("realitySettings")
+            if reality is not None:
+                for direction, offset in (("Upload", 0), ("Download", 3)):
+                    reality["limitFallback" + direction] = {
+                        "afterBytes": 65536 + seed[offset] * 256,
+                        "bytesPerSec": 2048 + seed[offset + 1] * 8,
+                        "burstBytesPerSec": 8192 + seed[offset + 2] * 32,
+                    }
     if node.get("private", True):
         for inbound in conf["inbounds"]:
             inbound["listen"] = "127.0.0.1"
