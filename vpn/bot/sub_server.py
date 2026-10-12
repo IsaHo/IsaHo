@@ -89,10 +89,17 @@ async def _node_stats(request: web.Request) -> web.Response:
 
 
 async def _node_backup(request: web.Request) -> web.Response:
+    import gzip
+    import json
     import nodes
     if not nodes.by_key(request.query.get("key", "")):
         raise web.HTTPNotFound()
-    return web.json_response(nodes.standby_bundle())
+    bundle = nodes.standby_bundle()
+    if "gzip" in request.headers.get("Accept-Encoding", "").lower().split(","):
+        return web.Response(body=gzip.compress(json.dumps(bundle).encode()),
+                            content_type="application/json",
+                            headers={"Content-Encoding": "gzip", "Vary": "Accept-Encoding"})
+    return web.json_response(bundle)
 
 
 async def start() -> web.AppRunner:

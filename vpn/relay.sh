@@ -122,7 +122,7 @@ SPEED_UNIT
 Description=IsaHo sample one foreign path every two minutes
 [Timer]
 OnBootSec=90s
-OnUnitActiveSec=2min
+OnUnitActiveSec=5min
 RandomizedDelaySec=20s
 [Install]
 WantedBy=timers.target
