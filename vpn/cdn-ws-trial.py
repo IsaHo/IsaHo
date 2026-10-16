@@ -43,6 +43,18 @@ def public_address(value):
     return str(address)
 
 
+def fetch_ranges():
+    # The marketing site's /ips-v4 can challenge automated requests. This is the
+    # documented public API, not a fallback that weakens the origin allowlist.
+    request = urllib.request.Request('https://api.cloudflare.com/client/v4/ips',
+                                     headers={'User-Agent': 'isaho-cdn-ws-trial/1.0'})
+    with urllib.request.urlopen(request, timeout=15) as response:
+        payload = json.loads(response.read(65536))
+    if payload.get('success') is not True:
+        raise ValueError('Cloudflare IP API unsuccessful')
+    return ranges('\n'.join(payload['result']['ipv4_cidrs']))
+
+
 def firewall(public_ip, networks):
     address = public_address(public_ip)
     networks = ranges('\n'.join(networks))
@@ -139,8 +151,7 @@ def install(public_ip):
     before = run('systemctl', 'show', 'xray', '-p', 'MainPID', '--value').stdout.strip()
     if not before.isdigit() or int(before) == 0:
         raise RuntimeError('customer Xray not running')
-    with urllib.request.urlopen('https://www.cloudflare.com/ips-v4', timeout=15) as response:
-        networks = ranges(response.read(65536).decode())
+    networks = fetch_ranges()
     ROOT.mkdir(mode=0o700)
     (ROOT / 'customer-xray-pid-before').write_text(before)
     created = []
