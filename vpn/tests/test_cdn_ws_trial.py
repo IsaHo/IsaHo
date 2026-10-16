@@ -1,6 +1,8 @@
 import importlib.util
 from pathlib import Path
 import unittest
+import json
+from unittest import mock
 
 spec = importlib.util.spec_from_file_location('cdn_ws_trial', Path(__file__).resolve().parents[1] / 'cdn-ws-trial.py')
 trial = importlib.util.module_from_spec(spec)
@@ -58,3 +60,14 @@ class CDNWebSocketTrialTests(unittest.TestCase):
         for address in ('0.0.0.0', '127.0.0.1', '10.0.0.1', '::1'):
             with self.assertRaises(ValueError):
                 trial.units(address, '/lib/systemd/systemd-socket-proxyd')
+
+    def test_uses_official_public_api_and_validates_success(self):
+        values = ['192.0.%d.0/24' % i for i in range(10)]
+        with mock.patch.object(trial.urllib.request, 'urlopen') as open_url:
+            response = open_url.return_value.__enter__.return_value
+            response.read.return_value = json.dumps({'success': True, 'result': {'ipv4_cidrs': values}}).encode()
+            self.assertEqual(values, trial.fetch_ranges())
+            self.assertEqual('https://api.cloudflare.com/client/v4/ips', open_url.call_args.args[0].full_url)
+            response.read.return_value = b'{"success": false}'
+            with self.assertRaises(ValueError):
+                trial.fetch_ranges()
