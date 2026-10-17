@@ -55,6 +55,14 @@ class PanelBridgeTests(unittest.TestCase):
             with self.assertRaises(tcpanel.PanelUnavailable):
                 tcpanel.read_status(self.config)
 
+    def test_invalid_json_shapes_fail_closed(self):
+        for body in ([], None, {'success': True, 'obj': []},
+                     {'success': True, 'obj': {'xray': 'unexpected'}}):
+            self.connection.getresponse.return_value.read.return_value = json.dumps(body).encode()
+            with mock.patch('tcpanel.http.client.HTTPSConnection', return_value=self.connection):
+                with self.assertRaises(tcpanel.PanelUnavailable):
+                    tcpanel.read_status(self.config)
+
     def test_rejects_world_readable_config(self):
         with mock.patch('tcpanel.Path') as path:
             path.return_value.stat.return_value.st_mode = 0o100644

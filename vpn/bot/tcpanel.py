@@ -63,10 +63,12 @@ def read_status(config):
         if len(body) > 1024 * 1024:
             raise PanelUnavailable('panel response too large')
         result = json.loads(body)
-        if result.get('success') is not True or not isinstance(result.get('obj'), dict):
+        if not isinstance(result, dict) or result.get('success') is not True or not isinstance(result.get('obj'), dict):
             raise PanelUnavailable('invalid panel status')
         obj = result['obj']
         xray = obj.get('xray') or {}
+        if not isinstance(xray, dict):
+            raise PanelUnavailable('invalid panel status')
         state = xray.get('state', 'unknown')
         return {'xray_running': state == 'running', 'uptime': max(0, int(obj.get('uptime') or 0)),
                 'monitor_only': True}
