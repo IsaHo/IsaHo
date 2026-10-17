@@ -128,6 +128,7 @@ def management_view() -> tuple[str, object]:
                     ("💾 داده و اعلان‌ها", "nav:set:data"),
                     ("🛠 نگهداری سیستم", "nav:set:system"),
                 ],
+                [("🖥 TC VPN · پنل وب", "tcp:status")],
                 [("📢 پیام همگانی", "nav:broadcast")],
                 [("🏠 مرکز فرماندهی", "nav:home")],
             ]
