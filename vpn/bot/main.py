@@ -33,6 +33,7 @@ import partners
 import partnerwork
 import sub_server
 import tunnels
+import tcpanel
 import xray
 from config import cfg
 
@@ -292,6 +293,7 @@ async def main() -> None:
     dp.include_router(resilience.router)
     dp.include_router(routing.router)
     dp.include_router(support.router)
+    dp.include_router(tcpanel.router)
     dp.include_router(admin_ui.router)
     dp.include_router(handlers.router)
 
